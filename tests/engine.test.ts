@@ -120,6 +120,17 @@ describe('translate', () => {
     expect(r.status).toBe('done');
   });
 
+  test('re-translating (toolbar "다시 번역") starts over: a new request, and the new text replaces the old', async () => {
+    const first = await translate(job('Hello.', settings()), model());
+    const m = model((req) => ({ text: `[v2]${target(req)}`, finishReason: 'stop' }));
+    const again = await translate(job('Hello.', settings()), m); // no resume record, like a forced translate
+    expect(m.calls).toHaveLength(1);
+    expect(m.calls[0]!.user).not.toContain('[Translation So Far]');
+    expect(recordToText(first)).toBe('[KO]Hello.');
+    expect(recordToText(again)).toBe('[v2]Hello.');
+    expect(again.status).toBe('done');
+  });
+
   test('changed exclude rules make a stale record start over', async () => {
     const r1 = await translate(job('A <status>x</status>', settings()), model());
     const m = model();

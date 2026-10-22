@@ -25,6 +25,7 @@ import {
 } from './shared';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { buildParagraphView } from './display/paragraph-view';
+import { clearTranslations, skipFresh } from './message-ui';
 import { type Completion, recordToText, requestsNeeded, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
@@ -41,6 +42,8 @@ interface ChatMessage {
   content: string;
   extra: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  index_in_chat?: number;
+  name?: string;
 }
 
 // ---- store ----
@@ -139,7 +142,7 @@ async function writeTranslations(chatId: string, messageId: string, change: (mt:
 const jobs = new Map<string, AbortController>();
 const jobKey = (chatId: string, messageId: string) => `${chatId}:${messageId}`;
 
-function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, overrideRecord?: TranslationRecord | null): MessageView {
+function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, overrideRecord?: TranslationRecord | null, position = 0): MessageView {
   const mt = readTranslations(message);
   const record = overrideRecord !== undefined ? overrideRecord : (mt?.entries[sourceHash(message.content)] ?? null);
   return {
@@ -153,13 +156,16 @@ function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, ov
     error: record?.error ?? null,
     hidden: mt?.hidden === true,
     busy: jobs.has(jobKey(chatId, message.id)),
+    index: typeof message.index_in_chat === 'number' ? message.index_in_chat : position,
+    name: typeof message.name === 'string' ? message.name : '',
+    updatedAt: record && record.parts.some((p) => p.trim()) ? record.updatedAt : null,
   };
 }
 
 async function sendChatViews(uid: Uid, chatId: string): Promise<void> {
   const settings = settingsFor(await loadStore(uid), chatId);
   const messages = await getMessages(chatId);
-  send({ type: 'views', chatId, views: messages.map((m) => viewOf(chatId, m, settings)), replace: true }, uid);
+  send({ type: 'views', chatId, views: messages.map((m, i) => viewOf(chatId, m, settings, undefined, i)), replace: true }, uid);
 }
 
 async function sendView(uid: Uid, chatId: string, message: ChatMessage, record?: TranslationRecord | null): Promise<void> {
@@ -235,7 +241,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     if (!message || !message.content.trim()) return;
     const hash = sourceHash(message.content);
     const existing = readTranslations(message)?.entries[hash];
-    if (mode === 'fresh' && existing?.status === 'done' && !options.force) return;
+    if (skipFresh(mode, existing, options.force)) return;
     await sendView(uid, chatId, message);
 
     const source = message.content;
@@ -434,10 +440,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
     }
     case 'delete_translation': {
       jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
-        mt.entries = {};
-        mt.hidden = false;
-      });
+      const updated = await writeTranslations(msg.chatId, msg.messageId, clearTranslations);
       if (updated) await sendView(uid, msg.chatId, updated);
       return;
     }

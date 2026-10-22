@@ -1616,6 +1616,16 @@ ${block("stt-pr-tgt", targetLabel, target)}
 `);
 }
 
+// src/message-ui.ts
+function skipFresh(mode, existing, force) {
+  const status = existing?.status;
+  return mode === "fresh" && status === "done" && !force;
+}
+function clearTranslations(mt) {
+  mt.entries = {};
+  mt.hidden = false;
+}
+
 // src/backend.ts
 var STORE_PATH = "translator.json";
 var MAX_ENTRIES_PER_MESSAGE = 12;
@@ -1699,7 +1709,7 @@ async function writeTranslations(chatId, messageId, change) {
 }
 var jobs = new Map;
 var jobKey = (chatId, messageId) => `${chatId}:${messageId}`;
-function viewOf(chatId, message, settings, overrideRecord) {
+function viewOf(chatId, message, settings, overrideRecord, position = 0) {
   const mt = readTranslations(message);
   const record = overrideRecord !== undefined ? overrideRecord : mt?.entries[sourceHash(message.content)] ?? null;
   return {
@@ -1712,13 +1722,16 @@ function viewOf(chatId, message, settings, overrideRecord) {
     progress: record && record.total > 1 ? { done: record.parts.length, total: record.total } : null,
     error: record?.error ?? null,
     hidden: mt?.hidden === true,
-    busy: jobs.has(jobKey(chatId, message.id))
+    busy: jobs.has(jobKey(chatId, message.id)),
+    index: typeof message.index_in_chat === "number" ? message.index_in_chat : position,
+    name: typeof message.name === "string" ? message.name : "",
+    updatedAt: record && record.parts.some((p) => p.trim()) ? record.updatedAt : null
   };
 }
 async function sendChatViews(uid, chatId) {
   const settings = settingsFor(await loadStore(uid), chatId);
   const messages = await getMessages(chatId);
-  send({ type: "views", chatId, views: messages.map((m) => viewOf(chatId, m, settings)), replace: true }, uid);
+  send({ type: "views", chatId, views: messages.map((m, i) => viewOf(chatId, m, settings, undefined, i)), replace: true }, uid);
 }
 async function sendView(uid, chatId, message, record) {
   const settings = settingsFor(await loadStore(uid), chatId);
@@ -1781,7 +1794,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       return;
     const hash = sourceHash(message.content);
     const existing = readTranslations(message)?.entries[hash];
-    if (mode === "fresh" && existing?.status === "done" && !options.force)
+    if (skipFresh(mode, existing, options.force))
       return;
     await sendView(uid, chatId, message);
     const source = message.content;
@@ -1997,10 +2010,7 @@ async function handle(msg, uid) {
     }
     case "delete_translation": {
       jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
-        mt.entries = {};
-        mt.hidden = false;
-      });
+      const updated = await writeTranslations(msg.chatId, msg.messageId, clearTranslations);
       if (updated)
         await sendView(uid, msg.chatId, updated);
       return;

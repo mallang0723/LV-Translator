@@ -86,6 +86,217 @@ function friendlyError(message) {
   return message;
 }
 
+// src/message-ui.ts
+function pickTarget(views, explicitId) {
+  const usable = views.filter((v) => v.role !== "system");
+  if (explicitId) {
+    const picked = usable.find((v) => v.messageId === explicitId);
+    if (picked)
+      return picked;
+  }
+  let recent = null;
+  for (const v of usable) {
+    if (v.updatedAt === null)
+      continue;
+    if (!recent || v.updatedAt > (recent.updatedAt ?? 0) || v.updatedAt === (recent.updatedAt ?? 0) && v.index > recent.index)
+      recent = v;
+  }
+  if (recent)
+    return recent;
+  const latest = (list) => list.reduce((best, v) => !best || v.index > best.index ? v : best, null);
+  return latest(usable.filter((v) => v.role === "assistant")) ?? latest(usable);
+}
+function targetLabel(view) {
+  const name = view.name.trim();
+  return name ? `#${view.index} ${name}` : `#${view.index}`;
+}
+function toolbarState(view) {
+  if (!view)
+    return { action: "translate", force: false, label: "번역", canDelete: false, busy: false };
+  if (view.busy)
+    return { action: "cancel", force: false, label: "번역 중단 (번역 중입니다)", canDelete: false, busy: true };
+  const exists = view.text !== null || view.status !== null;
+  return {
+    action: "translate",
+    force: exists,
+    label: exists ? "다시 번역 (저장된 번역을 새로 만듭니다)" : "번역",
+    canDelete: view.text !== null,
+    busy: false
+  };
+}
+var DELETE_TRANSLATION_LABEL = "번역 삭제 (이 메시지에 저장된 번역문만 지웁니다. 메시지는 그대로입니다)";
+function messageIdFromScope(scope) {
+  const m = /^message:(.+):actions$/.exec(scope);
+  return m ? m[1] : null;
+}
+
+// src/toolbar.ts
+var ICON_TRANSLATE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+var ICON_TRANSLATE_DELETE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + '<g transform="translate(0.5 0.5) scale(0.72)"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></g>' + '<path d="m15.5 15.5 6 6" stroke-width="2.6"/><path d="m21.5 15.5-6 6" stroke-width="2.6"/></svg>';
+var BUBBLE_ROW = '[data-component="BubbleActions"]';
+var SLOT_ATTR = "data-stt-tb";
+function findActionRow(messageEl) {
+  const footer = messageEl.querySelector('[data-spindle-mount="message_footer"]');
+  const next = footer?.parentElement?.nextElementSibling;
+  if (!next)
+    return null;
+  if (next.matches(BUBBLE_ROW))
+    return next;
+  const candidates = [next, next.firstElementChild];
+  for (const c of candidates) {
+    if (!(c instanceof HTMLElement))
+      continue;
+    const buttons = Array.from(c.children).filter((x) => x.tagName === "BUTTON");
+    if (buttons.length >= 3)
+      return c;
+  }
+  return null;
+}
+function mountToolbars(opts) {
+  const slots = new Map;
+  let hostUnregister = null;
+  let timer = null;
+  let destroyed = false;
+  function button(cls, label, icon, onClick, look) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `stt-tb ${cls} ${look.kind === "host" ? look.className : ""}`.trim();
+    if (look.kind === "own")
+      b.setAttribute("data-stt-own", "");
+    b.title = label;
+    b.setAttribute("aria-label", label);
+    b.setAttribute("data-stt-btn", "");
+    b.innerHTML = icon;
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onClick();
+    });
+    return b;
+  }
+  function lookOf(slot) {
+    if (slot.closest(BUBBLE_ROW))
+      return { kind: "pill" };
+    const ref = slot.parentElement?.querySelector(":scope > button:not([data-stt-btn])");
+    return ref?.className ? { kind: "host", className: ref.className } : { kind: "own" };
+  }
+  function render(slot) {
+    const meta = slots.get(slot);
+    if (!meta)
+      return;
+    const view = opts.getView(meta.id);
+    const state = toolbarState(view ?? null);
+    const show = !!view && view.role !== "system";
+    const look = show ? lookOf(slot) : { kind: "own" };
+    const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${look.kind === "host" ? look.className : look.kind}` : "";
+    if (slot.getAttribute("data-stt-sig") === sig)
+      return;
+    slot.setAttribute("data-stt-sig", sig);
+    if (!show) {
+      slot.replaceChildren();
+      return;
+    }
+    const children = [
+      button(`stt-tb-translate${state.busy ? " stt-tb-busy" : ""}`, state.label, ICON_TRANSLATE, () => state.action === "cancel" ? opts.onCancel(meta.id) : opts.onTranslate(meta.id, state.force), look)
+    ];
+    if (state.canDelete)
+      children.push(button("stt-tb-del", DELETE_TRANSLATION_LABEL, ICON_TRANSLATE_DELETE, () => opts.onDelete(meta.id), look));
+    slot.replaceChildren(...children);
+  }
+  function attach(slot, id, own) {
+    slot.setAttribute(SLOT_ATTR, id);
+    slot.style.display = "contents";
+    slots.set(slot, { id, own });
+    render(slot);
+  }
+  if (opts.registerDecorator) {
+    try {
+      const handle = opts.registerDecorator({
+        mount: "message_actions",
+        render(root, ctx) {
+          const id = messageIdFromScope(ctx.scope);
+          if (!id)
+            return;
+          attach(root, id, false);
+          return () => {
+            slots.delete(root);
+          };
+        },
+        update(root, ctx) {
+          const id = messageIdFromScope(ctx.scope);
+          if (!id)
+            return;
+          if (!slots.has(root))
+            slots.set(root, { id, own: false });
+          render(root);
+        }
+      });
+      if (typeof handle === "function")
+        hostUnregister = handle;
+      else if (handle && typeof handle.destroy === "function")
+        hostUnregister = () => handle.destroy();
+      else
+        hostUnregister = () => {};
+    } catch {
+      hostUnregister = null;
+    }
+  }
+  function scan() {
+    if (destroyed)
+      return;
+    for (const [slot, meta] of slots)
+      if (meta.own && !slot.isConnected)
+        slots.delete(slot);
+    for (const { messageId, element } of opts.listMessageElements()) {
+      if (element.querySelector(`[${SLOT_ATTR}]`))
+        continue;
+      const row = findActionRow(element);
+      if (!row)
+        continue;
+      if (hostUnregister && row.matches(BUBBLE_ROW))
+        continue;
+      const slot = document.createElement("span");
+      row.appendChild(slot);
+      attach(slot, messageId, true);
+    }
+  }
+  const queueScan = () => {
+    if (timer || destroyed)
+      return;
+    timer = setTimeout(() => {
+      timer = null;
+      scan();
+    }, 120);
+  };
+  const observer = new MutationObserver(queueScan);
+  observer.observe(document.body, { childList: true, subtree: true });
+  scan();
+  return {
+    refresh() {
+      for (const slot of slots.keys())
+        render(slot);
+      queueScan();
+    },
+    destroy() {
+      destroyed = true;
+      if (timer)
+        clearTimeout(timer);
+      observer.disconnect();
+      try {
+        hostUnregister?.();
+      } catch {}
+      for (const [slot, meta] of slots) {
+        if (meta.own)
+          slot.remove();
+        else
+          slot.replaceChildren();
+      }
+      slots.clear();
+    },
+    stats: () => ({ slots: slots.size, hostMount: hostUnregister !== null })
+  };
+}
+
 // src/frontend.ts
 var CSS = `
 .stt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; font-size: 0.78em; }
@@ -118,36 +329,26 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
 .stt-pr-orig[open] > summary { color: var(--stt-accent); }
 .stt-pr-orig { color: var(--lumiverse-text-muted, inherit); font-size: var(--stt-src-size, 16px); line-height: 1.75; }
-/* Paragraph Reader panel (above the content) */
-.stt-pr-widget { --stt-accent: var(--lumiverse-primary, #6753cf); font-size: 14px; line-height: 1.6; margin: 4px 0 10px; min-width: 0; max-width: 100%; text-align: left; }
-.stt-pr-widget * { box-sizing: border-box; }
-.stt-pr-widget button, .stt-pr-widget select, .stt-pr-widget input { font: inherit; color: inherit; }
-.stt-pr-widget button { cursor: pointer; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 9px; background: transparent; padding: 5px 10px; min-height: 34px; line-height: 1.3; }
-.stt-pr-widget button:hover:not(:disabled) { border-color: var(--stt-accent); }
-.stt-pr-widget button:disabled { opacity: .5; cursor: default; }
-.stt-pr-launch { color: var(--lumiverse-text-muted, inherit); font-size: 12px !important; padding: 4px 9px !important; min-height: 30px !important; }
-.stt-pr-panel { border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 14px; padding: 14px; margin-top: 7px; background: var(--lumiverse-fill-subtle, transparent); }
-.stt-pr-head, .stt-pr-controls, .stt-pr-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.stt-pr-head { justify-content: space-between; margin-bottom: 12px; }
-.stt-pr-title { font-size: 14px; font-weight: 700; }
-.stt-pr-pill { color: var(--stt-accent); font-size: 11px; font-weight: 700; background: color-mix(in srgb, var(--stt-accent) 12%, transparent); border-radius: 20px; padding: 2px 8px; }
-.stt-pr-controls { font-size: 12px; color: var(--lumiverse-text-muted, inherit); }
-.stt-pr-controls label { display: inline-flex; align-items: center; gap: 5px; }
-.stt-pr-controls input, .stt-pr-controls select { border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 7px; background: transparent; padding: 5px 7px; min-height: 34px; }
-.stt-pr-controls input { width: 90px; }
-.stt-pr-font { margin-top: 12px; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 10px; padding: 8px 10px; font-size: 12px; }
-.stt-pr-font > summary { cursor: pointer; }
-.stt-pr-font-row { display: flex; align-items: center; gap: 7px; margin: 8px 0; }
-.stt-pr-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
-.stt-pr-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--stt-accent); }
-.stt-pr-font-row button { width: 34px; min-width: 34px; padding: 0 !important; font-size: 18px; }
-.stt-pr-font-row output { min-width: 37px; text-align: center; font-variant-numeric: tabular-nums; }
-.stt-pr-font-footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.stt-pr-provider, .stt-pr-status { font-size: 12px; color: var(--lumiverse-text-muted, inherit); margin-top: 9px; white-space: pre-wrap; }
-.stt-pr-status.stt-err { color: var(--lumiverse-danger, #c23b45); }
-.stt-pr-actions { margin-top: 10px; }
-.stt-pr-actions button { font-size: 12px; }
-.stt-pr-widget .stt-pr-primary { background: var(--stt-accent); color: #fff; border-color: transparent; font-weight: 600; }
+/* Message action row buttons (bubble pill and minimal row; the host's own classes are reused where possible) */
+.stt-tb { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 0; cursor: pointer; }
+.stt-tb svg { display: block; pointer-events: none; flex: none; }
+.stt-tb[data-stt-own] { width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: var(--lumiverse-text-dim, inherit); }
+.stt-tb[data-stt-own]:hover { background: var(--lumiverse-fill-subtle, rgba(127,127,127,0.15)); color: var(--lumiverse-text, inherit); }
+.stt-tb.stt-tb-del:hover { color: var(--lumiverse-danger, #ef4444); background: var(--lumiverse-danger-015, rgba(239,68,68,0.15)); }
+.stt-tb.stt-tb-busy { color: var(--lumiverse-primary, #8b7bff); animation: stt-pulse 1.1s ease-in-out infinite; }
+@keyframes stt-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .stt-tb.stt-tb-busy { animation: none; } }
+/* Target message (panel) */
+.stt-target-label { font-weight: 700; word-break: break-word; }
+.stt-target-label .stt-note { font-weight: 400; }
+.stt-status { white-space: pre-wrap; color: var(--lumiverse-text-muted, inherit); }
+.stt-status.stt-err { color: var(--lumiverse-danger, #d55); }
+.stt-font-row { display: flex; align-items: center; gap: 7px; }
+.stt-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
+.stt-font-label > span { flex: none; min-width: 2.2em; }
+.stt-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--lumiverse-primary, #6753cf); }
+.stt-font-row .stt-btn { width: 34px; min-width: 34px; padding: 0; font-size: 18px; }
+.stt-font-row output { min-width: 3em; text-align: center; font-variant-numeric: tabular-nums; }
 .stt-panel { display: flex; flex-direction: column; gap: 12px; padding: 10px; color: var(--lumiverse-text, inherit); font-size: 0.92em; }
 .stt-section { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); border-radius: var(--lumiverse-radius, 8px); padding: 9px; }
 .stt-section > h3 { margin: 0; font-size: 1em; }
@@ -170,16 +371,18 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-unsaved-note[hidden] { display: none; }
 /* Phones and touch screens: readable text (15px+) and tap targets of 44px+. */
 @media (max-width: 768px), (pointer: coarse) {
-  .stt-bar, .stt-pr-note, .stt-pr-widget, .stt-pr-title, .stt-pr-controls, .stt-pr-font, .stt-pr-provider, .stt-pr-status, .stt-pr-actions button, .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
-  .stt-pr-label, .stt-pr-orig > summary, .stt-pr-pill, .stt-pr-launch { font-size: 15px !important; }
+  .stt-bar, .stt-pr-note, .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
+  .stt-pr-label, .stt-pr-orig > summary { font-size: 15px !important; }
   .stt-panel textarea.stt-prompt, .stt-modal textarea { font-size: 15px; }
   .stt-field > span, .stt-section > h3 { font-size: 15px; }
-  .stt-btn, .stt-pr-widget button, .stt-pr-launch { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
-  .stt-panel input[type=text], .stt-panel input[type=number], .stt-panel select, .stt-modal input, .stt-pr-controls input, .stt-pr-controls select { min-height: 44px; font-size: 16px; }
+  .stt-btn { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
+  .stt-panel input[type=text], .stt-panel input[type=number], .stt-panel select, .stt-modal input { min-height: 44px; font-size: 16px; }
   .stt-check { min-height: 44px; }
   .stt-check input { width: 22px; height: 22px; flex: none; }
-  .stt-pr-orig > summary, .stt-pr-font > summary, details.stt-translation > summary { min-height: 44px; display: flex; align-items: center; }
-  .stt-pr-font-row button { width: 44px; min-width: 44px; }
+  .stt-font-label input[type=range] { min-height: 44px; }
+  .stt-pr-orig > summary, details.stt-translation > summary { min-height: 44px; display: flex; align-items: center; }
+  .stt-font-row .stt-btn { width: 44px; min-width: 44px; }
+  /* .stt-tb is deliberately not enlarged: it follows the host's own action row buttons. */
 }
 `;
 function el(tag, props = {}, children = []) {
@@ -277,14 +480,22 @@ function setup(ctx) {
       return run();
     });
   };
+  let explicitTarget = null;
+  const currentTarget = () => pickTarget([...views.values()], explicitTarget);
+  function setTarget(id) {
+    if (explicitTarget === id)
+      return;
+    explicitTarget = id;
+    renderTarget();
+  }
+  const needsBar = (v) => v.role !== "system" && (v.busy || v.status !== null);
+  const wantsBar = (v) => current().displayMode !== "paragraph" && needsBar(v);
   function renderBar(bar, view) {
     const id = view.messageId;
     const items = [];
     if (view.busy) {
       items.push(el("span", { class: "stt-note" }, [view.progress ? `번역 중… ${view.progress.done}/${view.progress.total}` : "번역 중…"]));
       items.push(button("취소", () => chatId && toBackend({ type: "cancel", chatId, messageId: id }), "stt-danger"));
-    } else if (!view.status) {
-      items.push(button("번역", act(id, "translate"), "stt-primary"));
     } else {
       if (view.status === "error")
         items.push(el("span", { class: "stt-note stt-err", title: friendlyError(view.error ?? "") }, [`번역 오류: ${friendlyError(view.error ?? "").slice(0, 260)}`]));
@@ -292,21 +503,22 @@ function setup(ctx) {
         const progress = view.progress && view.progress.done < view.progress.total ? ` (${view.progress.done}/${view.progress.total})` : "";
         items.push(el("span", { class: "stt-note stt-warn" }, [`번역이 중간에 끊겼습니다${progress}`]));
       }
-      items.push(button("이어서 번역", act(id, "continue"), view.hasMore ? "stt-primary" : "", "끊긴 곳부터 이어서 번역합니다"));
-      items.push(button(view.status === "error" ? "다시 시도" : "다시 번역", act(id, "translate", true)));
+      if (view.hasMore)
+        items.push(button("이어서 번역", act(id, "continue"), "stt-primary", "끊긴 곳부터 이어서 번역합니다"));
       if (view.text) {
         items.push(button(view.hidden ? "번역 보기" : "번역 숨기기", () => chatId && toBackend({ type: "set_hidden", chatId, messageId: id, hidden: !view.hidden })));
       }
     }
     bar.replaceChildren(...items.filter((c) => !!c));
   }
-  const panelOpen = new Map;
   const confirmFresh = new Set;
   const confirmDelete = new Set;
-  let fontStatusText = "모든 문단 대조에 적용 · 자동 저장";
+  let fontStatusText = "모든 채팅에 적용 · 자동 저장";
   let viewSaveTimer = null;
   let localView = { ...DEFAULT_VIEW };
   let removeFontStyle = null;
+  let targetHost = null;
+  let fontHost = null;
   function applyFontStyle() {
     removeFontStyle?.();
     removeFontStyle = ctx.dom.addStyle(`:root { --stt-src-size: ${localView.sourceFontSize}px; --stt-tgt-size: ${localView.translationFontSize}px; }`);
@@ -315,18 +527,20 @@ function setup(ctx) {
     localView = normalizeView({ ...localView, ...values });
     applyFontStyle();
     fontStatusText = "크기 저장 중…";
-    decorate();
+    renderFonts();
     if (viewSaveTimer)
       clearTimeout(viewSaveTimer);
     viewSaveTimer = setTimeout(() => {
+      viewSaveTimer = null;
       toBackend({ type: "save_view", view: localView });
       fontStatusText = "크기를 저장했습니다.";
+      renderFonts();
     }, 300);
   }
-  function fontSettings() {
-    const panel2 = el("details", { class: "stt-pr-font" });
-    panel2.append(el("summary", {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]));
-    for (const [key, label] of [["sourceFontSize", "원문"], ["translationFontSize", "번역"]]) {
+  function renderFonts() {
+    if (!fontHost)
+      return;
+    const rows = [["sourceFontSize", "원문"], ["translationFontSize", "번역"]].map(([key, label]) => {
       const value = localView[key];
       const range = el("input", { type: "range", min: FONT_MIN, max: FONT_MAX, step: 1, value, "aria-label": `${label} 글자 크기` });
       range.addEventListener("change", () => changeFonts({ [key]: Number(range.value) }));
@@ -334,51 +548,28 @@ function setup(ctx) {
       const plus = button("+", () => changeFonts({ [key]: value + 1 }), "", `${label} 글자 크기 키우기`);
       minus.disabled = value <= FONT_MIN;
       plus.disabled = value >= FONT_MAX;
-      panel2.append(el("div", { class: "stt-pr-font-row" }, [el("label", { class: "stt-pr-font-label" }, [el("span", {}, [label]), range]), minus, el("output", {}, [`${value}px`]), plus]));
-    }
-    panel2.append(el("div", { class: "stt-pr-font-footer" }, [
+      return el("div", { class: "stt-font-row" }, [el("label", { class: "stt-font-label" }, [el("span", {}, [label]), range]), minus, el("output", {}, [`${value}px`]), plus]);
+    });
+    fontHost.replaceChildren(el("span", {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]), ...rows, el("div", { class: "stt-row" }, [
       button("기본 크기", () => changeFonts({ sourceFontSize: DEFAULT_VIEW.sourceFontSize, translationFontSize: DEFAULT_VIEW.translationFontSize })),
       el("span", { class: "stt-note" }, [fontStatusText])
     ]));
-    panel2.open = fontPanelOpen;
-    panel2.addEventListener("toggle", () => fontPanelOpen = panel2.open);
-    return panel2;
   }
-  let fontPanelOpen = false;
-  function renderParagraphPanel(widget, view) {
+  function renderTarget() {
+    if (!targetHost)
+      return;
+    if (!chatId) {
+      targetHost.replaceChildren(el("div", { class: "stt-note" }, ["채팅을 열면 번역할 메시지를 고를 수 있습니다."]));
+      return;
+    }
+    const view = currentTarget();
+    if (!view) {
+      targetHost.replaceChildren(el("div", { class: "stt-note" }, ["번역할 메시지가 아직 없습니다."]));
+      return;
+    }
     const id = view.messageId;
     const settings = current();
     const translated = !!view.text;
-    const open = translated ? !view.hidden : panelOpen.get(id) === true;
-    const launch = button(open ? "대조 접기" : "문단 대조", () => {
-      confirmFresh.delete(id);
-      confirmDelete.delete(id);
-      if (translated && chatId)
-        toBackend({ type: "set_hidden", chatId, messageId: id, hidden: open });
-      else {
-        panelOpen.set(id, !open);
-        decorate();
-      }
-    }, "stt-pr-launch");
-    launch.setAttribute("aria-expanded", String(open));
-    if (!open) {
-      widget.replaceChildren(launch);
-      return;
-    }
-    const mode = el("select", {}, [
-      el("option", { value: "interleave", selected: localView.paragraphView === "interleave" }, ["원문·번역 교차"]),
-      el("option", { value: "tap", selected: localView.paragraphView === "tap" }, ["눌러서 원문"])
-    ]);
-    mode.addEventListener("change", () => {
-      localView = { ...localView, paragraphView: mode.value === "tap" ? "tap" : "interleave" };
-      toBackend({ type: "save_view", view: localView });
-    });
-    const target = el("input", { type: "text", value: settings.myLanguage, maxLength: 100, title: '응답을 번역할 언어 (이 채팅 설정의 "내 언어")' });
-    target.addEventListener("change", () => {
-      if (!chatId || !target.value.trim())
-        return;
-      toBackend({ type: "save_settings", chatId, settings: { ...current(), myLanguage: target.value.trim() }, asDefault: false });
-    });
     const chosenId = store ? effectiveConnectionId(store, chatId) : settings.connectionId;
     const connection = chosenId ? connections.find((c) => c.id === chosenId)?.name ?? "삭제된 연결" : "자동 선택";
     const unit = settings.translationUnit === "paragraph" ? "문단별 요청" : "메시지 통째로 1회 요청";
@@ -392,80 +583,106 @@ function setup(ctx) {
     } else if (view.status === "partial")
       status2 = '완료한 부분까지 저장했습니다. 남은 부분은 "이어서 번역"으로 이어 갑니다.';
     else if (view.status === "done")
-      status2 = "저장된 번역입니다. 접기·보기 전환과 글자 크기 변경은 다시 번역하지 않습니다.";
+      status2 = view.hidden ? "저장된 번역이 있습니다. 지금은 숨겨져 있습니다." : "저장된 번역입니다. 표시 방식을 바꾸거나 보기를 전환해도 다시 번역하지 않습니다.";
     else
-      status2 = settings.autoTranslate ? "응답 자동 번역이 켜져 있습니다. 아래 버튼으로 바로 번역할 수도 있습니다." : "새 번역은 아래 버튼을 눌렀을 때만 요청합니다. 접기·보기 전환은 재번역하지 않습니다.";
+      status2 = settings.autoTranslate ? "응답 자동 번역이 켜져 있습니다. 아래 버튼으로 바로 번역할 수도 있습니다." : "아직 번역하지 않았습니다. 새 번역은 버튼을 눌렀을 때만 요청합니다.";
     const actions = [];
     if (view.busy) {
-      actions.push(button("중단", () => chatId && toBackend({ type: "cancel", chatId, messageId: id })));
+      actions.push(button("중단", () => toBackend({ type: "cancel", chatId, messageId: id })));
     } else if (!translated) {
       const label = settings.translationUnit === "paragraph" ? "문단 번역" : "번역";
-      actions.push(button(view.requestsNeeded > 0 ? `${label} · ${view.requestsNeeded}회 요청` : label, act(id, "translate", true), "stt-pr-primary"));
+      actions.push(button(view.requestsNeeded > 0 ? `${label} · ${view.requestsNeeded}회 요청` : label, act(id, "translate", true), "stt-primary"));
     } else if (view.hasMore) {
-      actions.push(button(view.requestsNeeded > 0 ? `이어서 번역 · ${view.requestsNeeded}회 요청` : "이어서 번역", act(id, "continue"), "stt-pr-primary"));
+      actions.push(button(view.requestsNeeded > 0 ? `이어서 번역 · ${view.requestsNeeded}회 요청` : "이어서 번역", act(id, "continue"), "stt-primary"));
     } else {
       const fresh = confirmFresh.has(id);
       actions.push(button(fresh ? "확인: 새로 번역 요청" : "새로 번역", () => {
         if (!fresh) {
           confirmFresh.add(id);
-          decorate();
+          renderTarget();
           return;
         }
         confirmFresh.delete(id);
         act(id, "translate", true)();
-      }, "stt-pr-primary"));
+      }, "stt-primary"));
       actions.push(button("이어서 번역", act(id, "continue"), "", "끊긴 것 같으면 한 번 더 이어 붙여 봅니다"));
     }
     if (translated && !view.busy) {
+      actions.push(button(view.hidden ? "번역 보기" : "번역 숨기기", () => toBackend({ type: "set_hidden", chatId, messageId: id, hidden: !view.hidden })));
       const sure = confirmDelete.has(id);
       actions.push(button(sure ? "확인: 저장 번역 삭제" : "이 메시지 저장 삭제", () => {
         if (!sure) {
           confirmDelete.add(id);
-          decorate();
+          renderTarget();
           return;
         }
         confirmDelete.delete(id);
-        if (chatId)
-          toBackend({ type: "delete_translation", chatId, messageId: id });
-      }));
+        toBackend({ type: "delete_translation", chatId, messageId: id });
+      }, "stt-danger"));
     }
-    widget.replaceChildren(launch, el("div", { class: "stt-pr-panel" }, [
-      el("div", { class: "stt-pr-head" }, [el("strong", { class: "stt-pr-title" }, ["문단 대조 번역"]), el("span", { class: "stt-pr-pill" }, ["PARAGRAPH READER"])]),
-      el("div", { class: "stt-pr-controls" }, [el("label", {}, ["보기", mode]), el("label", {}, ["도착 언어", target])]),
-      fontSettings(),
-      el("div", { class: "stt-pr-provider" }, [`번역: ${connection} · ${settings.myLanguage} · ${unit}`]),
-      el("div", { class: `stt-pr-status${error ? " stt-err" : ""}`, role: "status" }, [status2]),
-      el("div", { class: "stt-pr-actions" }, actions)
-    ]));
+    targetHost.replaceChildren(el("div", { class: "stt-target-label" }, [`대상 메시지: ${targetLabel(view)}`, el("span", { class: "stt-note" }, [explicitTarget === id ? "" : " (자동 선택)"])]), el("div", { class: "stt-note" }, ["메시지의 번역 버튼이나 번역문을 누르면 그 메시지가 대상이 됩니다."]), el("div", { class: "stt-note" }, [`번역: ${connection} · ${settings.myLanguage} · ${unit}`]), el("div", { class: `stt-status${error ? " stt-err" : ""}`, role: "status" }, [status2]), el("div", { class: "stt-row" }, actions));
   }
+  const registerDecorator = ctx.ui.registerDomDecorator;
+  const toolbars = mountToolbars({
+    registerDecorator: typeof registerDecorator === "function" ? (spec) => registerDecorator.call(ctx.ui, spec) : null,
+    listMessageElements: () => ctx.dom.listMessageElements(),
+    getView: (id) => views.get(id),
+    onTranslate: (id, force) => {
+      setTarget(id);
+      act(id, "translate", force)();
+    },
+    onCancel: (id) => {
+      setTarget(id);
+      if (chatId)
+        toBackend({ type: "cancel", chatId, messageId: id });
+    },
+    onDelete: (id) => {
+      setTarget(id);
+      const forChat = chatId;
+      const view = views.get(id);
+      if (!forChat || !view)
+        return;
+      ctx.ui.showConfirm({ title: "번역 삭제", message: `${targetLabel(view)} 메시지에 저장된 번역문을 지울까요?
+메시지 원문은 그대로 남습니다.`, variant: "danger", confirmLabel: "번역 삭제" }).then(({ confirmed }) => {
+        if (confirmed)
+          toBackend({ type: "delete_translation", chatId: forChat, messageId: id });
+      });
+    }
+  });
+  const onDocClick = (e) => {
+    const t = e.target;
+    if (!(t instanceof Element) || t.closest("[data-stt-tb]"))
+      return;
+    const id = ctx.dom.getMessageId(t);
+    if (id && views.get(id)?.text)
+      setTarget(id);
+  };
+  document.addEventListener("click", onDocClick, true);
   function decorate() {
     if (!chatId)
       return;
-    const paragraph = current().displayMode === "paragraph";
     for (const view of views.values()) {
-      if (view.role === "system")
-        continue;
       let bar = bars.get(view.messageId);
-      if (bar && bar.dataset.sttMode !== String(paragraph)) {
-        ctx.dom.uninject(bar);
-        bars.delete(view.messageId);
-        bar = undefined;
+      if (!wantsBar(view)) {
+        if (bar) {
+          ctx.dom.uninject(bar);
+          bars.delete(view.messageId);
+        }
+        continue;
       }
       if (!bar) {
         const bubble = ctx.dom.findMessageElement(view.messageId);
         if (!bubble)
           continue;
-        const slot = bubble.querySelector(paragraph ? '[data-spindle-mount="message_body_before"]' : '[data-spindle-mount="message_footer"]') ?? bubble;
+        const slot = bubble.querySelector('[data-spindle-mount="message_footer"]') ?? bubble;
         bar = ctx.dom.inject(slot, "<div></div>", "beforeend");
-        bar.classList.add(paragraph ? "stt-pr-widget" : "stt-bar");
-        bar.dataset.sttMode = String(paragraph);
+        bar.classList.add("stt-bar");
         bars.set(view.messageId, bar);
       }
-      if (paragraph)
-        renderParagraphPanel(bar, view);
-      else
-        renderBar(bar, view);
+      renderBar(bar, view);
     }
+    toolbars.refresh();
+    renderTarget();
   }
   let decorateQueued = false;
   const queueDecorate = () => {
@@ -477,8 +694,9 @@ function setup(ctx) {
       decorate();
     }, 150);
   };
+  const missingBar = () => [...views.values()].some((v) => wantsBar(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
   const observer = new MutationObserver(() => {
-    if (chatId && bars.size < [...views.values()].filter((v) => v.role !== "system").length)
+    if (chatId && missingBar())
       queueDecorate();
   });
   observer.observe(document.body, { childList: true, subtree: true });
@@ -487,6 +705,9 @@ function setup(ctx) {
       ctx.dom.uninject(bar);
     bars.clear();
     views.clear();
+    explicitTarget = null;
+    confirmFresh.clear();
+    confirmDelete.clear();
     chatId = next;
     renderDraftButton();
     renderPanel();
@@ -590,18 +811,25 @@ function setup(ctx) {
   }
   function text(label, key, opts = {}) {
     const input = opts.multiline ? el("textarea", { value: String(draft[key] ?? ""), placeholder: opts.placeholder ?? "", class: opts.cls ?? "", spellcheck: false }) : el("input", { type: "text", value: String(draft[key] ?? ""), placeholder: opts.placeholder ?? "" });
+    input.setAttribute("data-stt-field", key);
     input.addEventListener("input", () => {
       draft[key] = input.value;
+      panel.querySelectorAll(`[data-stt-field="${key}"]`).forEach((other) => {
+        if (other !== input)
+          other.value = input.value;
+      });
       markDirty();
     });
     return el("label", { class: "stt-field" }, [el("span", {}, [label]), input]);
   }
-  function select(label, value, options, onChange, unsaved = true) {
+  function select(label, value, options, onChange, unsaved = true, rerender = false) {
     const s = el("select", {}, options.map(([v, l]) => el("option", { value: v, selected: v === value }, [l])));
     s.addEventListener("change", () => {
       onChange(s.value);
       if (unsaved)
         markDirty();
+      if (rerender)
+        renderPanel();
     });
     return el("label", { class: "stt-field" }, [el("span", {}, [label]), s]);
   }
@@ -727,6 +955,22 @@ function setup(ctx) {
       draft.longSplitChars = Math.max(0, Number(split.value) || 0);
       markDirty();
     });
+    targetHost = el("div", { class: "stt-field" });
+    fontHost = el("div", { class: "stt-field" });
+    const paragraphMode = draft.displayMode === "paragraph";
+    const paragraphSection = () => el("div", { class: "stt-section" }, [
+      el("h3", {}, ["문단 대조 (Paragraph Reader)"]),
+      select("보기", localView.paragraphView, [["interleave", "원문·번역 교차"], ["tap", "눌러서 원문 (번역만 보이고, 문단마다 눌러서 원문을 펼침)"]], (v) => {
+        localView = { ...localView, paragraphView: v === "tap" ? "tap" : "interleave" };
+        toBackend({ type: "save_view", view: localView });
+      }, false),
+      text('도착 언어 (응답을 번역할 언어, "내 언어"와 같은 설정)', "myLanguage"),
+      fontHost,
+      el("div", { class: "stt-note" }, ["보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다."]),
+      el("h3", {}, ["선택한 메시지"]),
+      targetHost
+    ]);
+    const targetSection = () => el("div", { class: "stt-section" }, [el("h3", {}, ["메시지 번역"]), targetHost]);
     panel.replaceChildren(el("div", { class: "stt-note" }, [chatId ? "지금 열린 채팅의 번역 설정입니다." : "열린 채팅이 없어 새 채팅의 기본값을 편집합니다."]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["기본 번역"]),
       select("번역에 쓸 AI 연결", draft.connectionId, connectionOptions, (v) => {
@@ -738,14 +982,14 @@ function setup(ctx) {
       el("div", { class: "stt-row" }, [text("모델 언어 (내 메시지를 이 언어로)", "modelLanguage"), text("내 언어 (응답을 이 언어로)", "myLanguage")]),
       check("AI 응답 자동 번역", "autoTranslate"),
       check("번역이 끊기면 자동으로 이어서 번역", "autoContinue"),
-      select("번역문 표시 방식", draft.displayMode, Object.entries(DISPLAY_LABELS), (v) => draft.displayMode = v),
+      select("번역문 표시 방식", draft.displayMode, Object.entries(DISPLAY_LABELS), (v) => draft.displayMode = v, true, true),
       select("번역 단위", draft.translationUnit, [
         ["whole", "메시지 통째로 (1회 요청, 문단 수가 같으면 문단별로 맞춰 보여 줌)"],
         ["paragraph", "문단별 (문단마다 1회 요청, 문단 대조가 정확히 맞음)"]
       ], (v) => draft.translationUnit = v === "paragraph" ? "paragraph" : "whole"),
       check("내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)", "translateMyMessages"),
       check("입력창 옆에 번역 버튼 표시", "showDraftButton")
-    ]), el("div", { class: "stt-section" }, [el("h3", {}, ["프롬프트 프리셋"]), promptSection("incoming"), promptSection("outgoing"), presetManager()]), el("div", { class: "stt-section" }, [
+    ]), paragraphMode ? paragraphSection() : targetSection(), el("div", { class: "stt-section" }, [el("h3", {}, ["프롬프트 프리셋"]), promptSection("incoming"), promptSection("outgoing"), presetManager()]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["단어장"]),
       text("한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)", "glossary", { multiline: true, placeholder: `마리나라 = Marinara
 로어북 = lorebook` })
@@ -769,6 +1013,8 @@ function setup(ctx) {
       el("h3", {}, ["긴 지문"]),
       el("label", { class: "stt-field" }, [el("span", {}, ["이 글자 수 이상이면 문단별로 나눠 번역 (0 = 나누지 않음)"]), split])
     ]), saveRow);
+    renderFonts();
+    renderTarget();
   }
   const onBeforeUnload = (e) => {
     if (!dirty)
@@ -839,6 +1085,8 @@ function setup(ctx) {
       clearTimeout(viewSaveTimer);
     removeFontStyle?.();
     observer.disconnect();
+    toolbars.destroy();
+    document.removeEventListener("click", onDocClick, true);
     offEvents.forEach((off) => off());
     offBackend();
     offAction();

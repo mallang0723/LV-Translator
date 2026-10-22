@@ -267,6 +267,12 @@ export interface MessageView {
   busy: boolean;
   /** Requests a (re)translation would still need with the chat's current unit. */
   requestsNeeded: number;
+  /** Position in the chat (index_in_chat), for the "#225 name" label. */
+  index: number;
+  /** Speaker name of the message. */
+  name: string;
+  /** When the current translation was last written; null if there is none. Display-only, never stored. */
+  updatedAt: number | null;
 }
 
 export interface PresetSummary {
