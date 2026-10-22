@@ -257,22 +257,20 @@ export function recordHasMore(r: TranslationRecord): boolean {
 export interface MessageView {
   messageId: string;
   role: 'user' | 'assistant' | 'system';
-  /** Translation of the current content, if any. */
+  /** Translation of the current content (the visible swipe), if any. */
   text: string | null;
+  /** sourceHash of the content this view describes, i.e. the visible swipe's storage key. */
+  sourceKey: string;
   status: TranslationStatus | null;
   hasMore: boolean;
   progress: { done: number; total: number } | null;
   error: string | null;
   hidden: boolean;
   busy: boolean;
-  /** Requests a (re)translation would still need with the chat's current unit. */
-  requestsNeeded: number;
   /** Position in the chat (index_in_chat), for the "#225 name" label. */
   index: number;
   /** Speaker name of the message. */
   name: string;
-  /** When the current translation was last written; null if there is none. Display-only, never stored. */
-  updatedAt: number | null;
 }
 
 export interface PresetSummary {
@@ -302,7 +300,8 @@ export type ToBackend =
   | { type: 'translate'; chatId: string; messageId: string; force: boolean }
   | { type: 'continue'; chatId: string; messageId: string }
   | { type: 'set_hidden'; chatId: string; messageId: string; hidden: boolean }
-  | { type: 'delete_translation'; chatId: string; messageId: string }
+  /** `sourceKey` pins the swipe the user saw; without it the visible swipe's translation goes. */
+  | { type: 'delete_translation'; chatId: string; messageId: string; sourceKey?: string }
   | { type: 'save_view'; view: ViewSettings }
   | { type: 'cancel'; chatId: string; messageId: string }
   | { type: 'translate_text'; reqId: string; chatId: string; text: string }

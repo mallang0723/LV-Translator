@@ -25,8 +25,8 @@ import {
 } from './shared';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { buildParagraphView } from './display/paragraph-view';
-import { clearTranslations, skipFresh } from './message-ui';
-import { type Completion, recordToText, requestsNeeded, translate, TranslationError } from './translate/engine';
+import { clearTranslation, recordFor, skipFresh } from './message-ui';
+import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
 
@@ -122,12 +122,12 @@ function cachedChat(chatId: string): Promise<Map<string, MessageTranslations | n
 }
 
 /** Read-modify-write of our key only; other extensions' metadata is kept. */
-async function writeTranslations(chatId: string, messageId: string, change: (mt: MessageTranslations) => void): Promise<ChatMessage | null> {
+async function writeTranslations(chatId: string, messageId: string, change: (mt: MessageTranslations, message: ChatMessage) => void): Promise<ChatMessage | null> {
   const messages = await getMessages(chatId);
   const message = messages.find((m) => m.id === messageId);
   if (!message) return null;
   const mt: MessageTranslations = structuredClone(readTranslations(message) ?? { v: 1, entries: {} });
-  change(mt);
+  change(mt, message);
   const keys = Object.keys(mt.entries).sort((a, b) => (mt.entries[b]!.updatedAt ?? 0) - (mt.entries[a]!.updatedAt ?? 0));
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE)) delete mt.entries[k];
   const metadata = { ...(message.metadata ?? {}), [METADATA_KEY]: mt };
@@ -144,10 +144,10 @@ const jobKey = (chatId: string, messageId: string) => `${chatId}:${messageId}`;
 
 function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, overrideRecord?: TranslationRecord | null, position = 0): MessageView {
   const mt = readTranslations(message);
-  const record = overrideRecord !== undefined ? overrideRecord : (mt?.entries[sourceHash(message.content)] ?? null);
+  const record = overrideRecord !== undefined ? overrideRecord : recordFor(mt, message.content);
   return {
-    requestsNeeded: message.content ? requestsNeeded(message.content, settings, record) : 0,
     messageId: message.id,
+    sourceKey: sourceHash(message.content ?? ''),
     role: message.role,
     text: record && record.parts.some((p) => p.trim()) ? recordToText(record) : null,
     status: record?.status ?? null,
@@ -158,7 +158,6 @@ function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, ov
     busy: jobs.has(jobKey(chatId, message.id)),
     index: typeof message.index_in_chat === 'number' ? message.index_in_chat : position,
     name: typeof message.name === 'string' ? message.name : '',
-    updatedAt: record && record.parts.some((p) => p.trim()) ? record.updatedAt : null,
   };
 }
 
@@ -440,7 +439,9 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
     }
     case 'delete_translation': {
       jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
-      const updated = await writeTranslations(msg.chatId, msg.messageId, clearTranslations);
+      // Only the translation of the swipe that was showing; the other swipes keep theirs.
+      const key = typeof msg.sourceKey === 'string' && msg.sourceKey ? msg.sourceKey : null;
+      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? sourceHash(message.content ?? '')));
       if (updated) await sendView(uid, msg.chatId, updated);
       return;
     }

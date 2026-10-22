@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { clearTranslations, DELETE_TRANSLATION_LABEL, messageIdFromScope, pickTarget, skipFresh, targetLabel, toolbarState } from '../src/message-ui';
+import { clearTranslation, DELETE_TRANSLATION_LABEL, messageIdFromScope, recordFor, skipFresh, targetLabel, toolbarState } from '../src/message-ui';
 import { type MessageTranslations, type MessageView, sourceHash } from '../src/shared';
 
 function view(over: Partial<MessageView> & { messageId: string }): MessageView {
@@ -12,60 +12,17 @@ function view(over: Partial<MessageView> & { messageId: string }): MessageView {
     error: null,
     hidden: false,
     busy: false,
-    requestsNeeded: 1,
     index: 0,
     name: '',
-    updatedAt: null,
+    sourceKey: '',
     ...over,
   };
 }
 
-const translated = (id: string, index: number, updatedAt: number, over: Partial<MessageView> = {}) =>
-  view({ messageId: id, index, updatedAt, text: 'ok', status: 'done', ...over });
+const translated = (id: string, index: number, _updatedAt: number, over: Partial<MessageView> = {}) =>
+  view({ messageId: id, index, text: 'ok', status: 'done', ...over });
 
-describe('target message', () => {
-  const list = [
-    view({ messageId: 'm0', index: 0, role: 'user', name: 'Me' }),
-    translated('m1', 1, 100),
-    view({ messageId: 'm2', index: 2 }),
-    translated('m3', 3, 300),
-    view({ messageId: 'm4', index: 4 }),
-  ];
-
-  test('a picked message wins while it still exists', () => {
-    expect(pickTarget(list, 'm2')?.messageId).toBe('m2');
-    expect(pickTarget(list, 'm0')?.messageId).toBe('m0');
-  });
-
-  test('a picked message that is gone falls back to the default', () => {
-    expect(pickTarget(list, 'deleted')?.messageId).toBe('m3');
-  });
-
-  test('default: the message translated most recently, not the newest message', () => {
-    expect(pickTarget(list, null)?.messageId).toBe('m3');
-    expect(pickTarget([translated('a', 1, 500), translated('b', 5, 200)], null)?.messageId).toBe('a');
-  });
-
-  test('equal timestamps prefer the later message', () => {
-    expect(pickTarget([translated('a', 1, 500), translated('b', 5, 500)], null)?.messageId).toBe('b');
-  });
-
-  test('with no translation yet: the latest assistant message', () => {
-    const none = [view({ messageId: 'u', index: 3, role: 'user' }), view({ messageId: 'a1', index: 1 }), view({ messageId: 'a2', index: 2 })];
-    expect(pickTarget(none, null)?.messageId).toBe('a2');
-  });
-
-  test('with no assistant message: the latest user message; system messages are never a target', () => {
-    const only = [view({ messageId: 's', index: 9, role: 'system' }), view({ messageId: 'u1', index: 1, role: 'user' }), view({ messageId: 'u2', index: 2, role: 'user' })];
-    expect(pickTarget(only, null)?.messageId).toBe('u2');
-    expect(pickTarget(only, 's')?.messageId).toBe('u2');
-  });
-
-  test('empty chat has no target', () => {
-    expect(pickTarget([], null)).toBeNull();
-    expect(pickTarget([view({ messageId: 's', role: 'system' })], null)).toBeNull();
-  });
-
+describe('message label', () => {
   test('label is "#index name"', () => {
     expect(targetLabel({ index: 225, name: '정수빈' })).toBe('#225 정수빈');
     expect(targetLabel({ index: 3, name: '  ' })).toBe('#3');
@@ -109,6 +66,10 @@ describe('toolbar state', () => {
     expect(DELETE_TRANSLATION_LABEL).toContain('번역');
     expect(DELETE_TRANSLATION_LABEL).toContain('메시지는 그대로');
   });
+
+  test('the labels say the scope is the visible swipe only', () => {
+    expect(DELETE_TRANSLATION_LABEL).toContain('스와이프');
+  });
 });
 
 describe('scope', () => {
@@ -136,18 +97,91 @@ describe('translate / re-translate decision', () => {
   });
 });
 
-describe('delete translation', () => {
+describe('delete translation (per swipe)', () => {
   const record = (text: string) => ({ parts: [text], pieces: [], total: 1, truncatedPart: -1, status: 'done' as const, updatedAt: 1 });
+  const swipes = ['첫 번째 스와이프', '두 번째 스와이프', '세 번째 스와이프'];
+  const stored = (hidden = false): MessageTranslations => ({
+    v: 1,
+    entries: { [sourceHash(swipes[0]!)]: record('A'), [sourceHash(swipes[1]!)]: record('B'), [sourceHash(swipes[2]!)]: record('C') },
+    hidden,
+  });
 
-  test('removes every stored translation of the message and un-hides it; the message itself is not touched', () => {
-    const mt: MessageTranslations = { v: 1, entries: { [sourceHash('a')]: record('A'), [sourceHash('b')]: record('B') }, hidden: true };
-    clearTranslations(mt);
+  test('deleting one swipe leaves the other swipes\' translations', () => {
+    const mt = stored();
+    clearTranslation(mt, sourceHash(swipes[1]!));
+    expect(Object.keys(mt.entries).sort()).toEqual([sourceHash(swipes[0]!), sourceHash(swipes[2]!)].sort());
+    expect(mt.entries[sourceHash(swipes[0]!)]!.parts).toEqual(['A']);
+    expect(mt.entries[sourceHash(swipes[2]!)]!.parts).toEqual(['C']);
+    expect(recordFor(mt, swipes[1]!)).toBeNull();
+  });
+
+  test('the message-level hidden flag stays while other translations remain, and resets when none are left', () => {
+    const mt = stored(true);
+    clearTranslation(mt, sourceHash(swipes[0]!));
+    clearTranslation(mt, sourceHash(swipes[1]!));
+    expect(mt.hidden).toBe(true);
+    clearTranslation(mt, sourceHash(swipes[2]!));
     expect(mt).toEqual({ v: 1, entries: {}, hidden: false });
   });
 
+  test('an unknown key changes nothing', () => {
+    const mt = stored();
+    clearTranslation(mt, 'nope');
+    expect(Object.keys(mt.entries)).toHaveLength(3);
+  });
+
   test('stored format stays the 0.1.1 shape', () => {
-    const mt: MessageTranslations = { v: 1, entries: { [sourceHash('a')]: record('A') } };
-    clearTranslations(mt);
+    const mt = stored();
+    clearTranslation(mt, sourceHash(swipes[0]!));
     expect(Object.keys(mt).sort()).toEqual(['entries', 'hidden', 'v']);
+    expect(Object.keys(mt.entries[sourceHash(swipes[1]!)]!).sort()).toEqual(['parts', 'pieces', 'status', 'total', 'truncatedPart', 'updatedAt']);
+  });
+
+  test('0.1.1 data (no hidden field, keyed by sourceHash) is read and cleared the same way', () => {
+    const old = { v: 1 as const, entries: { [sourceHash(swipes[0]!)]: record('A') } };
+    expect(recordFor(old, swipes[0]!)?.parts).toEqual(['A']);
+    clearTranslation(old, sourceHash(swipes[0]!));
+    expect(old.entries).toEqual({});
+  });
+});
+
+describe('toolbar follows the visible swipe', () => {
+  const record = (text: string, status: 'done' | 'partial' = 'done') => ({ parts: [text], pieces: [], total: 1, truncatedPart: -1, status, updatedAt: 1 });
+  const swipes = ['스와이프 0', '스와이프 1', '스와이프 2'];
+  const mt: MessageTranslations = { v: 1, entries: { [sourceHash(swipes[0]!)]: record('A'), [sourceHash(swipes[2]!)]: record('C') } };
+
+  /** What the backend builds for the message while `content` is the visible swipe. */
+  const stateAt = (content: string, source: MessageTranslations | null = mt) => {
+    const r = recordFor(source, content);
+    return toolbarState(view({ messageId: 'm', text: r && r.parts.some((p) => p.trim()) ? r.parts.join('\n\n') : null, status: r?.status ?? null }));
+  };
+
+  test('delete shows only for a swipe that has a translation', () => {
+    expect(stateAt(swipes[0]!).canDelete).toBe(true);
+    expect(stateAt(swipes[1]!).canDelete).toBe(false);
+    expect(stateAt(swipes[2]!).canDelete).toBe(true);
+  });
+
+  test('the translate button on an untranslated swipe is a plain translate, not a re-translate', () => {
+    expect(stateAt(swipes[1]!)).toMatchObject({ force: false, label: '번역' });
+    expect(stateAt(swipes[0]!)).toMatchObject({ force: true });
+  });
+
+  test('switching swipes updates it, and deleting the visible swipe hides the button without touching the others', () => {
+    const live: MessageTranslations = structuredClone(mt);
+    const seen = [swipes[0]!, swipes[1]!, swipes[2]!, swipes[0]!].map((c) => stateAt(c, live).canDelete);
+    expect(seen).toEqual([true, false, true, true]);
+    clearTranslation(live, sourceHash(swipes[0]!));
+    expect(stateAt(swipes[0]!, live).canDelete).toBe(false);
+    expect(stateAt(swipes[2]!, live).canDelete).toBe(true);
+  });
+
+  test('a message without stored translations offers no delete on any swipe', () => {
+    for (const c of swipes) expect(stateAt(c, null).canDelete).toBe(false);
+  });
+
+  test('a failed attempt with no text keeps delete hidden', () => {
+    const failed: MessageTranslations = { v: 1, entries: { [sourceHash(swipes[1]!)]: { parts: [], pieces: [], total: 1, truncatedPart: -1, status: 'error', updatedAt: 1 } } };
+    expect(stateAt(swipes[1]!, failed)).toMatchObject({ canDelete: false, force: true });
   });
 });

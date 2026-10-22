@@ -1389,17 +1389,6 @@ function partSources(protectedText, settings) {
 function resumable(record, pieces, total, settings) {
   return !!record && sameArray(record.pieces, pieces) && record.total === total && (record.unit ?? "whole") === settings.translationUnit;
 }
-function requestsNeeded(source, settings, record) {
-  let prot;
-  try {
-    prot = protect(source, settings);
-  } catch {
-    return 0;
-  }
-  const sources = partSources(prot.text, settings);
-  const start = resumable(record, prot.pieces, sources.length, settings) ? record.parts.length : 0;
-  return sources.slice(start).filter((part) => !hasNoText(part)).length;
-}
 function sameArray(a, b) {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
@@ -1621,9 +1610,13 @@ function skipFresh(mode, existing, force) {
   const status = existing?.status;
   return mode === "fresh" && status === "done" && !force;
 }
-function clearTranslations(mt) {
-  mt.entries = {};
-  mt.hidden = false;
+function recordFor(mt, content) {
+  return mt?.entries?.[sourceHash(content)] ?? null;
+}
+function clearTranslation(mt, key) {
+  delete mt.entries[key];
+  if (Object.keys(mt.entries).length === 0)
+    mt.hidden = false;
 }
 
 // src/backend.ts
@@ -1697,7 +1690,7 @@ async function writeTranslations(chatId, messageId, change) {
   if (!message)
     return null;
   const mt = structuredClone(readTranslations(message) ?? { v: 1, entries: {} });
-  change(mt);
+  change(mt, message);
   const keys = Object.keys(mt.entries).sort((a, b) => (mt.entries[b].updatedAt ?? 0) - (mt.entries[a].updatedAt ?? 0));
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE))
     delete mt.entries[k];
@@ -1711,10 +1704,10 @@ var jobs = new Map;
 var jobKey = (chatId, messageId) => `${chatId}:${messageId}`;
 function viewOf(chatId, message, settings, overrideRecord, position = 0) {
   const mt = readTranslations(message);
-  const record = overrideRecord !== undefined ? overrideRecord : mt?.entries[sourceHash(message.content)] ?? null;
+  const record = overrideRecord !== undefined ? overrideRecord : recordFor(mt, message.content);
   return {
-    requestsNeeded: message.content ? requestsNeeded(message.content, settings, record) : 0,
     messageId: message.id,
+    sourceKey: sourceHash(message.content ?? ""),
     role: message.role,
     text: record && record.parts.some((p) => p.trim()) ? recordToText(record) : null,
     status: record?.status ?? null,
@@ -1724,8 +1717,7 @@ function viewOf(chatId, message, settings, overrideRecord, position = 0) {
     hidden: mt?.hidden === true,
     busy: jobs.has(jobKey(chatId, message.id)),
     index: typeof message.index_in_chat === "number" ? message.index_in_chat : position,
-    name: typeof message.name === "string" ? message.name : "",
-    updatedAt: record && record.parts.some((p) => p.trim()) ? record.updatedAt : null
+    name: typeof message.name === "string" ? message.name : ""
   };
 }
 async function sendChatViews(uid, chatId) {
@@ -2010,7 +2002,8 @@ async function handle(msg, uid) {
     }
     case "delete_translation": {
       jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
-      const updated = await writeTranslations(msg.chatId, msg.messageId, clearTranslations);
+      const key = typeof msg.sourceKey === "string" && msg.sourceKey ? msg.sourceKey : null;
+      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? sourceHash(message.content ?? "")));
       if (updated)
         await sendView(uid, msg.chatId, updated);
       return;

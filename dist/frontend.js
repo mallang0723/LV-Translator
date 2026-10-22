@@ -87,25 +87,6 @@ function friendlyError(message) {
 }
 
 // src/message-ui.ts
-function pickTarget(views, explicitId) {
-  const usable = views.filter((v) => v.role !== "system");
-  if (explicitId) {
-    const picked = usable.find((v) => v.messageId === explicitId);
-    if (picked)
-      return picked;
-  }
-  let recent = null;
-  for (const v of usable) {
-    if (v.updatedAt === null)
-      continue;
-    if (!recent || v.updatedAt > (recent.updatedAt ?? 0) || v.updatedAt === (recent.updatedAt ?? 0) && v.index > recent.index)
-      recent = v;
-  }
-  if (recent)
-    return recent;
-  const latest = (list) => list.reduce((best, v) => !best || v.index > best.index ? v : best, null);
-  return latest(usable.filter((v) => v.role === "assistant")) ?? latest(usable);
-}
 function targetLabel(view) {
   const name = view.name.trim();
   return name ? `#${view.index} ${name}` : `#${view.index}`;
@@ -124,7 +105,7 @@ function toolbarState(view) {
     busy: false
   };
 }
-var DELETE_TRANSLATION_LABEL = "번역 삭제 (이 메시지에 저장된 번역문만 지웁니다. 메시지는 그대로입니다)";
+var DELETE_TRANSLATION_LABEL = "번역 삭제 (지금 보이는 스와이프의 번역만 지웁니다. 메시지는 그대로입니다)";
 function messageIdFromScope(scope) {
   const m = /^message:(.+):actions$/.exec(scope);
   return m ? m[1] : null;
@@ -338,11 +319,6 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-tb.stt-tb-busy { color: var(--lumiverse-primary, #8b7bff); animation: stt-pulse 1.1s ease-in-out infinite; }
 @keyframes stt-pulse { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .stt-tb.stt-tb-busy { animation: none; } }
-/* Target message (panel) */
-.stt-target-label { font-weight: 700; word-break: break-word; }
-.stt-target-label .stt-note { font-weight: 400; }
-.stt-status { white-space: pre-wrap; color: var(--lumiverse-text-muted, inherit); }
-.stt-status.stt-err { color: var(--lumiverse-danger, #d55); }
 .stt-font-row { display: flex; align-items: center; gap: 7px; }
 .stt-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
 .stt-font-label > span { flex: none; min-width: 2.2em; }
@@ -480,16 +456,8 @@ function setup(ctx) {
       return run();
     });
   };
-  let explicitTarget = null;
-  const currentTarget = () => pickTarget([...views.values()], explicitTarget);
-  function setTarget(id) {
-    if (explicitTarget === id)
-      return;
-    explicitTarget = id;
-    renderTarget();
-  }
   const needsBar = (v) => v.role !== "system" && (v.busy || v.status !== null);
-  const wantsBar = (v) => current().displayMode !== "paragraph" && needsBar(v);
+  const wantsBar = needsBar;
   function renderBar(bar, view) {
     const id = view.messageId;
     const items = [];
@@ -511,13 +479,10 @@ function setup(ctx) {
     }
     bar.replaceChildren(...items.filter((c) => !!c));
   }
-  const confirmFresh = new Set;
-  const confirmDelete = new Set;
   let fontStatusText = "모든 채팅에 적용 · 자동 저장";
   let viewSaveTimer = null;
   let localView = { ...DEFAULT_VIEW };
   let removeFontStyle = null;
-  let targetHost = null;
   let fontHost = null;
   function applyFontStyle() {
     removeFontStyle?.();
@@ -555,109 +520,30 @@ function setup(ctx) {
       el("span", { class: "stt-note" }, [fontStatusText])
     ]));
   }
-  function renderTarget() {
-    if (!targetHost)
-      return;
-    if (!chatId) {
-      targetHost.replaceChildren(el("div", { class: "stt-note" }, ["채팅을 열면 번역할 메시지를 고를 수 있습니다."]));
-      return;
-    }
-    const view = currentTarget();
-    if (!view) {
-      targetHost.replaceChildren(el("div", { class: "stt-note" }, ["번역할 메시지가 아직 없습니다."]));
-      return;
-    }
-    const id = view.messageId;
-    const settings = current();
-    const translated = !!view.text;
-    const chosenId = store ? effectiveConnectionId(store, chatId) : settings.connectionId;
-    const connection = chosenId ? connections.find((c) => c.id === chosenId)?.name ?? "삭제된 연결" : "자동 선택";
-    const unit = settings.translationUnit === "paragraph" ? "문단별 요청" : "메시지 통째로 1회 요청";
-    let status2 = "";
-    let error = false;
-    if (view.busy)
-      status2 = view.progress ? `번역 중 · ${view.progress.done}/${view.progress.total}` : "번역 중…";
-    else if (view.status === "error") {
-      status2 = view.error ? friendlyError(view.error) : "번역 오류";
-      error = true;
-    } else if (view.status === "partial")
-      status2 = '완료한 부분까지 저장했습니다. 남은 부분은 "이어서 번역"으로 이어 갑니다.';
-    else if (view.status === "done")
-      status2 = view.hidden ? "저장된 번역이 있습니다. 지금은 숨겨져 있습니다." : "저장된 번역입니다. 표시 방식을 바꾸거나 보기를 전환해도 다시 번역하지 않습니다.";
-    else
-      status2 = settings.autoTranslate ? "응답 자동 번역이 켜져 있습니다. 아래 버튼으로 바로 번역할 수도 있습니다." : "아직 번역하지 않았습니다. 새 번역은 버튼을 눌렀을 때만 요청합니다.";
-    const actions = [];
-    if (view.busy) {
-      actions.push(button("중단", () => toBackend({ type: "cancel", chatId, messageId: id })));
-    } else if (!translated) {
-      const label = settings.translationUnit === "paragraph" ? "문단 번역" : "번역";
-      actions.push(button(view.requestsNeeded > 0 ? `${label} · ${view.requestsNeeded}회 요청` : label, act(id, "translate", true), "stt-primary"));
-    } else if (view.hasMore) {
-      actions.push(button(view.requestsNeeded > 0 ? `이어서 번역 · ${view.requestsNeeded}회 요청` : "이어서 번역", act(id, "continue"), "stt-primary"));
-    } else {
-      const fresh = confirmFresh.has(id);
-      actions.push(button(fresh ? "확인: 새로 번역 요청" : "새로 번역", () => {
-        if (!fresh) {
-          confirmFresh.add(id);
-          renderTarget();
-          return;
-        }
-        confirmFresh.delete(id);
-        act(id, "translate", true)();
-      }, "stt-primary"));
-      actions.push(button("이어서 번역", act(id, "continue"), "", "끊긴 것 같으면 한 번 더 이어 붙여 봅니다"));
-    }
-    if (translated && !view.busy) {
-      actions.push(button(view.hidden ? "번역 보기" : "번역 숨기기", () => toBackend({ type: "set_hidden", chatId, messageId: id, hidden: !view.hidden })));
-      const sure = confirmDelete.has(id);
-      actions.push(button(sure ? "확인: 저장 번역 삭제" : "이 메시지 저장 삭제", () => {
-        if (!sure) {
-          confirmDelete.add(id);
-          renderTarget();
-          return;
-        }
-        confirmDelete.delete(id);
-        toBackend({ type: "delete_translation", chatId, messageId: id });
-      }, "stt-danger"));
-    }
-    targetHost.replaceChildren(el("div", { class: "stt-target-label" }, [`대상 메시지: ${targetLabel(view)}`, el("span", { class: "stt-note" }, [explicitTarget === id ? "" : " (자동 선택)"])]), el("div", { class: "stt-note" }, ["메시지의 번역 버튼이나 번역문을 누르면 그 메시지가 대상이 됩니다."]), el("div", { class: "stt-note" }, [`번역: ${connection} · ${settings.myLanguage} · ${unit}`]), el("div", { class: `stt-status${error ? " stt-err" : ""}`, role: "status" }, [status2]), el("div", { class: "stt-row" }, actions));
-  }
   const registerDecorator = ctx.ui.registerDomDecorator;
   const toolbars = mountToolbars({
     registerDecorator: typeof registerDecorator === "function" ? (spec) => registerDecorator.call(ctx.ui, spec) : null,
     listMessageElements: () => ctx.dom.listMessageElements(),
     getView: (id) => views.get(id),
     onTranslate: (id, force) => {
-      setTarget(id);
       act(id, "translate", force)();
     },
     onCancel: (id) => {
-      setTarget(id);
       if (chatId)
         toBackend({ type: "cancel", chatId, messageId: id });
     },
     onDelete: (id) => {
-      setTarget(id);
       const forChat = chatId;
       const view = views.get(id);
       if (!forChat || !view)
         return;
-      ctx.ui.showConfirm({ title: "번역 삭제", message: `${targetLabel(view)} 메시지에 저장된 번역문을 지울까요?
-메시지 원문은 그대로 남습니다.`, variant: "danger", confirmLabel: "번역 삭제" }).then(({ confirmed }) => {
+      ctx.ui.showConfirm({ title: "번역 삭제", message: `${targetLabel(view)} 메시지에서 지금 보이는 스와이프의 번역만 지울까요?
+다른 스와이프의 번역과 메시지 원문은 그대로 남습니다.`, variant: "danger", confirmLabel: "번역 삭제" }).then(({ confirmed }) => {
         if (confirmed)
-          toBackend({ type: "delete_translation", chatId: forChat, messageId: id });
+          toBackend({ type: "delete_translation", chatId: forChat, messageId: id, sourceKey: view.sourceKey });
       });
     }
   });
-  const onDocClick = (e) => {
-    const t = e.target;
-    if (!(t instanceof Element) || t.closest("[data-stt-tb]"))
-      return;
-    const id = ctx.dom.getMessageId(t);
-    if (id && views.get(id)?.text)
-      setTarget(id);
-  };
-  document.addEventListener("click", onDocClick, true);
   function decorate() {
     if (!chatId)
       return;
@@ -682,7 +568,6 @@ function setup(ctx) {
       renderBar(bar, view);
     }
     toolbars.refresh();
-    renderTarget();
   }
   let decorateQueued = false;
   const queueDecorate = () => {
@@ -705,9 +590,6 @@ function setup(ctx) {
       ctx.dom.uninject(bar);
     bars.clear();
     views.clear();
-    explicitTarget = null;
-    confirmFresh.clear();
-    confirmDelete.clear();
     chatId = next;
     renderDraftButton();
     renderPanel();
@@ -955,7 +837,6 @@ function setup(ctx) {
       draft.longSplitChars = Math.max(0, Number(split.value) || 0);
       markDirty();
     });
-    targetHost = el("div", { class: "stt-field" });
     fontHost = el("div", { class: "stt-field" });
     const paragraphMode = draft.displayMode === "paragraph";
     const paragraphSection = () => el("div", { class: "stt-section" }, [
@@ -966,11 +847,8 @@ function setup(ctx) {
       }, false),
       text('도착 언어 (응답을 번역할 언어, "내 언어"와 같은 설정)', "myLanguage"),
       fontHost,
-      el("div", { class: "stt-note" }, ["보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다."]),
-      el("h3", {}, ["선택한 메시지"]),
-      targetHost
+      el("div", { class: "stt-note" }, ["보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다."])
     ]);
-    const targetSection = () => el("div", { class: "stt-section" }, [el("h3", {}, ["메시지 번역"]), targetHost]);
     panel.replaceChildren(el("div", { class: "stt-note" }, [chatId ? "지금 열린 채팅의 번역 설정입니다." : "열린 채팅이 없어 새 채팅의 기본값을 편집합니다."]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["기본 번역"]),
       select("번역에 쓸 AI 연결", draft.connectionId, connectionOptions, (v) => {
@@ -989,7 +867,7 @@ function setup(ctx) {
       ], (v) => draft.translationUnit = v === "paragraph" ? "paragraph" : "whole"),
       check("내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)", "translateMyMessages"),
       check("입력창 옆에 번역 버튼 표시", "showDraftButton")
-    ]), paragraphMode ? paragraphSection() : targetSection(), el("div", { class: "stt-section" }, [el("h3", {}, ["프롬프트 프리셋"]), promptSection("incoming"), promptSection("outgoing"), presetManager()]), el("div", { class: "stt-section" }, [
+    ]), ...paragraphMode ? [paragraphSection()] : [], el("div", { class: "stt-section" }, [el("h3", {}, ["프롬프트 프리셋"]), promptSection("incoming"), promptSection("outgoing"), presetManager()]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["단어장"]),
       text("한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)", "glossary", { multiline: true, placeholder: `마리나라 = Marinara
 로어북 = lorebook` })
@@ -1014,7 +892,6 @@ function setup(ctx) {
       el("label", { class: "stt-field" }, [el("span", {}, ["이 글자 수 이상이면 문단별로 나눠 번역 (0 = 나누지 않음)"]), split])
     ]), saveRow);
     renderFonts();
-    renderTarget();
   }
   const onBeforeUnload = (e) => {
     if (!dirty)
@@ -1086,7 +963,6 @@ function setup(ctx) {
     removeFontStyle?.();
     observer.disconnect();
     toolbars.destroy();
-    document.removeEventListener("click", onDocClick, true);
     offEvents.forEach((off) => off());
     offBackend();
     offAction();

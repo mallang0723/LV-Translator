@@ -1,32 +1,9 @@
-// Pure logic behind the per-message toolbar buttons and the panel's target message.
+// Pure logic behind the per-message toolbar buttons.
 // No DOM and no host access, so it can be tested directly.
 
-import type { MessageTranslations, MessageView, TranslationRecord, TranslationStatus } from './shared';
+import { type MessageTranslations, type MessageView, sourceHash, type TranslationRecord, type TranslationStatus } from './shared';
 
-// ---- target message ----
-
-/**
- * The message the panel's per-message controls act on.
- *   1. the one the user picked (translate button or a click on its translation), while it still exists;
- *   2. otherwise the message translated most recently;
- *   3. otherwise the latest assistant message;
- *   4. otherwise the latest message that is not a system message.
- */
-export function pickTarget(views: readonly MessageView[], explicitId: string | null): MessageView | null {
-  const usable = views.filter((v) => v.role !== 'system');
-  if (explicitId) {
-    const picked = usable.find((v) => v.messageId === explicitId);
-    if (picked) return picked;
-  }
-  let recent: MessageView | null = null;
-  for (const v of usable) {
-    if (v.updatedAt === null) continue;
-    if (!recent || v.updatedAt > (recent.updatedAt ?? 0) || (v.updatedAt === (recent.updatedAt ?? 0) && v.index > recent.index)) recent = v;
-  }
-  if (recent) return recent;
-  const latest = (list: MessageView[]) => list.reduce<MessageView | null>((best, v) => (!best || v.index > best.index ? v : best), null);
-  return latest(usable.filter((v) => v.role === 'assistant')) ?? latest(usable);
-}
+// ---- message label ----
 
 /** "#225 name" (just "#225" when the message has no name). */
 export function targetLabel(view: Pick<MessageView, 'index' | 'name'>): string {
@@ -42,7 +19,7 @@ export interface ToolbarState {
   /** A translation is replaced: the host asks the backend to translate even if one is saved. */
   force: boolean;
   label: string;
-  /** The delete-translation button is only offered while a translation exists and nothing is running. */
+  /** The delete-translation button is only offered while the visible swipe has a translation and nothing is running. */
   canDelete: boolean;
   busy: boolean;
 }
@@ -60,7 +37,7 @@ export function toolbarState(view: Pick<MessageView, 'busy' | 'text' | 'status'>
   };
 }
 
-export const DELETE_TRANSLATION_LABEL = '번역 삭제 (이 메시지에 저장된 번역문만 지웁니다. 메시지는 그대로입니다)';
+export const DELETE_TRANSLATION_LABEL = '번역 삭제 (지금 보이는 스와이프의 번역만 지웁니다. 메시지는 그대로입니다)';
 
 /** Message id from a decorator scope such as `message:<id>:actions`. */
 export function messageIdFromScope(scope: string): string | null {
@@ -76,8 +53,20 @@ export function skipFresh(mode: 'fresh' | 'continue', existing: Pick<Translation
   return mode === 'fresh' && status === 'done' && !force;
 }
 
-/** Deletes every stored translation of the message (all swipes) and un-hides it. Edits the given object. */
-export function clearTranslations(mt: MessageTranslations): void {
-  mt.entries = {};
-  mt.hidden = false;
+/**
+ * The translation of the swipe that is showing. Translations are keyed by sourceHash(content), and
+ * the message's `content` is always the active swipe's text, so switching swipes switches the key.
+ */
+export function recordFor(mt: Pick<MessageTranslations, 'entries'> | null | undefined, content: string): TranslationRecord | null {
+  return mt?.entries?.[sourceHash(content)] ?? null;
+}
+
+/**
+ * Deletes the translation stored under `key` (the visible swipe's sourceHash) and leaves every other
+ * swipe's translation alone. The "hidden" flag belongs to the whole message, so it is only reset once
+ * nothing is left to hide. Edits the given object; the stored shape is unchanged.
+ */
+export function clearTranslation(mt: MessageTranslations, key: string): void {
+  delete mt.entries[key];
+  if (Object.keys(mt.entries).length === 0) mt.hidden = false;
 }
