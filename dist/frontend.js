@@ -110,6 +110,18 @@ function messageIdFromScope(scope) {
   const m = /^message:(.+):actions$/.exec(scope);
   return m ? m[1] : null;
 }
+function showsToggle(view, mode) {
+  return mode !== "paragraph" && !!view.text;
+}
+function wantsBar(view, mode) {
+  if (view.role === "system")
+    return false;
+  if (view.busy)
+    return true;
+  if (mode === "paragraph")
+    return view.status === "error" || view.status === "partial";
+  return view.status !== null;
+}
 
 // src/toolbar.ts
 var ICON_TRANSLATE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
@@ -456,8 +468,7 @@ function setup(ctx) {
       return run();
     });
   };
-  const needsBar = (v) => v.role !== "system" && (v.busy || v.status !== null);
-  const wantsBar = needsBar;
+  const barWanted = (v) => wantsBar(v, current().displayMode);
   function renderBar(bar, view) {
     const id = view.messageId;
     const items = [];
@@ -473,7 +484,7 @@ function setup(ctx) {
       }
       if (view.hasMore)
         items.push(button("이어서 번역", act(id, "continue"), "stt-primary", "끊긴 곳부터 이어서 번역합니다"));
-      if (view.text) {
+      if (showsToggle(view, current().displayMode)) {
         items.push(button(view.hidden ? "번역 보기" : "번역 숨기기", () => chatId && toBackend({ type: "set_hidden", chatId, messageId: id, hidden: !view.hidden })));
       }
     }
@@ -549,7 +560,7 @@ function setup(ctx) {
       return;
     for (const view of views.values()) {
       let bar = bars.get(view.messageId);
-      if (!wantsBar(view)) {
+      if (!barWanted(view)) {
         if (bar) {
           ctx.dom.uninject(bar);
           bars.delete(view.messageId);
@@ -579,7 +590,7 @@ function setup(ctx) {
       decorate();
     }, 150);
   };
-  const missingBar = () => [...views.values()].some((v) => wantsBar(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
+  const missingBar = () => [...views.values()].some((v) => barWanted(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
   const observer = new MutationObserver(() => {
     if (chatId && missingBar())
       queueDecorate();

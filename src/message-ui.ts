@@ -1,7 +1,7 @@
 // Pure logic behind the per-message toolbar buttons.
 // No DOM and no host access, so it can be tested directly.
 
-import { type MessageTranslations, type MessageView, sourceHash, type TranslationRecord, type TranslationStatus } from './shared';
+import { type DisplayMode, type MessageTranslations, type MessageView, sourceHash, type TranslationRecord, type TranslationStatus } from './shared';
 
 // ---- message label ----
 
@@ -43,6 +43,33 @@ export const DELETE_TRANSLATION_LABEL = '번역 삭제 (지금 보이는 스와�
 export function messageIdFromScope(scope: string): string | null {
   const m = /^message:(.+):actions$/.exec(scope);
   return m ? m[1]! : null;
+}
+
+// ---- slim status bar under a message ----
+
+/**
+ * The show / hide translation toggle. The paragraph view always sits next to the original, so hiding
+ * it is pointless there (the toolbar's delete button removes a translation); the other modes keep it.
+ */
+export function showsToggle(view: Pick<MessageView, 'text'>, mode: DisplayMode): boolean {
+  return mode !== 'paragraph' && !!view.text;
+}
+
+/**
+ * Whether the slim bar is shown. Outside the paragraph view any message with a translation state gets
+ * one (it carries the show / hide toggle). In the paragraph view only trouble does: busy, error or a
+ * partial translation. A normally translated message has no bar there.
+ */
+export function wantsBar(view: Pick<MessageView, 'role' | 'busy' | 'status'>, mode: DisplayMode): boolean {
+  if (view.role === 'system') return false;
+  if (view.busy) return true;
+  if (mode === 'paragraph') return view.status === 'error' || view.status === 'partial';
+  return view.status !== null;
+}
+
+/** Whether the translation is hidden for display. A stale hidden flag never hides the paragraph view. */
+export function isTranslationHidden(hidden: boolean | undefined, mode: DisplayMode): boolean {
+  return mode !== 'paragraph' && hidden === true;
 }
 
 // ---- backend decisions ----

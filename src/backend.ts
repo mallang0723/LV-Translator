@@ -25,7 +25,7 @@ import {
 } from './shared';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { buildParagraphView } from './display/paragraph-view';
-import { clearTranslation, recordFor, skipFresh } from './message-ui';
+import { clearTranslation, isTranslationHidden, recordFor, skipFresh } from './message-ui';
 import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
@@ -318,11 +318,13 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   if (ctx.origin !== 'render' || !ctx.messageId || !ctx.content) return;
   const chat = await cachedChat(ctx.chatId);
   const mt = chat.get(ctx.messageId);
-  if (!mt || mt.hidden) return;
-  const record = mt.entries[sourceHash(ctx.content)];
-  if (!record || !record.parts.some((p) => p.trim())) return;
+  if (!mt) return;
   const store = await loadStore(ctx.userId);
   const settings = settingsFor(store, ctx.chatId);
+  // The paragraph view has no hide toggle, so a "hidden" flag left over from another mode must not hide it.
+  if (isTranslationHidden(mt.hidden, settings.displayMode)) return;
+  const record = mt.entries[sourceHash(ctx.content)];
+  if (!record || !record.parts.some((p) => p.trim())) return;
   if (settings.displayMode === 'paragraph') return { content: buildParagraphView(ctx.content, record, settings, store.view.paragraphView) };
   const text = recordToText(record);
   switch (settings.displayMode) {

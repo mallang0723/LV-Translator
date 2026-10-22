@@ -23,7 +23,7 @@ import {
   effectiveConnectionId,
 } from './shared';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
-import { targetLabel } from './message-ui';
+import { showsToggle, targetLabel, wantsBar } from './message-ui';
 import { type DecoratorSpec, mountToolbars } from './toolbar';
 
 const CSS = `
@@ -213,12 +213,11 @@ export function setup(ctx: SpindleFrontendContext) {
       });
   };
 
-  const needsBar = (v: MessageView) => v.role !== 'system' && (v.busy || v.status !== null);
-  const wantsBar = needsBar;
+  const barWanted = (v: MessageView) => wantsBar(v, current().displayMode);
 
   /**
    * Slim row under a message (below / only / collapsed modes) for what the toolbar does not cover:
-   * progress, trouble, continue, and showing or hiding the translation.
+   * progress, trouble, continue, and (outside the paragraph view) showing or hiding the translation.
    */
   function renderBar(bar: HTMLElement, view: MessageView): void {
     const id = view.messageId;
@@ -233,7 +232,7 @@ export function setup(ctx: SpindleFrontendContext) {
         items.push(el('span', { class: 'stt-note stt-warn' }, [`번역이 중간에 끊겼습니다${progress}`]));
       }
       if (view.hasMore) items.push(button('이어서 번역', act(id, 'continue'), 'stt-primary', '끊긴 곳부터 이어서 번역합니다'));
-      if (view.text) {
+      if (showsToggle(view, current().displayMode)) {
         items.push(button(view.hidden ? '번역 보기' : '번역 숨기기', () => chatId && toBackend({ type: 'set_hidden', chatId, messageId: id, hidden: !view.hidden })));
       }
     }
@@ -320,7 +319,7 @@ export function setup(ctx: SpindleFrontendContext) {
     if (!chatId) return;
     for (const view of views.values()) {
       let bar = bars.get(view.messageId);
-      if (!wantsBar(view)) {
+      if (!barWanted(view)) {
         if (bar) {
           ctx.dom.uninject(bar);
           bars.delete(view.messageId);
@@ -351,7 +350,7 @@ export function setup(ctx: SpindleFrontendContext) {
     }, 150);
   };
   /** A message that should have a bar but has none yet, and is on screen now. */
-  const missingBar = () => [...views.values()].some((v) => wantsBar(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
+  const missingBar = () => [...views.values()].some((v) => barWanted(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
   const observer = new MutationObserver(() => {
     if (chatId && missingBar()) queueDecorate();
   });

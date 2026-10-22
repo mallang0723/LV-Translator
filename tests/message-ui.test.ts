@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { clearTranslation, DELETE_TRANSLATION_LABEL, messageIdFromScope, recordFor, skipFresh, targetLabel, toolbarState } from '../src/message-ui';
+import { clearTranslation, DELETE_TRANSLATION_LABEL, isTranslationHidden, messageIdFromScope, recordFor, showsToggle, skipFresh, targetLabel, toolbarState, wantsBar } from '../src/message-ui';
 import { type MessageTranslations, type MessageView, sourceHash } from '../src/shared';
 
 function view(over: Partial<MessageView> & { messageId: string }): MessageView {
@@ -183,5 +183,53 @@ describe('toolbar follows the visible swipe', () => {
   test('a failed attempt with no text keeps delete hidden', () => {
     const failed: MessageTranslations = { v: 1, entries: { [sourceHash(swipes[1]!)]: { parts: [], pieces: [], total: 1, truncatedPart: -1, status: 'error', updatedAt: 1 } } };
     expect(stateAt(swipes[1]!, failed)).toMatchObject({ canDelete: false, force: true });
+  });
+});
+
+describe('slim status bar', () => {
+  const modes = ['below', 'only', 'collapsed'] as const;
+
+  test('paragraph view: no bar and no toggle for a normally translated message', () => {
+    const v = translated('a', 1, 1);
+    expect(wantsBar(v, 'paragraph')).toBe(false);
+    expect(showsToggle(v, 'paragraph')).toBe(false);
+  });
+
+  test('paragraph view: a bar for error, partial and busy', () => {
+    expect(wantsBar(view({ messageId: 'a', status: 'error', error: 'x' }), 'paragraph')).toBe(true);
+    expect(wantsBar(translated('a', 1, 1, { status: 'partial', hasMore: true }), 'paragraph')).toBe(true);
+    expect(wantsBar(view({ messageId: 'a', busy: true }), 'paragraph')).toBe(true);
+    expect(wantsBar(translated('a', 1, 1, { busy: true }), 'paragraph')).toBe(true);
+  });
+
+  test('paragraph view: even a partial or errored message gets no toggle', () => {
+    expect(showsToggle(translated('a', 1, 1, { status: 'partial', hasMore: true }), 'paragraph')).toBe(false);
+  });
+
+  test('paragraph view: an untranslated message and a system message have no bar', () => {
+    expect(wantsBar(view({ messageId: 'a' }), 'paragraph')).toBe(false);
+    expect(wantsBar(view({ messageId: 'a', role: 'system', busy: true }), 'paragraph')).toBe(false);
+  });
+
+  test('other modes keep the bar and the show / hide toggle', () => {
+    for (const mode of modes) {
+      const v = translated('a', 1, 1);
+      expect(wantsBar(v, mode)).toBe(true);
+      expect(showsToggle(v, mode)).toBe(true);
+      expect(wantsBar(view({ messageId: 'a', status: 'error', error: 'x' }), mode)).toBe(true);
+      expect(wantsBar(view({ messageId: 'a', busy: true }), mode)).toBe(true);
+      expect(wantsBar(view({ messageId: 'a' }), mode)).toBe(false);
+      expect(wantsBar(view({ messageId: 'a', role: 'system', status: 'done' }), mode)).toBe(false);
+    }
+    expect(showsToggle(view({ messageId: 'a', status: 'error', error: 'x' }), 'below')).toBe(false);
+  });
+
+  test('a stale hidden flag never hides the paragraph view, but still hides other modes', () => {
+    expect(isTranslationHidden(true, 'paragraph')).toBe(false);
+    expect(isTranslationHidden(true, 'below')).toBe(true);
+    expect(isTranslationHidden(true, 'only')).toBe(true);
+    expect(isTranslationHidden(true, 'collapsed')).toBe(true);
+    expect(isTranslationHidden(false, 'below')).toBe(false);
+    expect(isTranslationHidden(undefined, 'below')).toBe(false);
   });
 });

@@ -1606,6 +1606,9 @@ ${block("stt-pr-tgt", targetLabel, target)}
 }
 
 // src/message-ui.ts
+function isTranslationHidden(hidden, mode) {
+  return mode !== "paragraph" && hidden === true;
+}
 function skipFresh(mode, existing, force) {
   const status = existing?.status;
   return mode === "fresh" && status === "done" && !force;
@@ -1861,13 +1864,15 @@ spindle.registerMessageContentProcessor(async (ctx) => {
     return;
   const chat = await cachedChat(ctx.chatId);
   const mt = chat.get(ctx.messageId);
-  if (!mt || mt.hidden)
+  if (!mt)
+    return;
+  const store = await loadStore(ctx.userId);
+  const settings = settingsFor(store, ctx.chatId);
+  if (isTranslationHidden(mt.hidden, settings.displayMode))
     return;
   const record = mt.entries[sourceHash(ctx.content)];
   if (!record || !record.parts.some((p) => p.trim()))
     return;
-  const store = await loadStore(ctx.userId);
-  const settings = settingsFor(store, ctx.chatId);
   if (settings.displayMode === "paragraph")
     return { content: buildParagraphView(ctx.content, record, settings, store.view.paragraphView) };
   const text = recordToText(record);
