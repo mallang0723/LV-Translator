@@ -12,7 +12,7 @@ Lumiverse에는 기본 채팅 번역 기능이 없어서, 번역은 이 확장�
 
 ## 설치
 
-1. Lumiverse → Extensions → **Add Extension** → *Install from Source*에 `https://github.com/mallang0723/<REPO>` 입력 → **Install**
+1. Lumiverse → Extensions → **Add Extension** → *Install from Source*에 `https://github.com/mallang0723/LV-Translator` 입력 → **Install**
 2. 확장을 켜고 권한 두 개를 허용합니다.
    - `generation`: 번역 모델 호출, 생성 종료 감지
    - `chat_mutation`: 메시지에 번역문 저장, 화면에 번역문 표시
