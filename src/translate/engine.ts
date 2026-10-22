@@ -13,6 +13,7 @@ import {
   type PromptPreset,
   type TranslationRequest,
 } from './prompt';
+import { hasNoText, splitParagraphs } from './paragraphs';
 import { checkMarkers, protect, restore } from './protect';
 
 export const MAX_AUTO_CONTINUE = 4;
@@ -51,9 +52,31 @@ export function recordToText(r: TranslationRecord): string {
   return restore(r.parts.filter((p) => p.trim()).join('\n\n'), r.pieces);
 }
 
-function partSources(protectedText: string, settings: ChatSettings): string[] {
+/** The source parts that are translated one request each. */
+export function partSources(protectedText: string, settings: ChatSettings): string[] {
+  if (settings.translationUnit === 'paragraph') {
+    const paragraphs = splitParagraphs(protectedText);
+    return paragraphs.length ? paragraphs : [protectedText];
+  }
   const long = settings.longSplitChars > 0 && protectedText.length >= settings.longSplitChars;
   return long ? splitForTranslation(protectedText, TRANSLATION_CHUNK_CHARS) : [protectedText];
+}
+
+function resumable(record: TranslationRecord | null | undefined, pieces: string[], total: number, settings: ChatSettings): record is TranslationRecord {
+  return !!record && sameArray(record.pieces, pieces) && record.total === total && (record.unit ?? 'whole') === settings.translationUnit;
+}
+
+/** Requests still needed to translate `source` (parts already done in `record` are skipped). */
+export function requestsNeeded(source: string, settings: ChatSettings, record: TranslationRecord | null | undefined): number {
+  let prot;
+  try {
+    prot = protect(source, settings);
+  } catch {
+    return 0;
+  }
+  const sources = partSources(prot.text, settings);
+  const start = resumable(record, prot.pieces, sources.length, settings) ? record.parts.length : 0;
+  return sources.slice(start).filter((part) => !hasNoText(part)).length;
 }
 
 function sameArray(a: string[], b: string[]): boolean {
@@ -70,11 +93,10 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
   };
 
   // A resumable record must come from the same protected text and split.
-  const resume =
-    job.resume && sameArray(job.resume.pieces, prot.pieces) && job.resume.total === sources.length ? job.resume : null;
+  const resume = resumable(job.resume, prot.pieces, sources.length, settings) ? job.resume! : null;
   const record: TranslationRecord = resume
     ? { ...resume, parts: [...resume.parts], status: 'partial', error: undefined, updatedAt: Date.now() }
-    : { parts: [], pieces: prot.pieces, total: sources.length, truncatedPart: -1, status: 'partial', updatedAt: Date.now() };
+    : { parts: [], pieces: prot.pieces, unit: settings.translationUnit, total: sources.length, truncatedPart: -1, status: 'partial', updatedAt: Date.now() };
 
   const requestFor = (part: string) =>
     buildTranslationRequest({
@@ -110,6 +132,12 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
 
   /** Translates part i from scratch. Returns true when complete (not cut off). */
   const translatePart = async (i: number): Promise<boolean> => {
+    if (hasNoText(sources[i]!)) {
+      // Separators, markup or protected parts only: kept as they are, no request.
+      record.parts[i] = sources[i]!;
+      await save();
+      return true;
+    }
     const request = requestFor(sources[i]!);
     for (let attempt = 0; attempt < 2; attempt++) {
       aborted();

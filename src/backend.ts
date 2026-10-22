@@ -13,6 +13,7 @@ import {
   type MessageView,
   normalizeSettings,
   normalizeStore,
+  normalizeView,
   recordHasMore,
   settingsFor,
   sourceHash,
@@ -21,7 +22,8 @@ import {
   type ToFrontend,
   type TranslationRecord,
 } from './shared';
-import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
+import { buildParagraphView } from './display/paragraph-view';
+import { type Completion, recordToText, requestsNeeded, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
 
@@ -135,10 +137,11 @@ async function writeTranslations(chatId: string, messageId: string, change: (mt:
 const jobs = new Map<string, AbortController>();
 const jobKey = (chatId: string, messageId: string) => `${chatId}:${messageId}`;
 
-function viewOf(chatId: string, message: ChatMessage, overrideRecord?: TranslationRecord | null): MessageView {
+function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, overrideRecord?: TranslationRecord | null): MessageView {
   const mt = readTranslations(message);
   const record = overrideRecord !== undefined ? overrideRecord : (mt?.entries[sourceHash(message.content)] ?? null);
   return {
+    requestsNeeded: message.content ? requestsNeeded(message.content, settings, record) : 0,
     messageId: message.id,
     role: message.role,
     text: record && record.parts.some((p) => p.trim()) ? recordToText(record) : null,
@@ -152,12 +155,14 @@ function viewOf(chatId: string, message: ChatMessage, overrideRecord?: Translati
 }
 
 async function sendChatViews(uid: Uid, chatId: string): Promise<void> {
+  const settings = settingsFor(await loadStore(uid), chatId);
   const messages = await getMessages(chatId);
-  send({ type: 'views', chatId, views: messages.map((m) => viewOf(chatId, m)), replace: true }, uid);
+  send({ type: 'views', chatId, views: messages.map((m) => viewOf(chatId, m, settings)), replace: true }, uid);
 }
 
-function sendView(uid: Uid, chatId: string, message: ChatMessage, record?: TranslationRecord | null): void {
-  send({ type: 'views', chatId, views: [viewOf(chatId, message, record)], replace: false }, uid);
+async function sendView(uid: Uid, chatId: string, message: ChatMessage, record?: TranslationRecord | null): Promise<void> {
+  const settings = settingsFor(await loadStore(uid), chatId);
+  send({ type: 'views', chatId, views: [viewOf(chatId, message, settings, record)], replace: false }, uid);
 }
 
 // ---- translation ----
@@ -219,7 +224,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     const hash = sourceHash(message.content);
     const existing = readTranslations(message)?.entries[hash];
     if (mode === 'fresh' && existing?.status === 'done' && !options.force) return;
-    sendView(uid, chatId, message);
+    await sendView(uid, chatId, message);
 
     const source = message.content;
     const record = await translate(
@@ -239,7 +244,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
             mt.entries[hash] = progress;
             mt.hidden = false;
           });
-          if (updated) sendView(uid, chatId, updated);
+          if (updated) await sendView(uid, chatId, updated);
         },
       },
     );
@@ -266,7 +271,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     spindle.toast.error(`번역 실패: ${text}`, { userId: uid });
   } finally {
     jobs.delete(key);
-    if (message) sendView(uid, chatId, message);
+    if (message) await sendView(uid, chatId, message).catch(() => {});
   }
 }
 
@@ -300,8 +305,10 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const record = mt.entries[sourceHash(ctx.content)];
   if (!record || !record.parts.some((p) => p.trim())) return;
   const store = await loadStore(ctx.userId);
+  const settings = settingsFor(store, ctx.chatId);
+  if (settings.displayMode === 'paragraph') return { content: buildParagraphView(ctx.content, record, settings, store.view.paragraphView) };
   const text = recordToText(record);
-  switch (settingsFor(store, ctx.chatId).displayMode) {
+  switch (settings.displayMode) {
     case 'only':
       return { content: text };
     case 'collapsed':
@@ -390,7 +397,23 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
         mt.hidden = msg.hidden;
       });
-      if (updated) sendView(uid, msg.chatId, updated);
+      if (updated) await sendView(uid, msg.chatId, updated);
+      return;
+    }
+    case 'delete_translation': {
+      jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
+      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
+        mt.entries = {};
+        mt.hidden = false;
+      });
+      if (updated) await sendView(uid, msg.chatId, updated);
+      return;
+    }
+    case 'save_view': {
+      const store = await loadStore(uid);
+      store.view = normalizeView(msg.view);
+      await saveStore(uid, store);
+      await sendState(uid);
       return;
     }
     case 'translate_text':

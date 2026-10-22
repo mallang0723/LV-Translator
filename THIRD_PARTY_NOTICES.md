@@ -32,3 +32,7 @@ SOFTWARE.
 ## Translation Polisher 0.2.3
 
 `splitForTranslation` in `src/translate/chunk.ts` is adapted from the long-passage split of the Translation Polisher 0.2.3 Marinara personal extension. The extension package states no license.
+
+## Paragraph Reader 0.2.0
+
+The paragraph split, the no-text paragraph check, the HTML block grouping (`src/translate/paragraphs.ts`) and the paragraph view design come from Paragraph Reader 0.2.0, written by the owner of this repository.

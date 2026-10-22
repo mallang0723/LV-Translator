@@ -7,7 +7,12 @@ import {
   type ChatSettings,
   type ConnectionSummary,
   DEFAULT_SETTINGS,
+  DEFAULT_VIEW,
   type DisplayMode,
+  FONT_MAX,
+  FONT_MIN,
+  normalizeView,
+  type ViewSettings,
   INHERIT_PRESET_ID,
   type MessageView,
   type PresetSummary,
@@ -31,6 +36,53 @@ const CSS = `
 .stt-note.stt-err { color: var(--lumiverse-danger, #d55); opacity: 1; }
 hr.stt-separator { border: 0; border-top: 1px dashed var(--lumiverse-border, rgba(127,127,127,0.4)); margin: 0.8em 0; }
 details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text-muted, inherit); }
+/* Paragraph Reader view (message content) */
+.stt-pr { --stt-accent: var(--lumiverse-primary, #6753cf); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.stt-pr-note { font-size: 12px; color: var(--lumiverse-text-muted, inherit); margin-bottom: 12px; white-space: pre-wrap; }
+.stt-pr-pair { margin: 0 0 18px; }
+.stt-pr-pair:last-child { margin-bottom: 0; }
+.stt-pr-label { display: block; margin-bottom: 4px; font-size: 10px; letter-spacing: .06em; color: var(--lumiverse-text-muted, inherit); font-weight: 700; }
+.stt-pr-src { color: var(--lumiverse-text-muted, inherit); font-size: var(--stt-src-size, 16px); line-height: 1.75; }
+.stt-pr-tgt { font-size: var(--stt-tgt-size, 18px); line-height: 1.75; border-left: 3px solid var(--stt-accent); padding-left: 12px; margin-top: 8px; }
+.stt-pr-src > :first-child, .stt-pr-tgt > :first-child { margin-top: 0; }
+.stt-pr-src p, .stt-pr-tgt p { margin: 0 0 .4em; }
+.stt-pr-same { font-size: var(--stt-src-size, 16px); }
+.stt-pr-pending { color: var(--lumiverse-text-muted, inherit); font-style: italic; }
+.stt-pr-tap .stt-pr-tgt { margin-top: 0; }
+.stt-pr-orig { border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); padding: 6px 0 12px 15px; }
+.stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
+.stt-pr-orig[open] > summary { color: var(--stt-accent); }
+.stt-pr-orig { color: var(--lumiverse-text-muted, inherit); font-size: var(--stt-src-size, 16px); line-height: 1.75; }
+/* Paragraph Reader panel (above the content) */
+.stt-pr-widget { --stt-accent: var(--lumiverse-primary, #6753cf); font-size: 14px; line-height: 1.6; margin: 4px 0 10px; min-width: 0; max-width: 100%; text-align: left; }
+.stt-pr-widget * { box-sizing: border-box; }
+.stt-pr-widget button, .stt-pr-widget select, .stt-pr-widget input { font: inherit; color: inherit; }
+.stt-pr-widget button { cursor: pointer; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 9px; background: transparent; padding: 5px 10px; min-height: 34px; line-height: 1.3; }
+.stt-pr-widget button:hover:not(:disabled) { border-color: var(--stt-accent); }
+.stt-pr-widget button:disabled { opacity: .5; cursor: default; }
+.stt-pr-launch { color: var(--lumiverse-text-muted, inherit); font-size: 12px !important; padding: 4px 9px !important; min-height: 30px !important; }
+.stt-pr-panel { border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 14px; padding: 14px; margin-top: 7px; background: var(--lumiverse-fill-subtle, transparent); }
+.stt-pr-head, .stt-pr-controls, .stt-pr-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.stt-pr-head { justify-content: space-between; margin-bottom: 12px; }
+.stt-pr-title { font-size: 14px; font-weight: 700; }
+.stt-pr-pill { color: var(--stt-accent); font-size: 11px; font-weight: 700; background: color-mix(in srgb, var(--stt-accent) 12%, transparent); border-radius: 20px; padding: 2px 8px; }
+.stt-pr-controls { font-size: 12px; color: var(--lumiverse-text-muted, inherit); }
+.stt-pr-controls label { display: inline-flex; align-items: center; gap: 5px; }
+.stt-pr-controls input, .stt-pr-controls select { border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 7px; background: transparent; padding: 5px 7px; min-height: 34px; }
+.stt-pr-controls input { width: 90px; }
+.stt-pr-font { margin-top: 12px; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.35)); border-radius: 10px; padding: 8px 10px; font-size: 12px; }
+.stt-pr-font > summary { cursor: pointer; }
+.stt-pr-font-row { display: flex; align-items: center; gap: 7px; margin: 8px 0; }
+.stt-pr-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
+.stt-pr-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--stt-accent); }
+.stt-pr-font-row button { width: 34px; min-width: 34px; padding: 0 !important; font-size: 18px; }
+.stt-pr-font-row output { min-width: 37px; text-align: center; font-variant-numeric: tabular-nums; }
+.stt-pr-font-footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.stt-pr-provider, .stt-pr-status { font-size: 12px; color: var(--lumiverse-text-muted, inherit); margin-top: 9px; white-space: pre-wrap; }
+.stt-pr-status.stt-err { color: var(--lumiverse-danger, #c23b45); }
+.stt-pr-actions { margin-top: 10px; }
+.stt-pr-actions button { font-size: 12px; }
+.stt-pr-widget .stt-pr-primary { background: var(--stt-accent); color: #fff; border-color: transparent; font-weight: 600; }
 .stt-panel { display: flex; flex-direction: column; gap: 12px; padding: 10px; color: var(--lumiverse-text, inherit); font-size: 0.92em; }
 .stt-section { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); border-radius: var(--lumiverse-radius, 8px); padding: 9px; }
 .stt-section > h3 { margin: 0; font-size: 1em; }
@@ -66,7 +118,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Record<string,
 }
 
 const button = (label: string, onClick: () => void, cls = '', title?: string) =>
-  el('button', { type: 'button', class: `stt-btn ${cls}`.trim(), title: title ?? label, onClick }, [label]);
+  el('button', { type: 'button', class: `stt-btn ${cls}`.trim(), title: title ?? label, 'aria-label': title ?? label, onClick }, [label]);
 
 const ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
 
@@ -74,6 +126,7 @@ const DISPLAY_LABELS: Record<DisplayMode, string> = {
   below: '원문 아래에 번역문',
   only: '번역문만 (원문 숨김)',
   collapsed: '원문 + 접힌 번역문',
+  paragraph: '문단 대조 (Paragraph Reader)',
 };
 
 export function setup(ctx: SpindleFrontendContext) {
@@ -107,27 +160,29 @@ export function setup(ctx: SpindleFrontendContext) {
 
   // ---- per-message controls ----
 
+  const act = (id: string, type: 'translate' | 'continue', force = false) => () => {
+    if (!chatId) return;
+    if (type === 'translate') toBackend({ type, chatId, messageId: id, force });
+    else toBackend({ type, chatId, messageId: id });
+  };
+
+  /** Compact button row under the message (below / only / collapsed modes). */
   function renderBar(bar: HTMLElement, view: MessageView): void {
     const id = view.messageId;
-    const act = (type: 'translate' | 'continue', force = false) => () => {
-      if (!chatId) return;
-      if (type === 'translate') toBackend({ type, chatId, messageId: id, force });
-      else toBackend({ type, chatId, messageId: id });
-    };
     const items: Children = [];
     if (view.busy) {
       items.push(el('span', { class: 'stt-note' }, [view.progress ? `번역 중… ${view.progress.done}/${view.progress.total}` : '번역 중…']));
       items.push(button('취소', () => chatId && toBackend({ type: 'cancel', chatId, messageId: id }), 'stt-danger'));
     } else if (!view.status) {
-      items.push(button('번역', act('translate'), 'stt-primary'));
+      items.push(button('번역', act(id, 'translate'), 'stt-primary'));
     } else {
       if (view.status === 'error') items.push(el('span', { class: 'stt-note stt-err', title: view.error ?? '' }, [`번역 오류: ${(view.error ?? '').slice(0, 120)}`]));
       if (view.status === 'partial') {
         const progress = view.progress && view.progress.done < view.progress.total ? ` (${view.progress.done}/${view.progress.total})` : '';
         items.push(el('span', { class: 'stt-note stt-warn' }, [`번역이 중간에 끊겼습니다${progress}`]));
       }
-      items.push(button('이어서 번역', act('continue'), view.hasMore ? 'stt-primary' : '', '끊긴 곳부터 이어서 번역합니다'));
-      items.push(button(view.status === 'error' ? '다시 시도' : '다시 번역', act('translate', true)));
+      items.push(button('이어서 번역', act(id, 'continue'), view.hasMore ? 'stt-primary' : '', '끊긴 곳부터 이어서 번역합니다'));
+      items.push(button(view.status === 'error' ? '다시 시도' : '다시 번역', act(id, 'translate', true)));
       if (view.text) {
         items.push(button(view.hidden ? '번역 보기' : '번역 숨기기', () => chatId && toBackend({ type: 'set_hidden', chatId, messageId: id, hidden: !view.hidden })));
       }
@@ -135,22 +190,162 @@ export function setup(ctx: SpindleFrontendContext) {
     bar.replaceChildren(...items.filter((c): c is Node | string => !!c));
   }
 
+  // ---- Paragraph Reader panel (paragraph mode) ----
+
+  const panelOpen = new Map<string, boolean>();
+  const confirmFresh = new Set<string>();
+  const confirmDelete = new Set<string>();
+  let fontStatusText = '모든 문단 대조에 적용 · 자동 저장';
+  let viewSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let localView: ViewSettings = { ...DEFAULT_VIEW };
+  let removeFontStyle: (() => void) | null = null;
+
+  function applyFontStyle(): void {
+    removeFontStyle?.();
+    removeFontStyle = ctx.dom.addStyle(`:root { --stt-src-size: ${localView.sourceFontSize}px; --stt-tgt-size: ${localView.translationFontSize}px; }`);
+  }
+
+  function changeFonts(values: Partial<ViewSettings>): void {
+    localView = normalizeView({ ...localView, ...values });
+    applyFontStyle();
+    fontStatusText = '크기 저장 중…';
+    decorate();
+    if (viewSaveTimer) clearTimeout(viewSaveTimer);
+    viewSaveTimer = setTimeout(() => {
+      toBackend({ type: 'save_view', view: localView });
+      fontStatusText = '크기를 저장했습니다.';
+    }, 300);
+  }
+
+  function fontSettings(): HTMLElement {
+    const panel = el('details', { class: 'stt-pr-font' });
+    panel.append(el('summary', {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]));
+    for (const [key, label] of [['sourceFontSize', '원문'], ['translationFontSize', '번역']] as const) {
+      const value = localView[key];
+      const range = el('input', { type: 'range', min: FONT_MIN, max: FONT_MAX, step: 1, value, 'aria-label': `${label} 글자 크기` });
+      range.addEventListener('change', () => changeFonts({ [key]: Number(range.value) }));
+      const minus = button('−', () => changeFonts({ [key]: value - 1 }), '', `${label} 글자 크기 줄이기`);
+      const plus = button('+', () => changeFonts({ [key]: value + 1 }), '', `${label} 글자 크기 키우기`);
+      minus.disabled = value <= FONT_MIN;
+      plus.disabled = value >= FONT_MAX;
+      panel.append(el('div', { class: 'stt-pr-font-row' }, [el('label', { class: 'stt-pr-font-label' }, [el('span', {}, [label]), range]), minus, el('output', {}, [`${value}px`]), plus]));
+    }
+    panel.append(el('div', { class: 'stt-pr-font-footer' }, [
+      button('기본 크기', () => changeFonts({ sourceFontSize: DEFAULT_VIEW.sourceFontSize, translationFontSize: DEFAULT_VIEW.translationFontSize })),
+      el('span', { class: 'stt-note' }, [fontStatusText]),
+    ]));
+    // Keep it open while adjusting.
+    panel.open = fontPanelOpen;
+    panel.addEventListener('toggle', () => (fontPanelOpen = panel.open));
+    return panel;
+  }
+  let fontPanelOpen = false;
+
+  function renderParagraphPanel(widget: HTMLElement, view: MessageView): void {
+    const id = view.messageId;
+    const settings = current();
+    const translated = !!view.text;
+    const open = translated ? !view.hidden : panelOpen.get(id) === true;
+    const launch = button(open ? '대조 접기' : '문단 대조', () => {
+      confirmFresh.delete(id);
+      confirmDelete.delete(id);
+      if (translated && chatId) toBackend({ type: 'set_hidden', chatId, messageId: id, hidden: open });
+      else {
+        panelOpen.set(id, !open);
+        decorate();
+      }
+    }, 'stt-pr-launch');
+    launch.setAttribute('aria-expanded', String(open));
+    if (!open) {
+      widget.replaceChildren(launch);
+      return;
+    }
+    const mode = el('select', {}, [
+      el('option', { value: 'interleave', selected: localView.paragraphView === 'interleave' }, ['원문·번역 교차']),
+      el('option', { value: 'tap', selected: localView.paragraphView === 'tap' }, ['눌러서 원문']),
+    ]);
+    mode.addEventListener('change', () => {
+      localView = { ...localView, paragraphView: mode.value === 'tap' ? 'tap' : 'interleave' };
+      toBackend({ type: 'save_view', view: localView });
+    });
+    const target = el('input', { type: 'text', value: settings.myLanguage, maxLength: 100, title: '응답을 번역할 언어 (이 채팅 설정의 "내 언어")' });
+    target.addEventListener('change', () => {
+      if (!chatId || !target.value.trim()) return;
+      toBackend({ type: 'save_settings', chatId, settings: { ...current(), myLanguage: target.value.trim() }, asDefault: false });
+    });
+    const connection = settings.connectionId ? (connections.find((c) => c.id === settings.connectionId)?.name ?? '삭제된 연결') : '현재 사용 중인 연결';
+    const unit = settings.translationUnit === 'paragraph' ? '문단별 요청' : '메시지 통째로 1회 요청';
+
+    let status = '';
+    let error = false;
+    if (view.busy) status = view.progress ? `번역 중 · ${view.progress.done}/${view.progress.total}` : '번역 중…';
+    else if (view.status === 'error') { status = view.error ?? '번역 오류'; error = true; }
+    else if (view.status === 'partial') status = '완료한 부분까지 저장했습니다. 남은 부분은 "이어서 번역"으로 이어 갑니다.';
+    else if (view.status === 'done') status = '저장된 번역입니다. 접기·보기 전환과 글자 크기 변경은 다시 번역하지 않습니다.';
+    else status = settings.autoTranslate ? '응답 자동 번역이 켜져 있습니다. 아래 버튼으로 바로 번역할 수도 있습니다.' : '새 번역은 아래 버튼을 눌렀을 때만 요청합니다. 접기·보기 전환은 재번역하지 않습니다.';
+
+    const actions: Children = [];
+    if (view.busy) {
+      actions.push(button('중단', () => chatId && toBackend({ type: 'cancel', chatId, messageId: id })));
+    } else if (!translated) {
+      const label = settings.translationUnit === 'paragraph' ? '문단 번역' : '번역';
+      actions.push(button(view.requestsNeeded > 0 ? `${label} · ${view.requestsNeeded}회 요청` : label, act(id, 'translate', true), 'stt-pr-primary'));
+    } else if (view.hasMore) {
+      actions.push(button(view.requestsNeeded > 0 ? `이어서 번역 · ${view.requestsNeeded}회 요청` : '이어서 번역', act(id, 'continue'), 'stt-pr-primary'));
+    } else {
+      const fresh = confirmFresh.has(id);
+      actions.push(button(fresh ? '확인: 새로 번역 요청' : '새로 번역', () => {
+        if (!fresh) { confirmFresh.add(id); decorate(); return; }
+        confirmFresh.delete(id);
+        act(id, 'translate', true)();
+      }, 'stt-pr-primary'));
+      actions.push(button('이어서 번역', act(id, 'continue'), '', '끊긴 것 같으면 한 번 더 이어 붙여 봅니다'));
+    }
+    if (translated && !view.busy) {
+      const sure = confirmDelete.has(id);
+      actions.push(button(sure ? '확인: 저장 번역 삭제' : '이 메시지 저장 삭제', () => {
+        if (!sure) { confirmDelete.add(id); decorate(); return; }
+        confirmDelete.delete(id);
+        if (chatId) toBackend({ type: 'delete_translation', chatId, messageId: id });
+      }));
+    }
+    widget.replaceChildren(
+      launch,
+      el('div', { class: 'stt-pr-panel' }, [
+        el('div', { class: 'stt-pr-head' }, [el('strong', { class: 'stt-pr-title' }, ['문단 대조 번역']), el('span', { class: 'stt-pr-pill' }, ['PARAGRAPH READER'])]),
+        el('div', { class: 'stt-pr-controls' }, [el('label', {}, ['보기', mode]), el('label', {}, ['도착 언어', target])]),
+        fontSettings(),
+        el('div', { class: 'stt-pr-provider' }, [`번역: ${connection} · ${settings.myLanguage} · ${unit}`]),
+        el('div', { class: `stt-pr-status${error ? ' stt-err' : ''}`, role: 'status' }, [status]),
+        el('div', { class: 'stt-pr-actions' }, actions),
+      ]),
+    );
+  }
+
   function decorate(): void {
     if (!chatId) return;
+    const paragraph = current().displayMode === 'paragraph';
     for (const view of views.values()) {
       if (view.role === 'system') continue;
       let bar = bars.get(view.messageId);
+      if (bar && bar.dataset.sttMode !== String(paragraph)) {
+        ctx.dom.uninject(bar);
+        bars.delete(view.messageId);
+        bar = undefined;
+      }
       if (!bar) {
         const bubble = ctx.dom.findMessageElement(view.messageId);
         if (!bubble) continue;
-        // Inside the message card when the host offers its footer slot.
-        const footer = bubble.querySelector('[data-spindle-mount="message_footer"]') ?? bubble;
+        // Paragraph panel above the content, button row in the card footer.
+        const slot = bubble.querySelector(paragraph ? '[data-spindle-mount="message_body_before"]' : '[data-spindle-mount="message_footer"]') ?? bubble;
         // inject() returns the host's wrapper element; style and fill that.
-        bar = ctx.dom.inject(footer, '<div></div>', 'beforeend') as HTMLElement;
-        bar.classList.add('stt-bar');
+        bar = ctx.dom.inject(slot, '<div></div>', 'beforeend') as HTMLElement;
+        bar.classList.add(paragraph ? 'stt-pr-widget' : 'stt-bar');
+        bar.dataset.sttMode = String(paragraph);
         bars.set(view.messageId, bar);
       }
-      renderBar(bar, view);
+      if (paragraph) renderParagraphPanel(bar, view);
+      else renderBar(bar, view);
     }
   }
 
@@ -409,6 +604,10 @@ export function setup(ctx: SpindleFrontendContext) {
         check('AI 응답 자동 번역', 'autoTranslate'),
         check('번역이 끊기면 자동으로 이어서 번역', 'autoContinue'),
         select('번역문 표시 방식', draft.displayMode, Object.entries(DISPLAY_LABELS) as Array<[string, string]>, (v) => (draft.displayMode = v as DisplayMode)),
+        select('번역 단위', draft.translationUnit, [
+          ['whole', '메시지 통째로 (1회 요청, 문단 수가 같으면 문단별로 맞춰 보여 줌)'],
+          ['paragraph', '문단별 (문단마다 1회 요청, 문단 대조가 정확히 맞음)'],
+        ], (v) => (draft.translationUnit = v === 'paragraph' ? 'paragraph' : 'whole')),
         check('내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)', 'translateMyMessages'),
         check('입력창 옆에 번역 버튼 표시', 'showDraftButton'),
       ]),
@@ -454,14 +653,18 @@ export function setup(ctx: SpindleFrontendContext) {
     const msg = raw as ToFrontend;
     switch (msg?.type) {
       case 'state': {
-        const before = store ? JSON.stringify([settingsFor(store, chatId).displayMode, store.chats, store.defaults.displayMode]) : null;
+        const shape = (st: Store) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView]);
+        const before = store ? shape(store) : null;
         store = msg.store;
         presets = msg.presets;
         connections = msg.connections;
-        // A different display mode needs the host to render the messages again.
-        if (before !== null && before !== JSON.stringify([settingsFor(store, chatId).displayMode, store.chats, store.defaults.displayMode])) {
-          ctx.display?.invalidate?.(['*']);
+        if (!viewSaveTimer) {
+          localView = { ...store.view };
+          applyFontStyle();
         }
+        // Different display settings need the host to render the messages again.
+        if (before !== null && before !== shape(store)) ctx.display?.invalidate?.(['*']);
+        decorate();
         renderPanel();
         renderDraftButton();
         return;
@@ -496,6 +699,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
   return () => {
     clearInterval(routeTimer);
+    if (viewSaveTimer) clearTimeout(viewSaveTimer);
+    removeFontStyle?.();
     observer.disconnect();
     offEvents.forEach((off) => off());
     offBackend();

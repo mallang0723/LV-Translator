@@ -1,6 +1,10 @@
 // Types, defaults and messages shared by the backend and frontend.
 
-export type DisplayMode = 'below' | 'only' | 'collapsed';
+export type DisplayMode = 'below' | 'only' | 'collapsed' | 'paragraph';
+/** 'whole': one request per message. 'paragraph': one request per paragraph (exact pairs). */
+export type TranslationUnit = 'whole' | 'paragraph';
+/** Paragraph view: original and translation interleaved, or translation with the original on tap. */
+export type ParagraphView = 'interleave' | 'tap';
 
 /** Per-chat translation settings: Marinara's chat translation section plus Translation Tools 1.5.4. */
 export interface ChatSettings {
@@ -22,6 +26,7 @@ export interface ChatSettings {
   /** Translate AI responses after generation. */
   autoTranslate: boolean;
   displayMode: DisplayMode;
+  translationUnit: TranslationUnit;
   /** Continue automatically when a translation stops early. */
   autoContinue: boolean;
   /** Sources at least this long are translated paragraph group by group. 0 = never split. */
@@ -56,8 +61,34 @@ export interface UserPreset {
   prompt: string;
 }
 
+/** Paragraph view settings, shared by every chat (like Paragraph Reader). */
+export interface ViewSettings {
+  paragraphView: ParagraphView;
+  sourceFontSize: number;
+  translationFontSize: number;
+}
+
+export const FONT_MIN = 12;
+export const FONT_MAX = 32;
+export const DEFAULT_VIEW: ViewSettings = { paragraphView: 'interleave', sourceFontSize: 16, translationFontSize: 18 };
+
+export function fontSize(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return value === null || value === '' || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
+}
+
+export function normalizeView(value: unknown): ViewSettings {
+  const v = (value && typeof value === 'object' ? value : {}) as Partial<ViewSettings>;
+  return {
+    paragraphView: v.paragraphView === 'tap' ? 'tap' : 'interleave',
+    sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
+    translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize),
+  };
+}
+
 export interface Store {
   version: 1;
+  view: ViewSettings;
   userPresets: UserPreset[];
   /** Settings for chats that have none of their own yet. */
   defaults: ChatSettings;
@@ -81,6 +112,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   showDraftButton: false,
   autoTranslate: false,
   displayMode: 'below',
+  translationUnit: 'whole',
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
   protectHtml: true,
@@ -117,7 +149,8 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
     translateMyMessages: bool(s.translateMyMessages, base.translateMyMessages),
     showDraftButton: bool(s.showDraftButton, base.showDraftButton),
     autoTranslate: bool(s.autoTranslate, base.autoTranslate),
-    displayMode: mode === 'below' || mode === 'only' || mode === 'collapsed' ? mode : base.displayMode,
+    displayMode: mode === 'below' || mode === 'only' || mode === 'collapsed' || mode === 'paragraph' ? mode : base.displayMode,
+    translationUnit: s.translationUnit === 'paragraph' ? 'paragraph' : s.translationUnit === 'whole' ? 'whole' : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200_000, split)) : base.longSplitChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
@@ -156,7 +189,7 @@ export function normalizeStore(value: unknown): Store {
     seen.add(id);
     userPresets.push({ id, name, prompt });
   }
-  return { version: 1, userPresets, defaults, chats };
+  return { version: 1, view: normalizeView(raw.view), userPresets, defaults, chats };
 }
 
 export function settingsFor(store: Store, chatId: string | null): ChatSettings {
@@ -182,6 +215,8 @@ export interface TranslationRecord {
   parts: string[];
   /** Protected pieces (markup, excluded parts) that the ⟦n⟧ markers stand for. */
   pieces: string[];
+  /** How the source was split: 'paragraph' = parts[i] is the translation of paragraph i. */
+  unit?: TranslationUnit;
   /** Number of source parts. */
   total: number;
   /** Index of a part that stopped early (output limit), or -1. */
@@ -222,6 +257,8 @@ export interface MessageView {
   error: string | null;
   hidden: boolean;
   busy: boolean;
+  /** Requests a (re)translation would still need with the chat's current unit. */
+  requestsNeeded: number;
 }
 
 export interface PresetSummary {
@@ -248,6 +285,8 @@ export type ToBackend =
   | { type: 'translate'; chatId: string; messageId: string; force: boolean }
   | { type: 'continue'; chatId: string; messageId: string }
   | { type: 'set_hidden'; chatId: string; messageId: string; hidden: boolean }
+  | { type: 'delete_translation'; chatId: string; messageId: string }
+  | { type: 'save_view'; view: ViewSettings }
   | { type: 'cancel'; chatId: string; messageId: string }
   | { type: 'translate_text'; reqId: string; chatId: string; text: string }
   | { type: 'notify'; kind: 'info' | 'warning' | 'error'; text: string };
