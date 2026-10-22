@@ -125,7 +125,7 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-panel textarea[readonly] { opacity: 0.75; }
 .stt-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .stt-sub { padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
-.stt-sticky { position: sticky; bottom: 0; background: var(--lumiverse-bg-deep-080, rgba(20,20,24,0.9)); padding: 8px 0; }
+.stt-sticky { position: sticky; bottom: 0; background: var(--lumiverse-bg-deep-080, rgba(20,20,24,0.9)); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
 `;
