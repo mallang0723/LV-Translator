@@ -70,6 +70,47 @@ describe('split / join', () => {
     const chunks = splitForTranslation(text, 3200);
     expect(chunks.join('')).toBe(text);
     expect(chunks.every((c) => !/⟦\d*$/.test(c) && !/^\d*⟧/.test(c))).toBe(true);
+    expect(chunks.every((c) => c.length <= 3200)).toBe(true);
+  });
+
+  test('short paragraphs are packed together; blank and \\r\\n input is normalized', () => {
+    expect(splitForTranslation('aaa\r\n\r\nbbb\n\n\n\n  \n\nccc', 20)).toEqual(['aaa\n\nbbb\n\nccc']);
+    expect(splitForTranslation('aaaa\n\nbbbb\n\ncccc', 10)).toEqual(['aaaa\n\nbbbb', 'cccc']);
+    expect(splitForTranslation('one line\ntwo line', 50)).toEqual(['one line\ntwo line']);
+    expect(splitForTranslation('  \n\n \n', 10)).toEqual([]);
+  });
+
+  test('an overlong paragraph is cut after sentence ends', () => {
+    const sentence = (n: number) => `Sentence number ${n} walks along the quiet harbour road.`;
+    const text = Array.from({ length: 40 }, (_, i) => sentence(i)).join(' ');
+    const chunks = splitForTranslation(text, 500);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((c) => c.length <= 500 && c.endsWith('.'))).toBe(true);
+    expect(chunks.join(' ')).toBe(text);
+  });
+
+  test('CJK sentence ends and line breaks are cut points', () => {
+    const text = '静かな港町を歩いた。'.repeat(30);
+    const chunks = splitForTranslation(text, 45);
+    expect(chunks.every((c) => c.length <= 45 && c.endsWith('。'))).toBe(true);
+    expect(chunks.join('')).toBe(text);
+    const lines = Array.from({ length: 8 }, (_, i) => `line ${i} without a full stop`).join('\n');
+    const byLine = splitForTranslation(lines, 70);
+    expect(byLine.every((c) => c.length <= 70 && !c.startsWith('\n') && !c.endsWith(' '))).toBe(true);
+    expect(byLine.join('\n')).toBe(lines);
+  });
+
+  test('without sentence ends it cuts at spaces, and mid-word only as a last resort', () => {
+    const words = Array.from({ length: 50 }, (_, i) => `word${i}`).join(' ');
+    const chunks = splitForTranslation(words, 40);
+    expect(chunks.every((c) => c.length <= 40)).toBe(true);
+    expect(chunks.join(' ')).toBe(words);
+    const solid = 'x'.repeat(95);
+    expect(splitForTranslation(solid, 40)).toEqual(['x'.repeat(40), 'x'.repeat(40), 'x'.repeat(15)]);
+  });
+
+  test('a space exactly at the limit is used as the cut', () => {
+    expect(splitForTranslation('abcde fghij', 5)).toEqual(['abcde', 'fghij']);
   });
 
   test('continuations join without repeats or broken words', () => {

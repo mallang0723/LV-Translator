@@ -1,59 +1,79 @@
 // Splitting long sources and joining continued translations.
-// splitForTranslation is ported from Translation Polisher 0.2.3 (long-passage split translation);
-// it additionally never cuts through a ⟦n⟧ marker.
 
 export const TRANSLATION_CHUNK_CHARS = 3200;
 
-/** Moves a hard cut position so it does not fall inside a ⟦n⟧ marker. */
-function safeCut(text: string, at: number): number {
-  const open = text.lastIndexOf('⟦', at - 1);
-  if (open < 0) return at;
-  const close = text.indexOf('⟧', open);
-  return close >= at ? close + 1 : at;
-}
+/** Positions just after a sentence end: Latin punctuation followed by a space, or CJK punctuation. */
+const SENTENCE_BREAK = /[.!?…]+["'”’」』)\]]*(?=\s)|[。！？]+["'”’」』)\]]*/g;
 
-export function splitForTranslation(text: string, limit = TRANSLATION_CHUNK_CHARS): string[] {
-  const paragraphs = String(text).replace(/\r\n/g, '\n').split(/\n{2,}/);
-  const chunks: string[] = [];
-  let current = '';
-  const push = (value: string) => {
-    const part = value.trim();
-    if (!part) return;
-    if (!current) current = part;
-    else if (current.length + part.length + 2 <= limit) current += `\n\n${part}`;
-    else {
-      chunks.push(current);
-      current = part;
-    }
-  };
-  for (const paragraph of paragraphs) {
-    if (paragraph.length <= limit) {
-      push(paragraph);
-      continue;
-    }
-    const sentences = paragraph.match(/[^.!?。！？\n]+(?:[.!?。！？]+[”’"']?|$)|\n+/g) || [paragraph];
-    let piece = '';
-    for (const sentence of sentences) {
-      if (sentence.length > limit) {
-        if (piece.trim()) {
-          push(piece);
-          piece = '';
-        }
-        for (let i = 0; i < sentence.length; ) {
-          const end = Math.min(sentence.length, safeCut(sentence, i + limit));
-          push(sentence.slice(i, end));
-          i = end;
-        }
-      } else if (!piece || piece.length + sentence.length <= limit) piece += sentence;
-      else {
-        push(piece);
-        piece = sentence;
+/**
+ * Where to end a piece that starts at `from` and may be at most `limit` characters long.
+ * Prefers the last line break or sentence end, then the last space, and only then cuts
+ * mid-word. The returned position never falls inside a ⟦n⟧ marker.
+ */
+function findCut(text: string, from: number, limit: number): number {
+  const end = from + limit;
+  const span = text.slice(from, end + 1); // one extra character: a space right at the limit is a fine cut
+  let best = -1;
+  for (const m of span.matchAll(SENTENCE_BREAK)) {
+    const at = m.index! + m[0].length;
+    if (at <= limit) best = Math.max(best, at);
+  }
+  const newline = span.lastIndexOf('\n', limit);
+  if (newline > 0) best = Math.max(best, newline);
+  if (best <= 0) {
+    for (let i = Math.min(limit, span.length - 1); i > 0; i--) {
+      if (/\s/.test(span[i]!)) {
+        best = i;
+        break;
       }
     }
-    push(piece);
   }
-  if (current) chunks.push(current);
-  return chunks;
+  let cut = best > 0 ? from + best : end;
+  // Step back to the start of a marker the cut would split; step past it if it is the whole piece.
+  const open = text.lastIndexOf('⟦', cut - 1);
+  if (open >= from) {
+    const close = text.indexOf('⟧', open);
+    if (close >= cut) cut = open > from ? open : close + 1;
+  }
+  return cut;
+}
+
+/** Cuts one paragraph that is longer than `limit` into pieces of at most `limit` characters. */
+function cutParagraph(paragraph: string, limit: number): string[] {
+  const pieces: string[] = [];
+  let from = 0;
+  while (paragraph.length - from > limit) {
+    const cut = findCut(paragraph, from, limit);
+    pieces.push(paragraph.slice(from, cut));
+    from = cut;
+    // Whitespace at a cut would be trimmed anyway; skipping it keeps the next piece within the limit.
+    while (from < paragraph.length && /\s/.test(paragraph[from]!)) from++;
+  }
+  pieces.push(paragraph.slice(from));
+  return pieces;
+}
+
+/**
+ * Splits a long source into parts that are translated one request each. Paragraphs (blank-line
+ * separated) are packed together up to `limit` characters per part; a paragraph longer than that
+ * is cut at line breaks, sentence ends or spaces. Each part is trimmed, and paragraphs inside a
+ * part are joined with a blank line.
+ */
+export function splitForTranslation(text: string, limit = TRANSLATION_CHUNK_CHARS): string[] {
+  const max = Math.max(1, Math.floor(limit));
+  const pieces = String(text)
+    .replace(/\r\n?/g, '\n')
+    .split(/\n[ \t]*\n/)
+    .flatMap((paragraph) => (paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]));
+  const parts: string[] = [];
+  for (const raw of pieces) {
+    const piece = raw.trim();
+    if (!piece) continue;
+    const last = parts.length - 1;
+    if (last >= 0 && parts[last]!.length + 2 + piece.length <= max) parts[last] += `\n\n${piece}`;
+    else parts.push(piece);
+  }
+  return parts;
 }
 
 const SENTENCE_END = /[.!?。！？…"”’'」』)\]]$/;
