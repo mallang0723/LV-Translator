@@ -1,0 +1,127 @@
+// Protects the parts of a message that must not be translated by swapping them for
+// ⟦n⟧ markers before translation and putting them back afterwards.
+//
+// Protected, in this order:
+//   1. user exclude rules (<tag> elements, /regex/, "start ... end" ranges)
+//   2. fenced code blocks                      (protectCode)
+//   3. <style>/<script> elements, comments     (protectHtml)
+//   4. every other HTML tag, attributes and all (protectHtml) — text between tags stays translatable
+//   5. {{macros}}
+
+export interface ProtectOptions {
+  protectHtml: boolean;
+  protectCode: boolean;
+  excludeRules: string;
+}
+
+export interface Protected {
+  text: string;
+  pieces: string[];
+}
+
+export class ExcludeRuleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExcludeRuleError';
+  }
+}
+
+const MARKER = /⟦\s*(\d+)\s*⟧/g;
+
+export const MARKER_INSTRUCTION =
+  'The text contains placeholder tokens such as ⟦1⟧. Each one stands for markup or content that must stay untranslated. ' +
+  'Copy every token exactly as written, keep each one in the same place relative to the surrounding text, ' +
+  'and never add, remove, renumber, translate or explain them.';
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Turns the exclude rules text into regular expressions. Invalid lines throw ExcludeRuleError. */
+export function parseExcludeRules(raw: string): RegExp[] {
+  const out: RegExp[] = [];
+  raw.split(/\r?\n/).forEach((line, index) => {
+    const rule = line.trim();
+    if (!rule || rule.startsWith('#')) return;
+    const where = `제외 규칙 ${index + 1}번째 줄`;
+    const tag = /^<\s*([A-Za-z][\w:.-]*)\s*\/?>$/.exec(rule);
+    if (tag) {
+      const name = escapeRegExp(tag[1]!);
+      out.push(new RegExp(`<${name}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${name}\\s*>|<${name}(?:\\s[^>]*)?\\/>`, 'gi'));
+      return;
+    }
+    const re = /^\/(.+)\/([a-z]*)$/s.exec(rule);
+    if (re) {
+      let flags = re[2]!;
+      if (/[^gimsuy]/.test(flags)) throw new ExcludeRuleError(`${where}: 정규식 플래그 "${flags}" 는 쓸 수 없습니다.`);
+      if (!flags.includes('g')) flags += 'g';
+      try {
+        const r = new RegExp(re[1]!, flags);
+        if (r.test('')) throw new ExcludeRuleError(`${where}: 빈 문자열과 일치하는 정규식은 쓸 수 없습니다.`);
+        r.lastIndex = 0;
+        out.push(r);
+      } catch (e) {
+        if (e instanceof ExcludeRuleError) throw e;
+        throw new ExcludeRuleError(`${where}: 정규식 오류 (${(e as Error).message})`);
+      }
+      return;
+    }
+    const range = rule.split(' ... ');
+    if (range.length === 2 && range[0]!.trim() && range[1]!.trim()) {
+      out.push(new RegExp(`${escapeRegExp(range[0]!.trim())}[\\s\\S]*?${escapeRegExp(range[1]!.trim())}`, 'g'));
+      return;
+    }
+    throw new ExcludeRuleError(`${where}: "${rule}" 를 이해하지 못했습니다. <태그>, /정규식/, 시작 ... 끝 중 하나로 적어 주세요.`);
+  });
+  return out;
+}
+
+export function protect(source: string, options: ProtectOptions): Protected {
+  const pieces: string[] = [];
+  // Pieces are stored fully expanded (markers inside them already put back), so restore
+  // is a single pass and a literal ⟦n⟧ from the source is never expanded again.
+  const hold = (piece: string) => {
+    pieces.push(piece.replace(MARKER, (m, n: string) => pieces[Number(n) - 1] ?? m));
+    return `⟦${pieces.length}⟧`;
+  };
+  // Markers already in the source would be confused with ours.
+  let text = source.replace(MARKER, (m) => hold(m));
+  for (const rule of parseExcludeRules(options.excludeRules)) text = text.replace(rule, (m) => hold(m));
+  if (options.protectCode) text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
+  if (options.protectHtml) {
+    text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
+    text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
+    // Tags: opening, closing, self-closing, with quoted attributes that may contain ">".
+    text = text.replace(/<\/?[A-Za-z][\w:.-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'">\s/]+|\/(?!>))*)*\s*\/?>/g, (m) => hold(m));
+  }
+  text = text.replace(/\{\{[\s\S]*?\}\}/g, (m) => hold(m));
+  return { text, pieces };
+}
+
+/** Marker numbers in a text, in order of appearance. */
+export function markersIn(text: string): number[] {
+  return [...text.matchAll(MARKER)].map((m) => Number(m[1]));
+}
+
+/**
+ * Checks that a translation kept exactly the markers of its source.
+ * Returns a Korean description of the problem, or null when it is fine.
+ */
+export function checkMarkers(sourceText: string, translated: string): string | null {
+  const expected = markersIn(sourceText).sort((a, b) => a - b);
+  const got = markersIn(translated).sort((a, b) => a - b);
+  if (expected.join(',') === got.join(',')) return null;
+  const missing = expected.filter((n) => !got.includes(n));
+  const extra = got.filter((n) => !expected.includes(n));
+  const dup = got.filter((n, i) => got.indexOf(n) !== i);
+  const parts: string[] = [];
+  if (missing.length) parts.push(`빠짐 ${missing.map((n) => `⟦${n}⟧`).join(' ')}`);
+  if (extra.length) parts.push(`없던 표시 ${extra.map((n) => `⟦${n}⟧`).join(' ')}`);
+  if (dup.length) parts.push(`중복 ${[...new Set(dup)].map((n) => `⟦${n}⟧`).join(' ')}`);
+  return `번역문에서 보호 표시가 어긋났습니다 (${parts.join(', ')}).`;
+}
+
+/** Puts protected pieces back. Unknown markers are left as they are. */
+export function restore(text: string, pieces: string[]): string {
+  return text.replace(MARKER, (m, n: string) => pieces[Number(n) - 1] ?? m);
+}

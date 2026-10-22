@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "name": "AI 번역 (Marinara 방식)",
+  "identifier": "st_translator",
+  "author": "mallang0723",
+  "github": "https://github.com/mallang0723/test2",
+  "homepage": "https://github.com/mallang0723/test2",
+  "description": "Marinara Engine의 AI 번역과 번역 프리셋·단어장(Translation Tools 1.5.4)을 Lumiverse에서 씁니다. 응답 자동 번역, 내 메시지 번역, 단어장·참고 정보, 끊긴 번역 이어서 하기, HTML·상태창 보호.",
+  "permissions": ["generation", "chat_mutation"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js"
+}

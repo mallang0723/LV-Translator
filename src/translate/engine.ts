@@ -1,0 +1,177 @@
+// Translation engine: protect → split → translate part by part → check markers → restore.
+// A part cut off by the output limit is continued from where it stopped (automatically when
+// autoContinue is on, otherwise when the user asks). Progress is reported after every part
+// so a failure keeps what was already translated.
+
+import type { ChatSettings, TranslationRecord } from '../shared';
+import { isTruncatedFinish, joinContinuation, splitForTranslation, TRANSLATION_CHUNK_CHARS } from './chunk';
+import {
+  buildContinuationRequest,
+  buildTranslationRequest,
+  type ContextMessage,
+  type Direction,
+  type PromptPreset,
+  type TranslationRequest,
+} from './prompt';
+import { checkMarkers, protect, restore } from './protect';
+
+export const MAX_AUTO_CONTINUE = 4;
+
+export interface Completion {
+  text: string;
+  /** Provider finish reason, if it reported one. */
+  finishReason?: unknown;
+}
+
+export interface EngineDeps {
+  complete(req: TranslationRequest): Promise<Completion>;
+  /** Called after each step with the record so far. */
+  onProgress?(record: TranslationRecord): Promise<void> | void;
+  signal?: AbortSignal;
+}
+
+export interface EngineJob {
+  direction: Direction;
+  source: string;
+  settings: ChatSettings;
+  presets: PromptPreset[];
+  previous: ContextMessage[];
+  /** Continue this record instead of starting over. */
+  resume?: TranslationRecord;
+}
+
+export class TranslationError extends Error {
+  constructor(message: string, public readonly record: TranslationRecord | null) {
+    super(message);
+    this.name = 'TranslationError';
+  }
+}
+
+export function recordToText(r: TranslationRecord): string {
+  return restore(r.parts.filter((p) => p.trim()).join('\n\n'), r.pieces);
+}
+
+function partSources(protectedText: string, settings: ChatSettings): string[] {
+  const long = settings.longSplitChars > 0 && protectedText.length >= settings.longSplitChars;
+  return long ? splitForTranslation(protectedText, TRANSLATION_CHUNK_CHARS) : [protectedText];
+}
+
+function sameArray(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+export async function translate(job: EngineJob, deps: EngineDeps): Promise<TranslationRecord> {
+  const { settings } = job;
+  const prot = protect(job.source, settings);
+  const sources = partSources(prot.text, settings);
+  const targetLanguage = job.direction === 'incoming' ? settings.myLanguage : settings.modelLanguage;
+  const aborted = () => {
+    if (deps.signal?.aborted) throw new TranslationError('번역을 취소했습니다.', record);
+  };
+
+  // A resumable record must come from the same protected text and split.
+  const resume =
+    job.resume && sameArray(job.resume.pieces, prot.pieces) && job.resume.total === sources.length ? job.resume : null;
+  const record: TranslationRecord = resume
+    ? { ...resume, parts: [...resume.parts], status: 'partial', error: undefined, updatedAt: Date.now() }
+    : { parts: [], pieces: prot.pieces, total: sources.length, truncatedPart: -1, status: 'partial', updatedAt: Date.now() };
+
+  const requestFor = (part: string) =>
+    buildTranslationRequest({
+      direction: job.direction,
+      text: part,
+      settings,
+      presets: job.presets,
+      previous: job.previous,
+      hasMarkers: /⟦\d+⟧/.test(part),
+    });
+
+  const save = async () => {
+    record.updatedAt = Date.now();
+    await deps.onProgress?.({ ...record, parts: [...record.parts] });
+  };
+
+  /** Continues part i until it is no longer cut off (at most `rounds` requests). Returns true when complete. */
+  const continuePart = async (i: number, rounds: number): Promise<boolean> => {
+    const base = requestFor(sources[i]!);
+    for (let round = 0; round < rounds; round++) {
+      aborted();
+      const result = await deps.complete(buildContinuationRequest(base, record.parts[i]!, targetLanguage));
+      const before = record.parts[i]!;
+      record.parts[i] = joinContinuation(before, result.text);
+      const truncated = isTruncatedFinish(result.finishReason);
+      record.truncatedPart = truncated ? i : -1;
+      await save();
+      if (!truncated) return true;
+      if (record.parts[i] === before) return false; // no progress; leave it to the user
+    }
+    return record.truncatedPart !== i;
+  };
+
+  /** Translates part i from scratch. Returns true when complete (not cut off). */
+  const translatePart = async (i: number): Promise<boolean> => {
+    const request = requestFor(sources[i]!);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      aborted();
+      const result = await deps.complete(request);
+      record.parts[i] = result.text.trim();
+      if (isTruncatedFinish(result.finishReason)) {
+        record.truncatedPart = i;
+        await save();
+        if (!settings.autoContinue) return false;
+        if (!(await continuePart(i, MAX_AUTO_CONTINUE))) return false;
+      } else {
+        record.truncatedPart = -1;
+      }
+      const problem = checkMarkers(sources[i]!, record.parts[i]!);
+      if (!problem) {
+        await save();
+        return true;
+      }
+      if (attempt === 1) {
+        record.parts.length = i;
+        throw new TranslationError(`${problem} HTML이 깨지지 않도록 이 부분은 저장하지 않았습니다. 다시 번역해 주세요.`, record);
+      }
+    }
+    return false;
+  };
+
+  try {
+    if (resume) {
+      if (record.truncatedPart >= 0) {
+        const i = record.truncatedPart;
+        if (!(await continuePart(i, settings.autoContinue ? MAX_AUTO_CONTINUE : 1))) return finish();
+        const problem = checkMarkers(sources[i]!, record.parts[i]!);
+        if (problem) throw new TranslationError(`${problem} 이어서 번역한 부분의 HTML 보호 표시가 맞지 않습니다. 다시 번역해 주세요.`, record);
+      } else if (record.parts.length >= record.total) {
+        // Looked complete, but the user says it stopped early: try once more on the last part.
+        const i = record.total - 1;
+        const before = record.parts[i]!;
+        record.truncatedPart = i;
+        const complete = await continuePart(i, 1);
+        const problem = checkMarkers(sources[i]!, record.parts[i]!);
+        if (problem) {
+          record.parts[i] = before;
+          record.truncatedPart = -1;
+          throw new TranslationError(`${problem} 이어서 번역한 내용은 버렸습니다.`, record);
+        }
+        if (!complete) return finish();
+        record.truncatedPart = -1;
+      }
+    }
+    for (let i = record.parts.length; i < sources.length; i++) {
+      if (!(await translatePart(i))) return finish();
+    }
+    return finish();
+  } catch (e) {
+    if (e instanceof TranslationError) throw e;
+    record.status = 'error';
+    throw new TranslationError(e instanceof Error ? e.message : String(e), { ...record, parts: [...record.parts] });
+  }
+
+  function finish(): TranslationRecord {
+    record.status = record.truncatedPart >= 0 || record.parts.length < record.total ? 'partial' : 'done';
+    record.updatedAt = Date.now();
+    return { ...record, parts: [...record.parts] };
+  }
+}
