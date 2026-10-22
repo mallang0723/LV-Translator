@@ -143,3 +143,9 @@ bun run build     # dist/ 생성 — 변경 후 dist도 함께 커밋
 - `tests/fixtures/upstream-requests.json` — 1.5.4가 실제로 만든 번역 요청(비교 기준)
 
 타사 코드 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.
+
+## 라이선스
+
+이 저장소의 코드는 [MIT](LICENSE) © 2026 mallang0723입니다.
+
+다만 [Marinara-Translation-Tools 1.5.4](https://github.com/minikkeuen/Marinara-Translation-Tools)에서 가져온 부분(`src/presets/upstream/*`, `src/presets/catalog.ts`, `src/translate/prompt.ts`의 요청 조립 이식 부분, 1.5.4로 기록한 테스트 기준값)은 원저작자 minikkuen의 MIT 저작권을 그대로 따르며, 그 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다. Marinara Engine(AGPL-3.0)에서 가져온 짧은 문구 두 개도 같은 파일에 적었습니다.
