@@ -167,18 +167,18 @@ function setup(ctx) {
   let reqCounter = 0;
   let lastDraftTranslation = null;
   const toBackend = (msg) => ctx.sendToBackend(msg);
-  const notify = (kind, text) => toBackend({ type: "notify", kind, text });
+  const notify = (kind, text2) => toBackend({ type: "notify", kind, text: text2 });
   const current = () => store ? settingsFor(store, chatId) : DEFAULT_SETTINGS;
   const removeStyle = ctx.dom.addStyle(CSS);
   function chatIdFromLocation() {
     const m = /^\/chat\/([^/?#]+)/.exec(location.pathname);
     return m ? decodeURIComponent(m[1]) : null;
   }
-  function translateText(text, forChat) {
+  function translateText(text2, forChat) {
     const reqId = `t${++reqCounter}`;
     return new Promise((resolve, reject) => {
       pending.set(reqId, { resolve, reject });
-      toBackend({ type: "translate_text", reqId, chatId: forChat, text });
+      toBackend({ type: "translate_text", reqId, chatId: forChat, text: text2 });
     });
   }
   const act = (id, type, force = false) => () => {
@@ -236,8 +236,8 @@ function setup(ctx) {
     }, 300);
   }
   function fontSettings() {
-    const panel = el("details", { class: "stt-pr-font" });
-    panel.append(el("summary", {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]));
+    const panel2 = el("details", { class: "stt-pr-font" });
+    panel2.append(el("summary", {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]));
     for (const [key, label] of [["sourceFontSize", "원문"], ["translationFontSize", "번역"]]) {
       const value = localView[key];
       const range = el("input", { type: "range", min: FONT_MIN, max: FONT_MAX, step: 1, value, "aria-label": `${label} 글자 크기` });
@@ -246,15 +246,15 @@ function setup(ctx) {
       const plus = button("+", () => changeFonts({ [key]: value + 1 }), "", `${label} 글자 크기 키우기`);
       minus.disabled = value <= FONT_MIN;
       plus.disabled = value >= FONT_MAX;
-      panel.append(el("div", { class: "stt-pr-font-row" }, [el("label", { class: "stt-pr-font-label" }, [el("span", {}, [label]), range]), minus, el("output", {}, [`${value}px`]), plus]));
+      panel2.append(el("div", { class: "stt-pr-font-row" }, [el("label", { class: "stt-pr-font-label" }, [el("span", {}, [label]), range]), minus, el("output", {}, [`${value}px`]), plus]));
     }
-    panel.append(el("div", { class: "stt-pr-font-footer" }, [
+    panel2.append(el("div", { class: "stt-pr-font-footer" }, [
       button("기본 크기", () => changeFonts({ sourceFontSize: DEFAULT_VIEW.sourceFontSize, translationFontSize: DEFAULT_VIEW.translationFontSize })),
       el("span", { class: "stt-note" }, [fontStatusText])
     ]));
-    panel.open = fontPanelOpen;
-    panel.addEventListener("toggle", () => fontPanelOpen = panel.open);
-    return panel;
+    panel2.open = fontPanelOpen;
+    panel2.addEventListener("toggle", () => fontPanelOpen = panel2.open);
+    return panel2;
   }
   let fontPanelOpen = false;
   function renderParagraphPanel(widget, view) {
@@ -293,19 +293,19 @@ function setup(ctx) {
     });
     const connection = settings.connectionId ? connections.find((c) => c.id === settings.connectionId)?.name ?? "삭제된 연결" : "현재 사용 중인 연결";
     const unit = settings.translationUnit === "paragraph" ? "문단별 요청" : "메시지 통째로 1회 요청";
-    let status = "";
+    let status2 = "";
     let error = false;
     if (view.busy)
-      status = view.progress ? `번역 중 · ${view.progress.done}/${view.progress.total}` : "번역 중…";
+      status2 = view.progress ? `번역 중 · ${view.progress.done}/${view.progress.total}` : "번역 중…";
     else if (view.status === "error") {
-      status = view.error ?? "번역 오류";
+      status2 = view.error ?? "번역 오류";
       error = true;
     } else if (view.status === "partial")
-      status = '완료한 부분까지 저장했습니다. 남은 부분은 "이어서 번역"으로 이어 갑니다.';
+      status2 = '완료한 부분까지 저장했습니다. 남은 부분은 "이어서 번역"으로 이어 갑니다.';
     else if (view.status === "done")
-      status = "저장된 번역입니다. 접기·보기 전환과 글자 크기 변경은 다시 번역하지 않습니다.";
+      status2 = "저장된 번역입니다. 접기·보기 전환과 글자 크기 변경은 다시 번역하지 않습니다.";
     else
-      status = settings.autoTranslate ? "응답 자동 번역이 켜져 있습니다. 아래 버튼으로 바로 번역할 수도 있습니다." : "새 번역은 아래 버튼을 눌렀을 때만 요청합니다. 접기·보기 전환은 재번역하지 않습니다.";
+      status2 = settings.autoTranslate ? "응답 자동 번역이 켜져 있습니다. 아래 버튼으로 바로 번역할 수도 있습니다." : "새 번역은 아래 버튼을 눌렀을 때만 요청합니다. 접기·보기 전환은 재번역하지 않습니다.";
     const actions = [];
     if (view.busy) {
       actions.push(button("중단", () => chatId && toBackend({ type: "cancel", chatId, messageId: id })));
@@ -345,7 +345,7 @@ function setup(ctx) {
       el("div", { class: "stt-pr-controls" }, [el("label", {}, ["보기", mode]), el("label", {}, ["도착 언어", target])]),
       fontSettings(),
       el("div", { class: "stt-pr-provider" }, [`번역: ${connection} · ${settings.myLanguage} · ${unit}`]),
-      el("div", { class: `stt-pr-status${error ? " stt-err" : ""}`, role: "status" }, [status]),
+      el("div", { class: `stt-pr-status${error ? " stt-err" : ""}`, role: "status" }, [status2]),
       el("div", { class: "stt-pr-actions" }, actions)
     ]));
   }
@@ -477,11 +477,11 @@ function setup(ctx) {
   }
   const tab = ctx.ui.registerDrawerTab({
     id: "translator",
-    title: "번역",
+    title: "양방향 번역",
     shortName: "번역",
-    description: "AI 번역: 프리셋, 단어장, 자동 번역, 이어서 번역",
+    description: "양방향 번역: 프리셋, 단어장, 자동 번역, 이어서 번역",
     keywords: ["translate", "translation", "glossary", "번역", "단어장"],
-    headerTitle: "번역",
+    headerTitle: "양방향 번역",
     iconSvg: ICON
   });
   const panel = el("div", { class: "stt-panel" });

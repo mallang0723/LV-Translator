@@ -1,5 +1,7 @@
 # Third-party notices
 
+This repository is licensed under the MIT License (see `LICENSE`, Copyright (c) 2026 mallang0723). The parts listed below keep their own copyright and license.
+
 ## Marinara-Translation-Tools 1.5.4
 
 `src/presets/upstream/*` and `src/presets/catalog.ts` are copied verbatim, and `src/translate/prompt.ts` ports the request-building logic, from
@@ -29,9 +31,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Translation Polisher 0.2.3
+## Marinara Engine
 
-`splitForTranslation` in `src/translate/chunk.ts` is adapted from the long-passage split of the Translation Polisher 0.2.3 Marinara personal extension. The extension package states no license.
+[Pasta-Devs/Marinara-Engine](https://github.com/Pasta-Devs/Marinara-Engine), licensed under the [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html). This extension follows the behaviour of its chat translation feature and reuses two short pieces of its text:
+
+- The default translation prompt sentence ("You are a translator. Translate the given text accurately into {{targetLanguage}}, …"), used as `BASE_PROMPT` from `src/presets/upstream/general.ts`. The same sentence is also part of Marinara-Translation-Tools 1.5.4 `prompts/general.js` (MIT, above), from which that file is copied.
+- The user message wording "Translate the following text to <language>:" in `src/translate/prompt.ts`.
 
 ## Paragraph Reader 0.2.0
 

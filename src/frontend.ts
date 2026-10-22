@@ -458,11 +458,11 @@ export function setup(ctx: SpindleFrontendContext) {
 
   const tab = ctx.ui.registerDrawerTab({
     id: 'translator',
-    title: '번역',
+    title: '양방향 번역',
     shortName: '번역',
-    description: 'AI 번역: 프리셋, 단어장, 자동 번역, 이어서 번역',
+    description: '양방향 번역: 프리셋, 단어장, 자동 번역, 이어서 번역',
     keywords: ['translate', 'translation', 'glossary', '번역', '단어장'],
-    headerTitle: '번역',
+    headerTitle: '양방향 번역',
     iconSvg: ICON,
   });
   const panel = el('div', { class: 'stt-panel' });

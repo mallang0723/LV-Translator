@@ -840,63 +840,68 @@ function recordHasMore(r) {
 
 // src/translate/chunk.ts
 var TRANSLATION_CHUNK_CHARS = 3200;
-function safeCut(text, at) {
-  const open = text.lastIndexOf("\u27E6", at - 1);
-  if (open < 0)
-    return at;
-  const close = text.indexOf("\u27E7", open);
-  return close >= at ? close + 1 : at;
-}
-function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
-  const paragraphs = String(text).replace(/\r\n/g, `
-`).split(/\n{2,}/);
-  const chunks = [];
-  let current = "";
-  const push = (value) => {
-    const part = value.trim();
-    if (!part)
-      return;
-    if (!current)
-      current = part;
-    else if (current.length + part.length + 2 <= limit)
-      current += `
-
-${part}`;
-    else {
-      chunks.push(current);
-      current = part;
-    }
-  };
-  for (const paragraph of paragraphs) {
-    if (paragraph.length <= limit) {
-      push(paragraph);
-      continue;
-    }
-    const sentences = paragraph.match(/[^.!?\u3002\uFF01\uFF1F\n]+(?:[.!?\u3002\uFF01\uFF1F]+[\u201D\u2019"']?|$)|\n+/g) || [paragraph];
-    let piece = "";
-    for (const sentence of sentences) {
-      if (sentence.length > limit) {
-        if (piece.trim()) {
-          push(piece);
-          piece = "";
-        }
-        for (let i = 0;i < sentence.length; ) {
-          const end = Math.min(sentence.length, safeCut(sentence, i + limit));
-          push(sentence.slice(i, end));
-          i = end;
-        }
-      } else if (!piece || piece.length + sentence.length <= limit)
-        piece += sentence;
-      else {
-        push(piece);
-        piece = sentence;
+var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
+function findCut(text, from, limit) {
+  const end = from + limit;
+  const span = text.slice(from, end + 1);
+  let best = -1;
+  for (const m of span.matchAll(SENTENCE_BREAK)) {
+    const at = m.index + m[0].length;
+    if (at <= limit)
+      best = Math.max(best, at);
+  }
+  const newline = span.lastIndexOf(`
+`, limit);
+  if (newline > 0)
+    best = Math.max(best, newline);
+  if (best <= 0) {
+    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
+      if (/\s/.test(span[i])) {
+        best = i;
+        break;
       }
     }
-    push(piece);
   }
-  if (current)
-    chunks.push(current);
-  return chunks;
+  let cut = best > 0 ? from + best : end;
+  const open = text.lastIndexOf("\u27E6", cut - 1);
+  if (open >= from) {
+    const close = text.indexOf("\u27E7", open);
+    if (close >= cut)
+      cut = open > from ? open : close + 1;
+  }
+  return cut;
+}
+function cutParagraph(paragraph, limit) {
+  const pieces = [];
+  let from = 0;
+  while (paragraph.length - from > limit) {
+    const cut = findCut(paragraph, from, limit);
+    pieces.push(paragraph.slice(from, cut));
+    from = cut;
+    while (from < paragraph.length && /\s/.test(paragraph[from]))
+      from++;
+  }
+  pieces.push(paragraph.slice(from));
+  return pieces;
+}
+function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
+  const max = Math.max(1, Math.floor(limit));
+  const pieces = String(text).replace(/\r\n?/g, `
+`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
+  const parts = [];
+  for (const raw of pieces) {
+    const piece = raw.trim();
+    if (!piece)
+      continue;
+    const last = parts.length - 1;
+    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
+      parts[last] += `
+
+${piece}`;
+    else
+      parts.push(piece);
+  }
+  return parts;
 }
 var SENTENCE_END = /[.!?\u3002\uFF01\uFF1F\u2026"\u201D\u2019'\u300D\u300F)\]]$/;
 function joinContinuation(partial, continuation) {
@@ -1447,11 +1452,11 @@ function pairParagraphs(content, record, settings) {
   if (record.unit === "paragraph") {
     try {
       const prot = protect(content, settings);
-      const sources = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
-      if (sameArray2(prot.pieces, record.pieces) && sources.length === record.total) {
+      const sources2 = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
+      if (sameArray2(prot.pieces, record.pieces) && sources2.length === record.total) {
         return {
           kind: "paragraph",
-          pairs: sources.map((s, i) => ({
+          pairs: sources2.map((s, i) => ({
             source: restore(s, record.pieces),
             translation: i < record.parts.length && record.parts[i].trim() ? restore(record.parts[i], record.pieces) : null
           }))

@@ -3,8 +3,8 @@
 //            previous-context rule — with {{targetLanguage}} resolved; at most 5,000 characters
 //   user   = "Translate the following text to <language>:\n\n" + glossary block + previous
 //            context block + [Text to Translate] ... [End Text]; the reference text at most 50,000
-// Ported from Marinara-Translation-Tools 1.5.4 extension.js (MIT, (c) 2026 minikkuen) and
-// Marinara Engine translation.service.ts.
+// Ported from Marinara-Translation-Tools 1.5.4 extension.js (MIT, (c) 2026 minikkuen). The user message
+// wording follows Marinara Engine (AGPL-3.0); see THIRD_PARTY_NOTICES.md.
 
 import { BASE_PROMPT } from '../presets/catalog';
 import { MARINARA_TRANSLATION_REFERENCE_PROMPTS, MARINARA_TRANSLATION_REFERENCE_RENDERERS } from '../presets/upstream/reference';

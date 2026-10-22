@@ -1,10 +1,10 @@
-# AI 번역 (Marinara 방식) — Lumiverse 확장
+# 양방향 번역 — Lumiverse 확장
 
-[Lumiverse](https://lumiverse.chat/)에서 Marinara Engine처럼 채팅을 AI로 번역하는 Spindle 확장입니다. 아래 세 가지를 합쳤습니다.
+[Lumiverse](https://lumiverse.chat/)에서 응답과 내 메시지를 AI로 번역하는 양방향 번역 Spindle 확장입니다. Marinara Engine의 번역 기능을 참고해 만들었고, 아래 세 가지를 합쳤습니다.
 
 - Marinara Engine의 기본 AI 번역: 응답 자동 번역, 내 메시지 번역, 번역문만 보기, 입력창 번역 버튼
 - [번역 프리셋·단어장 1.5.4](https://github.com/minikkeuen/Marinara-Translation-Tools/releases/tag/1.5.4): 프리셋 전체, 채팅별 단어장, 기타 지침, 대사 지침, 이전 대화 참고
-- 번역 다듬기 0.2.3의 **끊긴 번역 이어서 하기**와 긴 지문 나눠 번역
+- **끊긴 번역 이어서 하기**와 긴 지문 나눠 번역 (번역 다듬기 0.2.3에서 착안, 코드는 새로 작성)
 
 여기에 Lumiverse용 기능을 더했습니다: 번역하지 않을 부분(상태창 등) 지정, HTML 구조 보존, 번역문의 HTML 렌더링.
 
@@ -105,7 +105,7 @@ Lumiverse에는 기본 채팅 번역 기능이 없어서, 번역은 이 확장�
 
 ## 검증 기록
 
-- **자동 테스트(`bun test`) 58개**
+- **자동 테스트(`bun test`) 63개**
   - 프리셋 원문·메타데이터가 1.5.4의 SHA-256 기준값과 일치
   - 1.5.4 원본 코드를 vm에서 실행해 기록한 24가지 번역 요청과 글자 단위로 일치(위의 의도적 차이 1건 제외)
   - 보호·복원, 제외 규칙, 긴 지문 나누기, 이어 붙이기
