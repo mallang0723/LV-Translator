@@ -7,6 +7,7 @@ import { BUILTIN_IDS, presetSummaries, promptPresets } from './presets';
 import {
   type ChatSettings,
   type ConnectionSummary,
+  effectiveConnectionId,
   INHERIT_PRESET_ID,
   METADATA_KEY,
   type MessageTranslations,
@@ -22,6 +23,7 @@ import {
   type ToFrontend,
   type TranslationRecord,
 } from './shared';
+import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { buildParagraphView } from './display/paragraph-view';
 import { type Completion, recordToText, requestsNeeded, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
@@ -68,7 +70,7 @@ function send(payload: ToFrontend, uid: Uid): void {
 async function connections(uid: Uid): Promise<ConnectionSummary[]> {
   try {
     const list = await spindle.connections.list(uid);
-    return list.map((c) => ({ id: c.id, name: c.name, model: c.model, provider: c.provider }));
+    return list.map((c) => ({ id: c.id, name: c.name, model: c.model, provider: c.provider, isDefault: c.is_default === true }));
   } catch {
     return [];
   }
@@ -182,27 +184,37 @@ function contextBefore(messages: ChatMessage[], end: number): ContextMessage[] {
     });
 }
 
-function completer(uid: Uid, settings: ChatSettings, signal: AbortSignal) {
-  return async (req: TranslationRequest): Promise<Completion> => {
-    const result = (await spindle.generate.quiet({
-      type: 'quiet',
-      messages: [
-        { role: 'system', content: req.system },
-        { role: 'user', content: req.user },
-      ],
-      connection_id: settings.connectionId || undefined,
-      parameters: { temperature: 0.3 },
-      userId: uid,
+/** Connection ids only the frontend can see (active profile, chat pin); remembered per user. */
+const hints = new Map<string, { activeId?: string; chats: Map<string, string> }>();
+
+function hintFor(uid: Uid, chatId: string): ConnectionHint {
+  const h = hints.get(userKey(uid));
+  return { activeId: h?.activeId, chatId: h?.chats.get(chatId) };
+}
+
+const warnedStale = new Set<string>();
+
+function completer(uid: Uid, chatId: string, chosen: string, signal: AbortSignal) {
+  return async (req: TranslationRequest): Promise<Completion> =>
+    quietComplete(spindle as never, {
+      uid,
+      chosen: chosen || undefined,
+      hint: hintFor(uid, chatId),
+      system: req.system,
+      user: req.user,
       signal,
-    })) as { content?: unknown; finish_reason?: unknown } | string | null;
-    if (typeof result === 'string') return { text: result };
-    return { text: typeof result?.content === 'string' ? result.content : '', finishReason: result?.finish_reason };
-  };
+      onStale: (staleId, used) => {
+        const key = `${userKey(uid)}:${staleId}`;
+        if (warnedStale.has(key)) return;
+        warnedStale.add(key);
+        spindle.toast.warning(`번역 설정에서 고른 연결이 없어졌습니다. 대신 ${SOURCE_LABELS[used.source]}으로 번역합니다. 번역 설정에서 연결을 다시 골라 주세요.`, { userId: uid });
+      },
+    });
 }
 
 function errorText(e: unknown): string {
   if (e instanceof Error && (e.name === 'AbortError' || /aborted/i.test(e.message))) return '번역을 취소했습니다.';
-  return e instanceof Error ? e.message : String(e);
+  return friendlyError(e instanceof Error ? e.message : String(e));
 }
 
 async function translateMessage(uid: Uid, chatId: string, messageId: string, mode: 'fresh' | 'continue', options: { force: boolean; automatic: boolean }): Promise<void> {
@@ -237,7 +249,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         resume: mode === 'continue' ? existing : undefined,
       },
       {
-        complete: completer(uid, settings, controller.signal),
+        complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal),
         signal: controller.signal,
         onProgress: async (progress) => {
           const updated = await writeTranslations(chatId, messageId, (mt) => {
@@ -284,7 +296,7 @@ async function translateOutgoing(uid: Uid, chatId: string, text: string): Promis
   try {
     const record = await translate(
       { direction: 'outgoing' as Direction, source: text, settings, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) },
-      { complete: completer(uid, settings, controller.signal), signal: controller.signal },
+      { complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal), signal: controller.signal },
     );
     if (record.status !== 'done') throw new Error('번역이 끝까지 되지 않았습니다.');
     const out = recordToText(record).trim();
@@ -345,6 +357,26 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
     case 'hello':
       await sendState(uid);
       return;
+    case 'hint': {
+      const h = hints.get(userKey(uid)) ?? { chats: new Map<string, string>() };
+      h.activeId = typeof msg.activeId === 'string' && msg.activeId ? msg.activeId : undefined;
+      if (msg.chatId) {
+        if (typeof msg.chatConnectionId === 'string' && msg.chatConnectionId) h.chats.set(msg.chatId, msg.chatConnectionId);
+        else h.chats.delete(msg.chatId);
+      }
+      hints.set(userKey(uid), h);
+      return;
+    }
+    case 'save_connection': {
+      // The connection choice is saved the moment it changes: no separate save button.
+      const id = typeof msg.connectionId === 'string' ? msg.connectionId.trim() : '';
+      const store = await loadStore(uid);
+      store.defaults = { ...store.defaults, connectionId: id };
+      if (msg.chatId && store.chats[msg.chatId]) store.chats[msg.chatId] = { ...store.chats[msg.chatId]!, connectionId: id };
+      await saveStore(uid, store);
+      await sendState(uid);
+      return;
+    }
     case 'chat':
       await sendChatViews(uid, msg.chatId);
       return;

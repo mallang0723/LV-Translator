@@ -825,6 +825,9 @@ function normalizeStore(value) {
 function settingsFor(store, chatId) {
   return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
 }
+function effectiveConnectionId(store, chatId) {
+  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
+}
 function sourceHash(text) {
   let hash = 2166136261;
   for (let i = 0;i < text.length; i++) {
@@ -836,6 +839,79 @@ function sourceHash(text) {
 var METADATA_KEY = "st_translator";
 function recordHasMore(r) {
   return r.truncatedPart >= 0 || r.parts.length < r.total;
+}
+
+// src/connection.ts
+var NO_CONNECTION_MESSAGE = "\uC0AC\uC6A9\uD560 \uC218 \uC788\uB294 AI \uC5F0\uACB0\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. Lumiverse \uC124\uC815\uC758 \uC5F0\uACB0(Connections)\uC5D0\uC11C \uC5F0\uACB0\uC744 \uD558\uB098 \uB9CC\uB4E4\uACE0 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
+var CONNECTION_HINT = "AI \uC5F0\uACB0\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uC5F0\uACB0\uC744 \uACE8\uB790\uB294\uC9C0, \uADF8\uB9AC\uACE0 \uC800\uC7A5\uD588\uB294\uC9C0 \uD655\uC778\uD574 \uC8FC\uC138\uC694(\uC800\uC7A5\uD558\uC9C0 \uC54A\uC73C\uBA74 \uC801\uC6A9\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4). Lumiverse\uC5D0 \uAE30\uBCF8 \uC5F0\uACB0\uC774 \uC788\uB294\uC9C0\uB3C4 \uD655\uC778\uD574 \uBCF4\uC138\uC694.";
+
+class NoConnectionError extends Error {
+  constructor() {
+    super(NO_CONNECTION_MESSAGE);
+    this.name = "NoConnectionError";
+  }
+}
+function pickConnection(list, chosen, hint = {}) {
+  const has = (id) => id ? list.some((c) => c.id === id) : false;
+  const staleId = chosen && !has(chosen) ? chosen : undefined;
+  const found = (id, source) => staleId ? { id, source, staleId } : { id, source };
+  if (chosen && has(chosen))
+    return { id: chosen, source: "chosen" };
+  if (has(hint.chatId))
+    return found(hint.chatId, "chat");
+  if (has(hint.activeId))
+    return found(hint.activeId, "active");
+  const def = list.find((c) => c.is_default);
+  if (def)
+    return found(def.id, "default");
+  const first = list[0];
+  return first ? found(first.id, "first") : null;
+}
+async function resolveConnection(host, uid, chosen, hint = {}) {
+  let list;
+  try {
+    list = await host.connections.list(uid);
+  } catch {
+    return { id: chosen || hint.chatId || hint.activeId || undefined, source: "host" };
+  }
+  const picked = pickConnection(list, chosen, hint);
+  if (!picked)
+    throw new NoConnectionError;
+  return picked;
+}
+var SOURCE_LABELS = {
+  chosen: "\uC124\uC815\uC5D0\uC11C \uACE0\uB978 \uC5F0\uACB0",
+  chat: "\uC774 \uCC44\uD305\uC5D0 \uC9C0\uC815\uB41C \uC5F0\uACB0",
+  active: "\uC9C0\uAE08 \uC4F0\uB294(\uD65C\uC131) \uC5F0\uACB0",
+  default: "\uAE30\uBCF8 \uC5F0\uACB0",
+  first: "\uCCAB \uBC88\uC9F8 \uC5F0\uACB0",
+  host: "Lumiverse\uAC00 \uC815\uD558\uB294 \uC5F0\uACB0"
+};
+function friendlyError(message) {
+  if (/No connection profile found/i.test(message))
+    return CONNECTION_HINT;
+  if (/userId is required/i.test(message))
+    return "\uC774 \uD655\uC7A5\uC740 \uC0AC\uC6A9\uC790 \uC815\uBCF4\uB97C \uBC1B\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD398\uC774\uC9C0\uB97C \uC0C8\uB85C\uACE0\uCE68\uD55C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
+  return message;
+}
+async function quietComplete(host, args) {
+  const conn = await resolveConnection(host, args.uid, args.chosen, args.hint);
+  if (conn.staleId)
+    args.onStale?.(conn.staleId, conn);
+  const result = await host.generate.quiet({
+    type: "quiet",
+    messages: [
+      { role: "system", content: args.system },
+      { role: "user", content: args.user }
+    ],
+    ...conn.id ? { connection_id: conn.id } : {},
+    parameters: { temperature: 0.3 },
+    userId: args.uid,
+    signal: args.signal
+  });
+  if (typeof result === "string")
+    return { text: result };
+  return { text: typeof result?.content === "string" ? result.content : "", finishReason: result?.finish_reason };
 }
 
 // src/translate/chunk.ts
@@ -1566,7 +1642,7 @@ function send(payload, uid) {
 async function connections(uid) {
   try {
     const list = await spindle.connections.list(uid);
-    return list.map((c) => ({ id: c.id, name: c.name, model: c.model, provider: c.provider }));
+    return list.map((c) => ({ id: c.id, name: c.name, model: c.model, provider: c.provider, isDefault: c.is_default === true }));
   } catch {
     return [];
   }
@@ -1657,28 +1733,33 @@ function contextBefore(messages, end) {
     return { role: m.role, content: m.content, translation: entry && entry.parts.length ? recordToText(entry) : null };
   });
 }
-function completer(uid, settings, signal) {
-  return async (req) => {
-    const result = await spindle.generate.quiet({
-      type: "quiet",
-      messages: [
-        { role: "system", content: req.system },
-        { role: "user", content: req.user }
-      ],
-      connection_id: settings.connectionId || undefined,
-      parameters: { temperature: 0.3 },
-      userId: uid,
-      signal
-    });
-    if (typeof result === "string")
-      return { text: result };
-    return { text: typeof result?.content === "string" ? result.content : "", finishReason: result?.finish_reason };
-  };
+var hints = new Map;
+function hintFor(uid, chatId) {
+  const h = hints.get(userKey(uid));
+  return { activeId: h?.activeId, chatId: h?.chats.get(chatId) };
+}
+var warnedStale = new Set;
+function completer(uid, chatId, chosen, signal) {
+  return async (req) => quietComplete(spindle, {
+    uid,
+    chosen: chosen || undefined,
+    hint: hintFor(uid, chatId),
+    system: req.system,
+    user: req.user,
+    signal,
+    onStale: (staleId, used) => {
+      const key = `${userKey(uid)}:${staleId}`;
+      if (warnedStale.has(key))
+        return;
+      warnedStale.add(key);
+      spindle.toast.warning(`\uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uACE0\uB978 \uC5F0\uACB0\uC774 \uC5C6\uC5B4\uC84C\uC2B5\uB2C8\uB2E4. \uB300\uC2E0 ${SOURCE_LABELS[used.source]}\uC73C\uB85C \uBC88\uC5ED\uD569\uB2C8\uB2E4. \uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uC5F0\uACB0\uC744 \uB2E4\uC2DC \uACE8\uB77C \uC8FC\uC138\uC694.`, { userId: uid });
+    }
+  });
 }
 function errorText(e) {
   if (e instanceof Error && (e.name === "AbortError" || /aborted/i.test(e.message)))
     return "\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.";
-  return e instanceof Error ? e.message : String(e);
+  return friendlyError(e instanceof Error ? e.message : String(e));
 }
 async function translateMessage(uid, chatId, messageId, mode, options) {
   const key = jobKey(chatId, messageId);
@@ -1712,7 +1793,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       previous: contextBefore(messages, index),
       resume: mode === "continue" ? existing : undefined
     }, {
-      complete: completer(uid, settings, controller.signal),
+      complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal),
       signal: controller.signal,
       onProgress: async (progress) => {
         const updated = await writeTranslations(chatId, messageId, (mt) => {
@@ -1759,7 +1840,7 @@ async function translateOutgoing(uid, chatId, text) {
   const controller = new AbortController;
   const timer = setTimeout(() => controller.abort(), 180000);
   try {
-    const record = await translate({ direction: "outgoing", source: text, settings, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) }, { complete: completer(uid, settings, controller.signal), signal: controller.signal });
+    const record = await translate({ direction: "outgoing", source: text, settings, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) }, { complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal), signal: controller.signal });
     if (record.status !== "done")
       throw new Error("\uBC88\uC5ED\uC774 \uB05D\uAE4C\uC9C0 \uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
     const out = recordToText(record).trim();
@@ -1829,6 +1910,28 @@ async function handle(msg, uid) {
     case "hello":
       await sendState(uid);
       return;
+    case "hint": {
+      const h = hints.get(userKey(uid)) ?? { chats: new Map };
+      h.activeId = typeof msg.activeId === "string" && msg.activeId ? msg.activeId : undefined;
+      if (msg.chatId) {
+        if (typeof msg.chatConnectionId === "string" && msg.chatConnectionId)
+          h.chats.set(msg.chatId, msg.chatConnectionId);
+        else
+          h.chats.delete(msg.chatId);
+      }
+      hints.set(userKey(uid), h);
+      return;
+    }
+    case "save_connection": {
+      const id = typeof msg.connectionId === "string" ? msg.connectionId.trim() : "";
+      const store = await loadStore(uid);
+      store.defaults = { ...store.defaults, connectionId: id };
+      if (msg.chatId && store.chats[msg.chatId])
+        store.chats[msg.chatId] = { ...store.chats[msg.chatId], connectionId: id };
+      await saveStore(uid, store);
+      await sendState(uid);
+      return;
+    }
     case "chat":
       await sendChatViews(uid, msg.chatId);
       return;

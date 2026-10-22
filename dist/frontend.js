@@ -48,6 +48,43 @@ var DEFAULT_SETTINGS = {
 function settingsFor(store, chatId) {
   return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
 }
+function effectiveConnectionId(store, chatId) {
+  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
+}
+
+// src/connection.ts
+var CONNECTION_HINT = "AI 연결을 찾지 못했습니다. 번역 설정에서 연결을 골랐는지, 그리고 저장했는지 확인해 주세요(저장하지 않으면 적용되지 않습니다). Lumiverse에 기본 연결이 있는지도 확인해 보세요.";
+function pickConnection(list, chosen, hint = {}) {
+  const has = (id) => id ? list.some((c) => c.id === id) : false;
+  const staleId = chosen && !has(chosen) ? chosen : undefined;
+  const found = (id, source) => staleId ? { id, source, staleId } : { id, source };
+  if (chosen && has(chosen))
+    return { id: chosen, source: "chosen" };
+  if (has(hint.chatId))
+    return found(hint.chatId, "chat");
+  if (has(hint.activeId))
+    return found(hint.activeId, "active");
+  const def = list.find((c) => c.is_default);
+  if (def)
+    return found(def.id, "default");
+  const first = list[0];
+  return first ? found(first.id, "first") : null;
+}
+var SOURCE_LABELS = {
+  chosen: "설정에서 고른 연결",
+  chat: "이 채팅에 지정된 연결",
+  active: "지금 쓰는(활성) 연결",
+  default: "기본 연결",
+  first: "첫 번째 연결",
+  host: "Lumiverse가 정하는 연결"
+};
+function friendlyError(message) {
+  if (/No connection profile found/i.test(message))
+    return CONNECTION_HINT;
+  if (/userId is required/i.test(message))
+    return "이 확장은 사용자 정보를 받지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.";
+  return message;
+}
 
 // src/frontend.ts
 var CSS = `
@@ -128,6 +165,22 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-sticky { position: sticky; bottom: 0; background: var(--lumiverse-bg-deep-080, rgba(20,20,24,0.9)); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
+.stt-sticky.stt-unsaved { border-top: 2px solid var(--lumiverse-warning, #c90); background: color-mix(in srgb, var(--lumiverse-warning, #c90) 22%, var(--lumiverse-bg-deep-080, rgba(20,20,24,0.9))); padding: 8px; border-radius: 8px; }
+.stt-unsaved-note { flex: 1 1 100%; font-weight: 700; color: var(--lumiverse-warning, #c90); }
+.stt-unsaved-note[hidden] { display: none; }
+/* Phones and touch screens: readable text (15px+) and tap targets of 44px+. */
+@media (max-width: 768px), (pointer: coarse) {
+  .stt-bar, .stt-pr-note, .stt-pr-widget, .stt-pr-title, .stt-pr-controls, .stt-pr-font, .stt-pr-provider, .stt-pr-status, .stt-pr-actions button, .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
+  .stt-pr-label, .stt-pr-orig > summary, .stt-pr-pill, .stt-pr-launch { font-size: 15px !important; }
+  .stt-panel textarea.stt-prompt, .stt-modal textarea { font-size: 15px; }
+  .stt-field > span, .stt-section > h3 { font-size: 15px; }
+  .stt-btn, .stt-pr-widget button, .stt-pr-launch { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
+  .stt-panel input[type=text], .stt-panel input[type=number], .stt-panel select, .stt-modal input, .stt-pr-controls input, .stt-pr-controls select { min-height: 44px; font-size: 16px; }
+  .stt-check { min-height: 44px; }
+  .stt-check input { width: 22px; height: 22px; flex: none; }
+  .stt-pr-orig > summary, .stt-pr-font > summary, details.stt-translation > summary { min-height: 44px; display: flex; align-items: center; }
+  .stt-pr-font-row button { width: 44px; min-width: 44px; }
+}
 `;
 function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
@@ -166,6 +219,8 @@ function setup(ctx) {
   const pending = new Map;
   let reqCounter = 0;
   let lastDraftTranslation = null;
+  let dirty = false;
+  let markDirtyUi = null;
   const toBackend = (msg) => ctx.sendToBackend(msg);
   const notify = (kind, text2) => toBackend({ type: "notify", kind, text: text2 });
   const current = () => store ? settingsFor(store, chatId) : DEFAULT_SETTINGS;
@@ -174,7 +229,25 @@ function setup(ctx) {
     const m = /^\/chat\/([^/?#]+)/.exec(location.pathname);
     return m ? decodeURIComponent(m[1]) : null;
   }
-  function translateText(text2, forChat) {
+  let hint = {};
+  async function sendHint(forChat = chatId) {
+    const next = {};
+    try {
+      const id = ctx.connections?.getActive?.()?.activeProfileId;
+      if (typeof id === "string" && id)
+        next.activeId = id;
+    } catch {}
+    try {
+      const chat = forChat ? await ctx.chats.get?.(forChat) : null;
+      const pinned = chat?.metadata?.connection_profile_id;
+      if (typeof pinned === "string" && pinned.trim())
+        next.chatId = pinned.trim();
+    } catch {}
+    hint = next;
+    toBackend({ type: "hint", chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId });
+  }
+  async function translateText(text2, forChat) {
+    await sendHint(forChat);
     const reqId = `t${++reqCounter}`;
     return new Promise((resolve, reject) => {
       pending.set(reqId, { resolve, reject });
@@ -182,12 +255,27 @@ function setup(ctx) {
     });
   }
   const act = (id, type, force = false) => () => {
-    if (!chatId)
+    const forChat = chatId;
+    if (!forChat)
       return;
-    if (type === "translate")
-      toBackend({ type, chatId, messageId: id, force });
-    else
-      toBackend({ type, chatId, messageId: id });
+    const run = async () => {
+      await sendHint(forChat);
+      if (type === "translate")
+        toBackend({ type, chatId: forChat, messageId: id, force });
+      else
+        toBackend({ type, chatId: forChat, messageId: id });
+    };
+    if (!dirty) {
+      run();
+      return;
+    }
+    ctx.ui.showConfirm({ title: "저장하지 않은 변경이 있어요", message: `번역 설정을 바꾼 뒤 저장하지 않았습니다. 저장하지 않은 내용은 번역에 반영되지 않습니다.
+지금 저장하고 번역할까요?`, variant: "warning", confirmLabel: "저장하고 번역" }).then(({ confirmed }) => {
+      if (!confirmed)
+        return;
+      save(false);
+      return run();
+    });
   };
   function renderBar(bar, view) {
     const id = view.messageId;
@@ -199,7 +287,7 @@ function setup(ctx) {
       items.push(button("번역", act(id, "translate"), "stt-primary"));
     } else {
       if (view.status === "error")
-        items.push(el("span", { class: "stt-note stt-err", title: view.error ?? "" }, [`번역 오류: ${(view.error ?? "").slice(0, 120)}`]));
+        items.push(el("span", { class: "stt-note stt-err", title: friendlyError(view.error ?? "") }, [`번역 오류: ${friendlyError(view.error ?? "").slice(0, 260)}`]));
       if (view.status === "partial") {
         const progress = view.progress && view.progress.done < view.progress.total ? ` (${view.progress.done}/${view.progress.total})` : "";
         items.push(el("span", { class: "stt-note stt-warn" }, [`번역이 중간에 끊겼습니다${progress}`]));
@@ -291,14 +379,15 @@ function setup(ctx) {
         return;
       toBackend({ type: "save_settings", chatId, settings: { ...current(), myLanguage: target.value.trim() }, asDefault: false });
     });
-    const connection = settings.connectionId ? connections.find((c) => c.id === settings.connectionId)?.name ?? "삭제된 연결" : "현재 사용 중인 연결";
+    const chosenId = store ? effectiveConnectionId(store, chatId) : settings.connectionId;
+    const connection = chosenId ? connections.find((c) => c.id === chosenId)?.name ?? "삭제된 연결" : "자동 선택";
     const unit = settings.translationUnit === "paragraph" ? "문단별 요청" : "메시지 통째로 1회 요청";
     let status2 = "";
     let error = false;
     if (view.busy)
       status2 = view.progress ? `번역 중 · ${view.progress.done}/${view.progress.total}` : "번역 중…";
     else if (view.status === "error") {
-      status2 = view.error ?? "번역 오류";
+      status2 = view.error ? friendlyError(view.error) : "번역 오류";
       error = true;
     } else if (view.status === "partial")
       status2 = '완료한 부분까지 저장했습니다. 남은 부분은 "이어서 번역"으로 이어 갑니다.';
@@ -401,8 +490,10 @@ function setup(ctx) {
     chatId = next;
     renderDraftButton();
     renderPanel();
-    if (next)
+    if (next) {
+      sendHint(next);
       toBackend({ type: "chat", chatId: next });
+    }
   }
   const routeTimer = setInterval(() => {
     const next = chatIdFromLocation();
@@ -487,13 +578,12 @@ function setup(ctx) {
   const panel = el("div", { class: "stt-panel" });
   tab.root.replaceChildren(panel);
   let draft = { ...DEFAULT_SETTINGS };
-  let dirty = false;
   let status = "";
   function check(label, key, onChange) {
     const input = el("input", { type: "checkbox", checked: draft[key] === true });
     input.addEventListener("change", () => {
       draft[key] = input.checked;
-      dirty = true;
+      markDirty();
       onChange?.();
     });
     return el("label", { class: "stt-check" }, [input, label]);
@@ -502,15 +592,16 @@ function setup(ctx) {
     const input = opts.multiline ? el("textarea", { value: String(draft[key] ?? ""), placeholder: opts.placeholder ?? "", class: opts.cls ?? "", spellcheck: false }) : el("input", { type: "text", value: String(draft[key] ?? ""), placeholder: opts.placeholder ?? "" });
     input.addEventListener("input", () => {
       draft[key] = input.value;
-      dirty = true;
+      markDirty();
     });
     return el("label", { class: "stt-field" }, [el("span", {}, [label]), input]);
   }
-  function select(label, value, options, onChange) {
+  function select(label, value, options, onChange, unsaved = true) {
     const s = el("select", {}, options.map(([v, l]) => el("option", { value: v, selected: v === value }, [l])));
     s.addEventListener("change", () => {
       onChange(s.value);
-      dirty = true;
+      if (unsaved)
+        markDirty();
     });
     return el("label", { class: "stt-field" }, [el("span", {}, [label]), s]);
   }
@@ -571,9 +662,20 @@ function setup(ctx) {
     ]));
     return el("div", { class: "stt-field" }, [row, ...list.length ? list : [el("span", { class: "stt-note" }, ["내 프리셋이 없습니다. 기본 프리셋은 읽기 전용입니다."])]]);
   }
+  function markDirty() {
+    dirty = true;
+    status = "";
+    tab.setBadge("!");
+    markDirtyUi?.();
+  }
+  function clearDirty() {
+    dirty = false;
+    tab.setBadge(null);
+    markDirtyUi?.();
+  }
   function save(asDefault) {
     toBackend({ type: "save_settings", chatId, settings: draft, asDefault });
-    dirty = false;
+    clearDirty();
     status = asDefault ? "저장했습니다. 새 채팅의 기본값으로도 저장했습니다." : "저장했습니다.";
   }
   function renderPanel() {
@@ -581,18 +683,41 @@ function setup(ctx) {
       panel.replaceChildren(el("div", { class: "stt-note" }, ["불러오는 중…"]));
       return;
     }
-    if (!dirty)
+    if (!dirty) {
       draft = { ...current() };
-    const connectionOptions = [["", "현재 사용 중인 연결"], ...connections.map((c) => [c.id, `${c.name} · ${c.model}`])];
+      draft.connectionId = effectiveConnectionId(store, chatId);
+    }
+    const connectionOptions = [["", "자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)"], ...connections.map((c) => [c.id, `${c.name} · ${c.model}${c.isDefault ? " (기본)" : ""}`])];
     if (draft.connectionId && !connections.some((c) => c.id === draft.connectionId))
       connectionOptions.push([draft.connectionId, "(삭제된 연결)"]);
+    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), draft.connectionId || undefined, hint);
+    const pickedName = picked ? connections.find((c) => c.id === picked.id)?.name ?? picked.id : "";
+    const connectionNote = !connections.length ? el("div", { class: "stt-note stt-err" }, ["Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요."]) : el("div", { class: `stt-note${picked?.staleId ? " stt-warn" : ""}` }, [
+      picked?.staleId ? `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.` : `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? "host"]}). 연결은 고르는 즉시 저장됩니다.`
+    ]);
+    const saveNotice = el("span", { class: "stt-unsaved-note", role: "status" }, ["저장하지 않은 변경이 있어요. 저장 버튼을 눌러야 적용됩니다."]);
+    const saveRow = el("div", { class: "stt-row stt-sticky" }, [
+      saveNotice,
+      button("저장", () => save(false), "stt-primary"),
+      chatId ? button("저장 + 새 채팅 기본값으로", () => save(true)) : null,
+      button("되돌리기", () => {
+        clearDirty();
+        renderPanel();
+      }),
+      status ? el("span", { class: "stt-note" }, [status]) : null
+    ]);
+    markDirtyUi = () => {
+      saveRow.classList.toggle("stt-unsaved", dirty);
+      saveNotice.hidden = !dirty;
+    };
+    markDirtyUi();
     const contextSub = el("div", { class: "stt-sub" }, [
       el("div", { class: "stt-row" }, [check("원문 포함", "contextIncludeOriginal"), check("번역문 포함", "contextIncludeTranslation"), check("내 메시지 번역에도 포함", "contextIncludeUserInput")]),
       (() => {
         const n = el("input", { type: "number", min: 1, max: 10, value: draft.contextMessageCount });
         n.addEventListener("input", () => {
           draft.contextMessageCount = Number(n.value) || 3;
-          dirty = true;
+          markDirty();
         });
         return el("label", { class: "stt-field" }, [el("span", {}, ["최근 메시지 수 (1~10)"]), n]);
       })()
@@ -600,11 +725,16 @@ function setup(ctx) {
     const split = el("input", { type: "number", min: 0, step: 500, value: draft.longSplitChars });
     split.addEventListener("input", () => {
       draft.longSplitChars = Math.max(0, Number(split.value) || 0);
-      dirty = true;
+      markDirty();
     });
     panel.replaceChildren(el("div", { class: "stt-note" }, [chatId ? "지금 열린 채팅의 번역 설정입니다." : "열린 채팅이 없어 새 채팅의 기본값을 편집합니다."]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["기본 번역"]),
-      select("번역에 쓸 AI 연결", draft.connectionId, connectionOptions, (v) => draft.connectionId = v),
+      select("번역에 쓸 AI 연결", draft.connectionId, connectionOptions, (v) => {
+        draft.connectionId = v;
+        toBackend({ type: "save_connection", chatId, connectionId: v });
+        status = "연결을 저장했습니다.";
+      }, false),
+      connectionNote,
       el("div", { class: "stt-row" }, [text("모델 언어 (내 메시지를 이 언어로)", "modelLanguage"), text("내 언어 (응답을 이 언어로)", "myLanguage")]),
       check("AI 응답 자동 번역", "autoTranslate"),
       check("번역이 끊기면 자동으로 이어서 번역", "autoContinue"),
@@ -638,12 +768,15 @@ function setup(ctx) {
     ]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["긴 지문"]),
       el("label", { class: "stt-field" }, [el("span", {}, ["이 글자 수 이상이면 문단별로 나눠 번역 (0 = 나누지 않음)"]), split])
-    ]), el("div", { class: "stt-row stt-sticky" }, [
-      button("저장", () => save(false), "stt-primary"),
-      chatId ? button("저장 + 새 채팅 기본값으로", () => save(true)) : null,
-      status ? el("span", { class: "stt-note" }, [status]) : null
-    ]));
+    ]), saveRow);
   }
+  const onBeforeUnload = (e) => {
+    if (!dirty)
+      return;
+    e.preventDefault();
+    e.returnValue = "";
+  };
+  window.addEventListener("beforeunload", onBeforeUnload);
   const action = ctx.ui.registerInputBarAction({ id: "open-translator", label: "번역 설정" });
   const offAction = action.onClick(() => tab.activate());
   const offBackend = ctx.onBackendMessage((raw) => {
@@ -697,9 +830,11 @@ function setup(ctx) {
   });
   renderPanel();
   toBackend({ type: "hello" });
+  sendHint();
   resetChat(chatIdFromLocation());
   return () => {
     clearInterval(routeTimer);
+    window.removeEventListener("beforeunload", onBeforeUnload);
     if (viewSaveTimer)
       clearTimeout(viewSaveTimer);
     removeFontStyle?.();

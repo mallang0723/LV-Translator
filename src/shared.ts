@@ -196,6 +196,14 @@ export function settingsFor(store: Store, chatId: string | null): ChatSettings {
   return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
 }
 
+/**
+ * The connection a chat translates on. A chat that never chose one ('') follows the default
+ * settings, so picking a connection once is enough.
+ */
+export function effectiveConnectionId(store: Store, chatId: string | null): string {
+  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
+}
+
 /** FNV-1a hash of a message source, used to tie a translation to the exact text it came from. */
 export function sourceHash(text: string): string {
   let hash = 0x811c9dc5;
@@ -273,11 +281,14 @@ export interface ConnectionSummary {
   name: string;
   model: string;
   provider: string;
+  isDefault?: boolean;
 }
 
 // frontend -> backend
 export type ToBackend =
   | { type: 'hello' }
+  | { type: 'hint'; chatId: string | null; activeId?: string; chatConnectionId?: string }
+  | { type: 'save_connection'; chatId: string | null; connectionId: string }
   | { type: 'chat'; chatId: string }
   | { type: 'save_settings'; chatId: string | null; settings: ChatSettings; asDefault: boolean }
   | { type: 'save_preset'; preset: UserPreset }
