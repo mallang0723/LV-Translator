@@ -3,8 +3,9 @@
 //
 // Protected, in this order:
 //   1. user exclude rules (<tag> elements, /regex/, "start ... end" ranges)
+//   1b. elements named in the excluded tag list (excludeTags), nested tags counted
 //   2. fenced code blocks                      (protectCode)
-//   3. <style>/<script> elements, comments     (protectHtml)
+//   3. <style>/<script> elements (always), comments (protectHtml)
 //   4. every other HTML tag, attributes and all (protectHtml) — text between tags stays translatable
 //   5. {{macros}}
 
@@ -12,6 +13,8 @@ export interface ProtectOptions {
   protectHtml: boolean;
   protectCode: boolean;
   excludeRules: string;
+  /** Tag names whose whole element (tags and contents) is kept verbatim. Comma / space separated. */
+  excludeTags?: string;
 }
 
 export interface Protected {
@@ -32,6 +35,73 @@ export const MARKER_INSTRUCTION =
   'The text contains placeholder tokens such as ⟦1⟧. Each one stands for markup or content that must stay untranslated. ' +
   'Copy every token exactly as written, keep each one in the same place relative to the surrounding text, ' +
   'and never add, remove, renumber, translate or explain them.';
+
+export const VOID_TAGS = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '));
+/** Emphasis tags are never excluded as a range: their tags stay, the words inside are still translated. */
+const EMPHASIS_TAGS = new Set(['strong', 'em']);
+
+/**
+ * Tag names from a user list ("choices, status <ui>"), lowercased and de-duplicated. Accepts `<name>`,
+ * `</name>` and `<name/>` spellings. Invalid names throw ExcludeRuleError.
+ */
+export function parseTags(raw: string): string[] {
+  const names = String(raw ?? '')
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map((t) => t.replace(/^<\/?|\/?\s*>$/g, '').toLowerCase());
+  const bad = names.find((n) => !/^[a-z_][a-z0-9_-]*$/.test(n));
+  if (bad !== undefined) throw new ExcludeRuleError(`태그 이름 "${bad}" 를 쓸 수 없습니다. 영문, 숫자, 하이픈, 언더바만 쓸 수 있습니다.`);
+  return [...new Set(names)];
+}
+
+/** Same as parseTags, but drops invalid names instead of throwing (for loading stored settings). */
+export function lenientTags(raw: string): string[] {
+  const out: string[] = [];
+  for (const piece of String(raw ?? '').split(/[,\s]+/).filter(Boolean)) {
+    try {
+      out.push(...parseTags(piece));
+    } catch {
+      // ignored
+    }
+  }
+  return [...new Set(out)];
+}
+
+// Comments, fenced code and inline code are skipped so tags written inside them are not matched.
+const TAG_SCAN = /<!--[\s\S]*?(?:-->|$)|```[^\n]*\n[\s\S]*?(?:```|$)|~~~[^\n]*\n[\s\S]*?(?:~~~|$)|`[^`\n]+`|<\/?([a-z_][\w-]*)(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
+
+/**
+ * Replaces every element named in `names` (opening tag through its matching closing tag, same-name
+ * nesting counted; an element that is never closed runs to the end) with hold(element).
+ */
+export function protectElements(text: string, names: string[], hold: (piece: string) => string): string {
+  const wanted = new Set(names.filter((n) => !EMPHASIS_TAGS.has(n) && !VOID_TAGS.has(n)));
+  if (!wanted.size) return text;
+  const matches = [...text.matchAll(TAG_SCAN)];
+  let out = '';
+  let cursor = 0;
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i]!;
+    const name = m[1]?.toLowerCase();
+    if (m.index! < cursor || !name || !wanted.has(name) || m[0].startsWith('</') || m[0].endsWith('/>')) continue;
+    let end = text.length;
+    let depth = 1;
+    for (let j = i + 1; j < matches.length; j++) {
+      const n = matches[j]!;
+      if (n[1]?.toLowerCase() !== name) continue;
+      if (n[0].startsWith('</')) depth--;
+      else if (!n[0].endsWith('/>')) depth++;
+      if (!depth) {
+        end = n.index! + n[0].length;
+        i = j;
+        break;
+      }
+    }
+    out += text.slice(cursor, m.index!) + hold(text.slice(m.index!, end));
+    cursor = end;
+  }
+  return out + text.slice(cursor);
+}
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -85,11 +155,17 @@ export function protect(source: string, options: ProtectOptions): Protected {
     return `⟦${pieces.length}⟧`;
   };
   // Markers already in the source would be confused with ours.
-  let text = source.replace(MARKER, (m) => hold(m));
+  // (Pushed as is: expanding them would turn a literal ⟦1⟧ into an earlier literal marker's text.)
+  let text = source.replace(MARKER, (m) => {
+    pieces.push(m);
+    return `⟦${pieces.length}⟧`;
+  });
   for (const rule of parseExcludeRules(options.excludeRules)) text = text.replace(rule, (m) => hold(m));
+  text = protectElements(text, lenientTags(options.excludeTags ?? ''), hold);
   if (options.protectCode) text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
+  // <style> and <script> are never translated, whatever the HTML setting says.
+  text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
   if (options.protectHtml) {
-    text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
     text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
     // Tags: opening, closing, self-closing, with quoted attributes that may contain ">".
     text = text.replace(/<\/?[A-Za-z][\w:.-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'">\s/]+|\/(?!>))*)*\s*\/?>/g, (m) => hold(m));

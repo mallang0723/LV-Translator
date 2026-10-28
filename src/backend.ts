@@ -24,7 +24,7 @@ import {
   type TranslationRecord,
 } from './shared';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
-import { buildParagraphView } from './display/paragraph-view';
+import { renderMessage } from './display/render';
 import { clearTranslation, isTranslationHidden, recordFor, skipFresh } from './message-ui';
 import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
@@ -325,16 +325,7 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   if (isTranslationHidden(mt.hidden, settings.displayMode)) return;
   const record = mt.entries[sourceHash(ctx.content)];
   if (!record || !record.parts.some((p) => p.trim())) return;
-  if (settings.displayMode === 'paragraph') return { content: buildParagraphView(ctx.content, record, settings, store.view.paragraphView) };
-  const text = recordToText(record);
-  switch (settings.displayMode) {
-    case 'only':
-      return { content: text };
-    case 'collapsed':
-      return { content: `${ctx.content}\n\n<details class="stt-translation"><summary>번역</summary>\n\n${text}\n\n</details>` };
-    default:
-      return { content: `${ctx.content}\n\n<hr class="stt-separator">\n\n${text}` };
-  }
+  return { content: renderMessage(ctx.content, record, settings, store.view) };
 });
 
 // ---- events ----

@@ -12,6 +12,7 @@ import {
   FONT_MAX,
   FONT_MIN,
   normalizeView,
+  type ParagraphOrder,
   type ViewSettings,
   INHERIT_PRESET_ID,
   type MessageView,
@@ -22,6 +23,7 @@ import {
   type ToFrontend,
   effectiveConnectionId,
 } from './shared';
+import { ExcludeRuleError, parseTags } from './translate/protect';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { showsToggle, targetLabel, wantsBar } from './message-ui';
 import { type DecoratorSpec, mountToolbars } from './toolbar';
@@ -53,6 +55,8 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-pr-same { font-size: var(--stt-src-size, 16px); }
 .stt-pr-pending { color: var(--lumiverse-text-muted, inherit); font-style: italic; }
 .stt-pr-tap .stt-pr-tgt { margin-top: 0; }
+.stt-pr-tfirst .stt-pr-tgt { margin-top: 0; margin-bottom: 8px; }
+.stt-pr-tfirst .stt-pr-src { margin-top: 8px; }
 .stt-pr-orig { border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); padding: 6px 0 12px 15px; }
 .stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
 .stt-pr-orig[open] > summary { color: var(--stt-accent); }
@@ -129,8 +133,18 @@ const button = (label: string, onClick: () => void, cls = '', title?: string) =>
 
 const ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
 
+const SUGGESTED_TAGS = ['choices', 'options', 'status', 'stats'];
+const parseTagsSafe = (raw: string): string[] => {
+  try {
+    return parseTags(raw);
+  } catch {
+    return [];
+  }
+};
+
 const DISPLAY_LABELS: Record<DisplayMode, string> = {
   below: '원문 아래에 번역문',
+  above: '번역문 먼저 (번역문 아래에 원문)',
   only: '번역문만 (원문 숨김)',
   collapsed: '원문 + 접힌 번역문',
   paragraph: '문단 대조 (Paragraph Reader)',
@@ -580,6 +594,12 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function save(asDefault: boolean): void {
+    try {
+      draft.excludeTags = parseTags(draft.excludeTags).join(', ');
+    } catch (e) {
+      toBackend({ type: 'notify', kind: 'error', text: e instanceof ExcludeRuleError ? e.message : '제외할 태그 이름을 확인해 주세요.' });
+      return;
+    }
     toBackend({ type: 'save_settings', chatId, settings: draft, asDefault });
     clearDirty();
     status = asDefault ? '저장했습니다. 새 채팅의 기본값으로도 저장했습니다.' : '저장했습니다.';
@@ -643,6 +663,12 @@ export function setup(ctx: SpindleFrontendContext) {
         localView = { ...localView, paragraphView: v === 'tap' ? 'tap' : 'interleave' };
         toBackend({ type: 'save_view', view: localView });
       }, false),
+      localView.paragraphView === 'interleave'
+        ? select('문단 안 순서', localView.paragraphOrder, [['source-first', '원문 → 번역'], ['translation-first', '번역 → 원문']], (v) => {
+            localView = { ...localView, paragraphOrder: (v === 'translation-first' ? 'translation-first' : 'source-first') as ParagraphOrder };
+            toBackend({ type: 'save_view', view: localView });
+          }, false)
+        : null,
       text('도착 언어 (응답을 번역할 언어, "내 언어"와 같은 설정)', 'myLanguage'),
       fontHost,
       el('div', { class: 'stt-note' }, ['보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다.']),
@@ -687,6 +713,19 @@ export function setup(ctx: SpindleFrontendContext) {
         el('h3', {}, ['번역하지 않을 부분']),
         check('HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역', 'protectHtml'),
         check('코드 블록(```) 은 번역하지 않음', 'protectCode'),
+        el('div', { class: 'stt-field' }, [
+          text('제외할 HTML 태그 (쉼표·공백으로 구분)', 'excludeTags', { placeholder: 'choices, status, ui' }),
+          el('div', { class: 'stt-row' }, [
+            button('추천 태그 넣기', () => {
+              const have = new Set(parseTagsSafe(draft.excludeTags));
+              for (const t of SUGGESTED_TAGS) have.add(t);
+              draft.excludeTags = [...have].join(', ');
+              markDirty();
+              renderPanel();
+            }, '', `${SUGGESTED_TAGS.join(', ')} 를 목록에 더합니다`),
+          ]),
+          el('div', { class: 'stt-note' }, ['이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. <style>·<script> 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다.']),
+        ]),
         text('제외 규칙 (한 줄에 하나)', 'excludeRules', { multiline: true, placeholder: '<status>\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]' }),
         el('div', { class: 'stt-note' }, ['<태그> 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.']),
       ]),
@@ -716,7 +755,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const msg = raw as ToFrontend;
     switch (msg?.type) {
       case 'state': {
-        const shape = (st: Store) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView]);
+        const shape = (st: Store) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView, st.view.paragraphOrder]);
         const before = store ? shape(store) : null;
         store = msg.store;
         presets = msg.presets;

@@ -1,7 +1,25 @@
+// src/translate/protect.ts
+class ExcludeRuleError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ExcludeRuleError";
+  }
+}
+var MARKER_INSTRUCTION = "The text contains placeholder tokens such as ⟦1⟧. Each one stands for markup or content that must stay untranslated. " + "Copy every token exactly as written, keep each one in the same place relative to the surrounding text, " + "and never add, remove, renumber, translate or explain them.";
+var VOID_TAGS = new Set("area base br col embed hr img input link meta param source track wbr".split(" "));
+var EMPHASIS_TAGS = new Set(["strong", "em"]);
+function parseTags(raw) {
+  const names = String(raw ?? "").split(/[,\s]+/).filter(Boolean).map((t) => t.replace(/^<\/?|\/?\s*>$/g, "").toLowerCase());
+  const bad = names.find((n) => !/^[a-z_][a-z0-9_-]*$/.test(n));
+  if (bad !== undefined)
+    throw new ExcludeRuleError(`태그 이름 "${bad}" 를 쓸 수 없습니다. 영문, 숫자, 하이픈, 언더바만 쓸 수 있습니다.`);
+  return [...new Set(names)];
+}
+
 // src/shared.ts
 var FONT_MIN = 12;
 var FONT_MAX = 32;
-var DEFAULT_VIEW = { paragraphView: "interleave", sourceFontSize: 16, translationFontSize: 18 };
+var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
 function fontSize(value, fallback) {
   const n = Number(value);
   return value === null || value === "" || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
@@ -10,6 +28,7 @@ function normalizeView(value) {
   const v = value && typeof value === "object" ? value : {};
   return {
     paragraphView: v.paragraphView === "tap" ? "tap" : "interleave",
+    paragraphOrder: v.paragraphOrder === "translation-first" ? "translation-first" : "source-first",
     sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
     translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize)
   };
@@ -34,6 +53,7 @@ var DEFAULT_SETTINGS = {
   protectHtml: true,
   protectCode: true,
   excludeRules: "",
+  excludeTags: "",
   glossary: "",
   freeContextEnabled: false,
   freeContext: "",
@@ -318,6 +338,8 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-pr-same { font-size: var(--stt-src-size, 16px); }
 .stt-pr-pending { color: var(--lumiverse-text-muted, inherit); font-style: italic; }
 .stt-pr-tap .stt-pr-tgt { margin-top: 0; }
+.stt-pr-tfirst .stt-pr-tgt { margin-top: 0; margin-bottom: 8px; }
+.stt-pr-tfirst .stt-pr-src { margin-top: 8px; }
 .stt-pr-orig { border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); padding: 6px 0 12px 15px; }
 .stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
 .stt-pr-orig[open] > summary { color: var(--stt-accent); }
@@ -394,8 +416,17 @@ function el(tag, props = {}, children = []) {
 }
 var button = (label, onClick, cls = "", title) => el("button", { type: "button", class: `stt-btn ${cls}`.trim(), title: title ?? label, "aria-label": title ?? label, onClick }, [label]);
 var ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+var SUGGESTED_TAGS = ["choices", "options", "status", "stats"];
+var parseTagsSafe = (raw) => {
+  try {
+    return parseTags(raw);
+  } catch {
+    return [];
+  }
+};
 var DISPLAY_LABELS = {
   below: "원문 아래에 번역문",
+  above: "번역문 먼저 (번역문 아래에 원문)",
   only: "번역문만 (원문 숨김)",
   collapsed: "원문 + 접힌 번역문",
   paragraph: "문단 대조 (Paragraph Reader)"
@@ -413,7 +444,7 @@ function setup(ctx) {
   let dirty = false;
   let markDirtyUi = null;
   const toBackend = (msg) => ctx.sendToBackend(msg);
-  const notify = (kind, text2) => toBackend({ type: "notify", kind, text: text2 });
+  const notify = (kind, text) => toBackend({ type: "notify", kind, text });
   const current = () => store ? settingsFor(store, chatId) : DEFAULT_SETTINGS;
   const removeStyle = ctx.dom.addStyle(CSS);
   function chatIdFromLocation() {
@@ -437,12 +468,12 @@ function setup(ctx) {
     hint = next;
     toBackend({ type: "hint", chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId });
   }
-  async function translateText(text2, forChat) {
+  async function translateText(text, forChat) {
     await sendHint(forChat);
     const reqId = `t${++reqCounter}`;
     return new Promise((resolve, reject) => {
       pending.set(reqId, { resolve, reject });
-      toBackend({ type: "translate_text", reqId, chatId: forChat, text: text2 });
+      toBackend({ type: "translate_text", reqId, chatId: forChat, text });
     });
   }
   const act = (id, type, force = false) => () => {
@@ -795,6 +826,12 @@ function setup(ctx) {
     markDirtyUi?.();
   }
   function save(asDefault) {
+    try {
+      draft.excludeTags = parseTags(draft.excludeTags).join(", ");
+    } catch (e) {
+      toBackend({ type: "notify", kind: "error", text: e instanceof ExcludeRuleError ? e.message : "제외할 태그 이름을 확인해 주세요." });
+      return;
+    }
     toBackend({ type: "save_settings", chatId, settings: draft, asDefault });
     clearDirty();
     status = asDefault ? "저장했습니다. 새 채팅의 기본값으로도 저장했습니다." : "저장했습니다.";
@@ -856,6 +893,10 @@ function setup(ctx) {
         localView = { ...localView, paragraphView: v === "tap" ? "tap" : "interleave" };
         toBackend({ type: "save_view", view: localView });
       }, false),
+      localView.paragraphView === "interleave" ? select("문단 안 순서", localView.paragraphOrder, [["source-first", "원문 → 번역"], ["translation-first", "번역 → 원문"]], (v) => {
+        localView = { ...localView, paragraphOrder: v === "translation-first" ? "translation-first" : "source-first" };
+        toBackend({ type: "save_view", view: localView });
+      }, false) : null,
       text('도착 언어 (응답을 번역할 언어, "내 언어"와 같은 설정)', "myLanguage"),
       fontHost,
       el("div", { class: "stt-note" }, ["보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다."])
@@ -894,6 +935,20 @@ function setup(ctx) {
       el("h3", {}, ["번역하지 않을 부분"]),
       check("HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역", "protectHtml"),
       check("코드 블록(```) 은 번역하지 않음", "protectCode"),
+      el("div", { class: "stt-field" }, [
+        text("제외할 HTML 태그 (쉼표·공백으로 구분)", "excludeTags", { placeholder: "choices, status, ui" }),
+        el("div", { class: "stt-row" }, [
+          button("추천 태그 넣기", () => {
+            const have = new Set(parseTagsSafe(draft.excludeTags));
+            for (const t of SUGGESTED_TAGS)
+              have.add(t);
+            draft.excludeTags = [...have].join(", ");
+            markDirty();
+            renderPanel();
+          }, "", `${SUGGESTED_TAGS.join(", ")} 를 목록에 더합니다`)
+        ]),
+        el("div", { class: "stt-note" }, ["이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. <style>·<script> 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다."])
+      ]),
       text("제외 규칙 (한 줄에 하나)", "excludeRules", { multiline: true, placeholder: `<status>
 /HP: \\d+\\/\\d+/
 [상태창] ... [/상태창]` }),
@@ -917,7 +972,7 @@ function setup(ctx) {
     const msg = raw;
     switch (msg?.type) {
       case "state": {
-        const shape = (st) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView]);
+        const shape = (st) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView, st.view.paragraphOrder]);
         const before = store ? shape(store) : null;
         store = msg.store;
         presets = msg.presets;

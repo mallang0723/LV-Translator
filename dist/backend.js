@@ -712,10 +712,164 @@ function presetSummaries(userPresets) {
   ];
 }
 
+// src/translate/protect.ts
+class ExcludeRuleError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ExcludeRuleError";
+  }
+}
+var MARKER = /\u27E6\s*(\d+)\s*\u27E7/g;
+var MARKER_INSTRUCTION = "The text contains placeholder tokens such as \u27E61\u27E7. Each one stands for markup or content that must stay untranslated. " + "Copy every token exactly as written, keep each one in the same place relative to the surrounding text, " + "and never add, remove, renumber, translate or explain them.";
+var VOID_TAGS = new Set("area base br col embed hr img input link meta param source track wbr".split(" "));
+var EMPHASIS_TAGS = new Set(["strong", "em"]);
+function parseTags(raw) {
+  const names = String(raw ?? "").split(/[,\s]+/).filter(Boolean).map((t) => t.replace(/^<\/?|\/?\s*>$/g, "").toLowerCase());
+  const bad = names.find((n) => !/^[a-z_][a-z0-9_-]*$/.test(n));
+  if (bad !== undefined)
+    throw new ExcludeRuleError(`\uD0DC\uADF8 \uC774\uB984 "${bad}" \uB97C \uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC601\uBB38, \uC22B\uC790, \uD558\uC774\uD508, \uC5B8\uB354\uBC14\uB9CC \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4.`);
+  return [...new Set(names)];
+}
+function lenientTags(raw) {
+  const out = [];
+  for (const piece of String(raw ?? "").split(/[,\s]+/).filter(Boolean)) {
+    try {
+      out.push(...parseTags(piece));
+    } catch {}
+  }
+  return [...new Set(out)];
+}
+var TAG_SCAN = /<!--[\s\S]*?(?:-->|$)|```[^\n]*\n[\s\S]*?(?:```|$)|~~~[^\n]*\n[\s\S]*?(?:~~~|$)|`[^`\n]+`|<\/?([a-z_][\w-]*)(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
+function protectElements(text, names, hold) {
+  const wanted = new Set(names.filter((n) => !EMPHASIS_TAGS.has(n) && !VOID_TAGS.has(n)));
+  if (!wanted.size)
+    return text;
+  const matches = [...text.matchAll(TAG_SCAN)];
+  let out = "";
+  let cursor = 0;
+  for (let i = 0;i < matches.length; i++) {
+    const m = matches[i];
+    const name = m[1]?.toLowerCase();
+    if (m.index < cursor || !name || !wanted.has(name) || m[0].startsWith("</") || m[0].endsWith("/>"))
+      continue;
+    let end = text.length;
+    let depth = 1;
+    for (let j = i + 1;j < matches.length; j++) {
+      const n = matches[j];
+      if (n[1]?.toLowerCase() !== name)
+        continue;
+      if (n[0].startsWith("</"))
+        depth--;
+      else if (!n[0].endsWith("/>"))
+        depth++;
+      if (!depth) {
+        end = n.index + n[0].length;
+        i = j;
+        break;
+      }
+    }
+    out += text.slice(cursor, m.index) + hold(text.slice(m.index, end));
+    cursor = end;
+  }
+  return out + text.slice(cursor);
+}
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function parseExcludeRules(raw) {
+  const out = [];
+  raw.split(/\r?\n/).forEach((line, index) => {
+    const rule = line.trim();
+    if (!rule || rule.startsWith("#"))
+      return;
+    const where = `\uC81C\uC678 \uADDC\uCE59 ${index + 1}\uBC88\uC9F8 \uC904`;
+    const tag = /^<\s*([A-Za-z][\w:.-]*)\s*\/?>$/.exec(rule);
+    if (tag) {
+      const name = escapeRegExp(tag[1]);
+      out.push(new RegExp(`<${name}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${name}\\s*>|<${name}(?:\\s[^>]*)?\\/>`, "gi"));
+      return;
+    }
+    const re = /^\/(.+)\/([a-z]*)$/s.exec(rule);
+    if (re) {
+      let flags = re[2];
+      if (/[^gimsuy]/.test(flags))
+        throw new ExcludeRuleError(`${where}: \uC815\uADDC\uC2DD \uD50C\uB798\uADF8 "${flags}" \uB294 \uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
+      if (!flags.includes("g"))
+        flags += "g";
+      try {
+        const r = new RegExp(re[1], flags);
+        if (r.test(""))
+          throw new ExcludeRuleError(`${where}: \uBE48 \uBB38\uC790\uC5F4\uACFC \uC77C\uCE58\uD558\uB294 \uC815\uADDC\uC2DD\uC740 \uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
+        r.lastIndex = 0;
+        out.push(r);
+      } catch (e) {
+        if (e instanceof ExcludeRuleError)
+          throw e;
+        throw new ExcludeRuleError(`${where}: \uC815\uADDC\uC2DD \uC624\uB958 (${e.message})`);
+      }
+      return;
+    }
+    const range = rule.split(" ... ");
+    if (range.length === 2 && range[0].trim() && range[1].trim()) {
+      out.push(new RegExp(`${escapeRegExp(range[0].trim())}[\\s\\S]*?${escapeRegExp(range[1].trim())}`, "g"));
+      return;
+    }
+    throw new ExcludeRuleError(`${where}: "${rule}" \uB97C \uC774\uD574\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. <\uD0DC\uADF8>, /\uC815\uADDC\uC2DD/, \uC2DC\uC791 ... \uB05D \uC911 \uD558\uB098\uB85C \uC801\uC5B4 \uC8FC\uC138\uC694.`);
+  });
+  return out;
+}
+function protect(source, options) {
+  const pieces = [];
+  const hold = (piece) => {
+    pieces.push(piece.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m));
+    return `\u27E6${pieces.length}\u27E7`;
+  };
+  let text = source.replace(MARKER, (m) => {
+    pieces.push(m);
+    return `\u27E6${pieces.length}\u27E7`;
+  });
+  for (const rule of parseExcludeRules(options.excludeRules))
+    text = text.replace(rule, (m) => hold(m));
+  text = protectElements(text, lenientTags(options.excludeTags ?? ""), hold);
+  if (options.protectCode)
+    text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
+  text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
+  if (options.protectHtml) {
+    text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
+    text = text.replace(/<\/?[A-Za-z][\w:.-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'">\s/]+|\/(?!>))*)*\s*\/?>/g, (m) => hold(m));
+  }
+  text = text.replace(/\{\{[\s\S]*?\}\}/g, (m) => hold(m));
+  return { text, pieces };
+}
+function markersIn(text) {
+  return [...text.matchAll(MARKER)].map((m) => Number(m[1]));
+}
+function checkMarkers(sourceText, translated) {
+  const expected = markersIn(sourceText).sort((a, b) => a - b);
+  const got = markersIn(translated).sort((a, b) => a - b);
+  if (expected.join(",") === got.join(","))
+    return null;
+  const missing = expected.filter((n) => !got.includes(n));
+  const extra = got.filter((n) => !expected.includes(n));
+  const dup = got.filter((n, i) => got.indexOf(n) !== i);
+  const parts = [];
+  if (missing.length)
+    parts.push(`\uBE60\uC9D0 ${missing.map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
+  if (extra.length)
+    parts.push(`\uC5C6\uB358 \uD45C\uC2DC ${extra.map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
+  if (dup.length)
+    parts.push(`\uC911\uBCF5 ${[...new Set(dup)].map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
+  return `\uBC88\uC5ED\uBB38\uC5D0\uC11C \uBCF4\uD638 \uD45C\uC2DC\uAC00 \uC5B4\uAE0B\uB0AC\uC2B5\uB2C8\uB2E4 (${parts.join(", ")}).`;
+}
+function restore(text, pieces) {
+  return text.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m);
+}
+
 // src/shared.ts
+var DISPLAY_MODES = ["below", "above", "only", "collapsed", "paragraph"];
 var FONT_MIN = 12;
 var FONT_MAX = 32;
-var DEFAULT_VIEW = { paragraphView: "interleave", sourceFontSize: 16, translationFontSize: 18 };
+var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
 function fontSize(value, fallback) {
   const n = Number(value);
   return value === null || value === "" || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
@@ -724,6 +878,7 @@ function normalizeView(value) {
   const v = value && typeof value === "object" ? value : {};
   return {
     paragraphView: v.paragraphView === "tap" ? "tap" : "interleave",
+    paragraphOrder: v.paragraphOrder === "translation-first" ? "translation-first" : "source-first",
     sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
     translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize)
   };
@@ -750,6 +905,7 @@ var DEFAULT_SETTINGS = {
   protectHtml: true,
   protectCode: true,
   excludeRules: "",
+  excludeTags: "",
   glossary: "",
   freeContextEnabled: false,
   freeContext: "",
@@ -779,13 +935,14 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS) {
     translateMyMessages: bool(s.translateMyMessages, base.translateMyMessages),
     showDraftButton: bool(s.showDraftButton, base.showDraftButton),
     autoTranslate: bool(s.autoTranslate, base.autoTranslate),
-    displayMode: mode === "below" || mode === "only" || mode === "collapsed" || mode === "paragraph" ? mode : base.displayMode,
+    displayMode: DISPLAY_MODES.includes(mode) ? mode : base.displayMode,
     translationUnit: s.translationUnit === "paragraph" ? "paragraph" : s.translationUnit === "whole" ? "whole" : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200000, split)) : base.longSplitChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
+    excludeTags: lenientTags(str(s.excludeTags, base.excludeTags)).join(", "),
     glossary: str(s.glossary, base.glossary),
     freeContextEnabled: bool(s.freeContextEnabled, base.freeContextEnabled),
     freeContext: str(s.freeContext, base.freeContext),
@@ -1044,103 +1201,6 @@ ${instruction}`;
   }
 });
 
-// src/translate/protect.ts
-class ExcludeRuleError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ExcludeRuleError";
-  }
-}
-var MARKER = /\u27E6\s*(\d+)\s*\u27E7/g;
-var MARKER_INSTRUCTION = "The text contains placeholder tokens such as \u27E61\u27E7. Each one stands for markup or content that must stay untranslated. " + "Copy every token exactly as written, keep each one in the same place relative to the surrounding text, " + "and never add, remove, renumber, translate or explain them.";
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function parseExcludeRules(raw) {
-  const out = [];
-  raw.split(/\r?\n/).forEach((line, index) => {
-    const rule = line.trim();
-    if (!rule || rule.startsWith("#"))
-      return;
-    const where = `\uC81C\uC678 \uADDC\uCE59 ${index + 1}\uBC88\uC9F8 \uC904`;
-    const tag = /^<\s*([A-Za-z][\w:.-]*)\s*\/?>$/.exec(rule);
-    if (tag) {
-      const name = escapeRegExp(tag[1]);
-      out.push(new RegExp(`<${name}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${name}\\s*>|<${name}(?:\\s[^>]*)?\\/>`, "gi"));
-      return;
-    }
-    const re = /^\/(.+)\/([a-z]*)$/s.exec(rule);
-    if (re) {
-      let flags = re[2];
-      if (/[^gimsuy]/.test(flags))
-        throw new ExcludeRuleError(`${where}: \uC815\uADDC\uC2DD \uD50C\uB798\uADF8 "${flags}" \uB294 \uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
-      if (!flags.includes("g"))
-        flags += "g";
-      try {
-        const r = new RegExp(re[1], flags);
-        if (r.test(""))
-          throw new ExcludeRuleError(`${where}: \uBE48 \uBB38\uC790\uC5F4\uACFC \uC77C\uCE58\uD558\uB294 \uC815\uADDC\uC2DD\uC740 \uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`);
-        r.lastIndex = 0;
-        out.push(r);
-      } catch (e) {
-        if (e instanceof ExcludeRuleError)
-          throw e;
-        throw new ExcludeRuleError(`${where}: \uC815\uADDC\uC2DD \uC624\uB958 (${e.message})`);
-      }
-      return;
-    }
-    const range = rule.split(" ... ");
-    if (range.length === 2 && range[0].trim() && range[1].trim()) {
-      out.push(new RegExp(`${escapeRegExp(range[0].trim())}[\\s\\S]*?${escapeRegExp(range[1].trim())}`, "g"));
-      return;
-    }
-    throw new ExcludeRuleError(`${where}: "${rule}" \uB97C \uC774\uD574\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. <\uD0DC\uADF8>, /\uC815\uADDC\uC2DD/, \uC2DC\uC791 ... \uB05D \uC911 \uD558\uB098\uB85C \uC801\uC5B4 \uC8FC\uC138\uC694.`);
-  });
-  return out;
-}
-function protect(source, options) {
-  const pieces = [];
-  const hold = (piece) => {
-    pieces.push(piece.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m));
-    return `\u27E6${pieces.length}\u27E7`;
-  };
-  let text = source.replace(MARKER, (m) => hold(m));
-  for (const rule of parseExcludeRules(options.excludeRules))
-    text = text.replace(rule, (m) => hold(m));
-  if (options.protectCode)
-    text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
-  if (options.protectHtml) {
-    text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
-    text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
-    text = text.replace(/<\/?[A-Za-z][\w:.-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'">\s/]+|\/(?!>))*)*\s*\/?>/g, (m) => hold(m));
-  }
-  text = text.replace(/\{\{[\s\S]*?\}\}/g, (m) => hold(m));
-  return { text, pieces };
-}
-function markersIn(text) {
-  return [...text.matchAll(MARKER)].map((m) => Number(m[1]));
-}
-function checkMarkers(sourceText, translated) {
-  const expected = markersIn(sourceText).sort((a, b) => a - b);
-  const got = markersIn(translated).sort((a, b) => a - b);
-  if (expected.join(",") === got.join(","))
-    return null;
-  const missing = expected.filter((n) => !got.includes(n));
-  const extra = got.filter((n) => !expected.includes(n));
-  const dup = got.filter((n, i) => got.indexOf(n) !== i);
-  const parts = [];
-  if (missing.length)
-    parts.push(`\uBE60\uC9D0 ${missing.map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
-  if (extra.length)
-    parts.push(`\uC5C6\uB358 \uD45C\uC2DC ${extra.map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
-  if (dup.length)
-    parts.push(`\uC911\uBCF5 ${[...new Set(dup)].map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
-  return `\uBC88\uC5ED\uBB38\uC5D0\uC11C \uBCF4\uD638 \uD45C\uC2DC\uAC00 \uC5B4\uAE0B\uB0AC\uC2B5\uB2C8\uB2E4 (${parts.join(", ")}).`;
-}
-function restore(text, pieces) {
-  return text.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m);
-}
-
 // src/translate/prompt.ts
 var SYSTEM_PROMPT_MAX = 5000;
 var TRANSLATION_TEXT_MAX = 50000;
@@ -1364,6 +1424,7 @@ function htmlGroups(sources) {
 
 // src/translate/engine.ts
 var MAX_AUTO_CONTINUE = 4;
+var MAX_FALLBACK_SEGMENTS = 40;
 
 class TranslationError extends Error {
   record;
@@ -1432,6 +1493,29 @@ async function translate(job, deps) {
     }
     return record.truncatedPart !== i;
   };
+  const translateBySegments = async (part) => {
+    const segments = part.split(/(\u27E6\s*\d+\s*\u27E7)/);
+    const todo = segments.filter((seg, k) => k % 2 === 0 && !hasNoText(seg)).length;
+    if (todo > MAX_FALLBACK_SEGMENTS)
+      return null;
+    const out = [];
+    for (let k = 0;k < segments.length; k++) {
+      const seg = segments[k];
+      if (k % 2 === 1 || hasNoText(seg)) {
+        out.push(seg);
+        continue;
+      }
+      aborted();
+      const lead = /^\s*/.exec(seg)[0];
+      const trail = /\s*$/.exec(seg)[0];
+      const result = await deps.complete(requestFor(seg.trim()));
+      const text = result.text.trim();
+      if (!text || isTruncatedFinish(result.finishReason) || /\u27E6\s*\d+\s*\u27E7/.test(text))
+        return null;
+      out.push(lead + text + trail);
+    }
+    return out.join("");
+  };
   const translatePart = async (i) => {
     if (hasNoText(sources[i])) {
       record.parts[i] = sources[i];
@@ -1459,8 +1543,15 @@ async function translate(job, deps) {
         return true;
       }
       if (attempt === 1) {
-        record.parts.length = i;
-        throw new TranslationError(`${problem} HTML\uC774 \uAE68\uC9C0\uC9C0 \uC54A\uB3C4\uB85D \uC774 \uBD80\uBD84\uC740 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uBC88\uC5ED\uD574 \uC8FC\uC138\uC694.`, record);
+        const pieces = await translateBySegments(sources[i]);
+        if (pieces === null) {
+          record.parts.length = i;
+          throw new TranslationError(`${problem} HTML\uC774 \uAE68\uC9C0\uC9C0 \uC54A\uB3C4\uB85D \uC774 \uBD80\uBD84\uC740 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uBC88\uC5ED\uD574 \uC8FC\uC138\uC694.`, record);
+        }
+        record.parts[i] = pieces;
+        record.truncatedPart = -1;
+        await save();
+        return true;
       }
     }
     return false;
@@ -1517,11 +1608,11 @@ function pairParagraphs(content, record, settings) {
   if (record.unit === "paragraph") {
     try {
       const prot = protect(content, settings);
-      const sources2 = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
-      if (sameArray2(prot.pieces, record.pieces) && sources2.length === record.total) {
+      const sources = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
+      if (sameArray2(prot.pieces, record.pieces) && sources.length === record.total) {
         return {
           kind: "paragraph",
-          pairs: sources2.map((s, i) => ({
+          pairs: sources.map((s, i) => ({
             source: restore(s, record.pieces),
             translation: i < record.parts.length && record.parts[i].trim() ? restore(record.parts[i], record.pieces) : null
           }))
@@ -1563,11 +1654,11 @@ ${body}
 
 </div>`;
 }
-function buildParagraphView(content, record, settings, view) {
+function buildParagraphView(content, record, settings, view, order = "source-first") {
   const pairing = pairParagraphs(content, record, settings);
   const pairs = groupPairs(pairing.pairs);
   const whole = pairing.kind === "whole";
-  const out = [`<div class="stt-pr${view === "tap" ? " stt-pr-tap" : ""}">`];
+  const out = [`<div class="stt-pr${view === "tap" ? " stt-pr-tap" : ""}${view !== "tap" && order === "translation-first" ? " stt-pr-tfirst" : ""}">`];
   if (NOTES[pairing.kind])
     out.push(`<div class="stt-pr-note">${NOTES[pairing.kind]}</div>`);
   let n = 0;
@@ -1594,15 +1685,49 @@ ${pair.source}
 </details>
 </div>`);
     } else {
+      const src = block("stt-pr-src", sourceLabel, pair.source);
+      const tgt = block("stt-pr-tgt", targetLabel, target);
       out.push(`<div class="stt-pr-pair">
-${block("stt-pr-src", sourceLabel, pair.source)}
-${block("stt-pr-tgt", targetLabel, target)}
+${order === "translation-first" ? `${tgt}
+${src}` : `${src}
+${tgt}`}
 </div>`);
     }
   });
   out.push("</div>");
   return out.join(`
 `);
+}
+
+// src/display/render.ts
+function renderMessage(content, record, settings, view) {
+  if (settings.displayMode === "paragraph")
+    return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
+  const text = recordToText(record);
+  switch (settings.displayMode) {
+    case "above":
+      return `${text}
+
+<hr class="stt-separator">
+
+${content}`;
+    case "only":
+      return text;
+    case "collapsed":
+      return `${content}
+
+<details class="stt-translation"><summary>\uBC88\uC5ED</summary>
+
+${text}
+
+</details>`;
+    default:
+      return `${content}
+
+<hr class="stt-separator">
+
+${text}`;
+  }
 }
 
 // src/message-ui.ts
@@ -1873,27 +1998,7 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const record = mt.entries[sourceHash(ctx.content)];
   if (!record || !record.parts.some((p) => p.trim()))
     return;
-  if (settings.displayMode === "paragraph")
-    return { content: buildParagraphView(ctx.content, record, settings, store.view.paragraphView) };
-  const text = recordToText(record);
-  switch (settings.displayMode) {
-    case "only":
-      return { content: text };
-    case "collapsed":
-      return { content: `${ctx.content}
-
-<details class="stt-translation"><summary>\uBC88\uC5ED</summary>
-
-${text}
-
-</details>` };
-    default:
-      return { content: `${ctx.content}
-
-<hr class="stt-separator">
-
-${text}` };
-  }
+  return { content: renderMessage(ctx.content, record, settings, store.view) };
 });
 spindle.on("GENERATION_ENDED", (payload, userId) => {
   if (!payload?.chatId || !payload.messageId || payload.error)

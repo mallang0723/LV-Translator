@@ -3,7 +3,7 @@
 // paragraph render exactly like the original message. Paragraph text is kept between blank
 // lines so Markdown is parsed inside the wrapper elements.
 
-import type { ChatSettings, ParagraphView, TranslationRecord } from '../shared';
+import type { ChatSettings, ParagraphOrder, ParagraphView, TranslationRecord } from '../shared';
 import { partSources, recordToText } from '../translate/engine';
 import { htmlGroups, splitParagraphs } from '../translate/paragraphs';
 import { protect, restore } from '../translate/protect';
@@ -75,11 +75,11 @@ function block(cls: string, label: string, body: string): string {
   return `<div class="${cls}"><div class="stt-pr-label">${label}</div>\n\n${body}\n\n</div>`;
 }
 
-export function buildParagraphView(content: string, record: TranslationRecord, settings: ChatSettings, view: ParagraphView): string {
+export function buildParagraphView(content: string, record: TranslationRecord, settings: ChatSettings, view: ParagraphView, order: ParagraphOrder = 'source-first'): string {
   const pairing = pairParagraphs(content, record, settings);
   const pairs = groupPairs(pairing.pairs);
   const whole = pairing.kind === 'whole';
-  const out: string[] = [`<div class="stt-pr${view === 'tap' ? ' stt-pr-tap' : ''}">`];
+  const out: string[] = [`<div class="stt-pr${view === 'tap' ? ' stt-pr-tap' : ''}${view !== 'tap' && order === 'translation-first' ? ' stt-pr-tfirst' : ''}">`];
   if (NOTES[pairing.kind]) out.push(`<div class="stt-pr-note">${NOTES[pairing.kind]}</div>`);
   let n = 0;
   pairs.forEach((pair) => {
@@ -98,7 +98,9 @@ export function buildParagraphView(content: string, record: TranslationRecord, s
           `<details class="stt-pr-orig"><summary>${sourceLabel} · 눌러서 원문 열기 / 닫기</summary>\n\n${pair.source}\n\n</details>\n</div>`,
       );
     } else {
-      out.push(`<div class="stt-pr-pair">\n${block('stt-pr-src', sourceLabel, pair.source)}\n${block('stt-pr-tgt', targetLabel, target)}\n</div>`);
+      const src = block('stt-pr-src', sourceLabel, pair.source);
+      const tgt = block('stt-pr-tgt', targetLabel, target);
+      out.push(`<div class="stt-pr-pair">\n${order === 'translation-first' ? `${tgt}\n${src}` : `${src}\n${tgt}`}\n</div>`);
     }
   });
   out.push('</div>');

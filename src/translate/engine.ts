@@ -17,6 +17,8 @@ import { hasNoText, splitParagraphs } from './paragraphs';
 import { checkMarkers, protect, restore } from './protect';
 
 export const MAX_AUTO_CONTINUE = 4;
+/** Most text pieces the marker fallback may translate one by one. */
+export const MAX_FALLBACK_SEGMENTS = 40;
 
 export interface Completion {
   text: string;
@@ -130,6 +132,33 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
     return record.truncatedPart !== i;
   };
 
+  /**
+   * Fallback for a part whose markers the model would not keep: each run of text between markers is
+   * translated on its own (no markers in the request) and joined with the original markers.
+   * Returns null when it cannot be done safely (too many pieces, a piece cut off, an empty answer).
+   */
+  const translateBySegments = async (part: string): Promise<string | null> => {
+    const segments = part.split(/(⟦\s*\d+\s*⟧)/);
+    const todo = segments.filter((seg, k) => k % 2 === 0 && !hasNoText(seg)).length;
+    if (todo > MAX_FALLBACK_SEGMENTS) return null;
+    const out: string[] = [];
+    for (let k = 0; k < segments.length; k++) {
+      const seg = segments[k]!;
+      if (k % 2 === 1 || hasNoText(seg)) {
+        out.push(seg);
+        continue;
+      }
+      aborted();
+      const lead = /^\s*/.exec(seg)![0];
+      const trail = /\s*$/.exec(seg)![0];
+      const result = await deps.complete(requestFor(seg.trim()));
+      const text = result.text.trim();
+      if (!text || isTruncatedFinish(result.finishReason) || /⟦\s*\d+\s*⟧/.test(text)) return null;
+      out.push(lead + text + trail);
+    }
+    return out.join('');
+  };
+
   /** Translates part i from scratch. Returns true when complete (not cut off). */
   const translatePart = async (i: number): Promise<boolean> => {
     if (hasNoText(sources[i]!)) {
@@ -157,8 +186,17 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
         return true;
       }
       if (attempt === 1) {
-        record.parts.length = i;
-        throw new TranslationError(`${problem} HTML이 깨지지 않도록 이 부분은 저장하지 않았습니다. 다시 번역해 주세요.`, record);
+        // The model keeps mangling the markers. Translate the text between them one piece at a time,
+        // so there is nothing left to mangle, and put the protected pieces back ourselves.
+        const pieces = await translateBySegments(sources[i]!);
+        if (pieces === null) {
+          record.parts.length = i;
+          throw new TranslationError(`${problem} HTML이 깨지지 않도록 이 부분은 저장하지 않았습니다. 다시 번역해 주세요.`, record);
+        }
+        record.parts[i] = pieces;
+        record.truncatedPart = -1;
+        await save();
+        return true;
       }
     }
     return false;

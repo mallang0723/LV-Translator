@@ -98,17 +98,41 @@ describe('translate', () => {
     expect(recordToText(r)).toBe(fakeTranslate(source));
   });
 
-  test('a marker dropped once is retried; dropped twice is an error and nothing broken is saved', async () => {
+  test('a marker dropped once is retried', async () => {
     const once = model((req, call) => (call === 1 ? { text: '[KO]Hello', finishReason: 'stop' } : null));
     const ok = await translate(job('<b>Hello</b>', settings()), once);
     expect(recordToText(ok)).toBe('[KO]<b>Hello</b>');
     expect(once.calls).toHaveLength(2);
+  });
 
-    const always = model(() => ({ text: '[KO]Hello', finishReason: 'stop' }));
+  test('markers dropped twice: the text between them is translated piece by piece and the markup is put back', async () => {
+    const mangling = model((req) => {
+      const t = target(req);
+      // Whole-part requests carry markers and come back without them; piece requests are answered normally.
+      return /⟦\d+⟧/.test(t) ? { text: '[KO] mangled', finishReason: 'stop' } : null;
+    });
+    const r = await translate(job('<b>Hello</b> and <i>bye</i>', settings()), mangling);
+    expect(r.status).toBe('done');
+    expect(recordToText(r)).toBe('<b>[KO]Hello</b> [KO]and <i>[KO]bye</i>');
+    expect(mangling.calls).toHaveLength(2 + 3);
+    expect(mangling.calls.slice(2).every((c) => !/⟦\d+⟧/.test(target(c)))).toBe(true);
+  });
+
+  test('if the piece-by-piece fallback also fails, nothing broken is saved', async () => {
+    const always = model(() => ({ text: '[KO]Hello ⟦9⟧', finishReason: 'stop' }));
     const err = await translate(job('<b>Hello</b>', settings()), always).catch((e) => e);
     expect(err).toBeInstanceOf(TranslationError);
-    expect(err.message).toContain('빠짐 ⟦1⟧');
+    expect(err.message).toContain('빠짐');
     expect(err.record.parts).toEqual([]);
+  });
+
+  test('excluded tags never reach the model and come back verbatim', async () => {
+    const m = model();
+    const src = 'Pick.\n\n<choices>\n1. Run away\n2. <b>Fight</b>\n</choices>\n\nDone.';
+    const r = await translate(job(src, settings({ excludeTags: 'choices' })), m);
+    expect(m.calls.every((c) => !c.user.includes('Run away'))).toBe(true);
+    expect(recordToText(r)).toContain('<choices>\n1. Run away\n2. <b>Fight</b>\n</choices>');
+    expect(recordToText(r)).toContain('[KO]Pick.');
   });
 
   test('"continue" on a finished translation asks once more and keeps it when nothing is added', async () => {

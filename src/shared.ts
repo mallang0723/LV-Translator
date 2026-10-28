@@ -1,6 +1,15 @@
 // Types, defaults and messages shared by the backend and frontend.
 
-export type DisplayMode = 'below' | 'only' | 'collapsed' | 'paragraph';
+import { lenientTags } from './translate/protect';
+
+/**
+ * below: original, then translation. above: translation, then original. only: translation alone.
+ * collapsed: original with a folded translation. paragraph: paragraph-by-paragraph comparison.
+ */
+export type DisplayMode = 'below' | 'above' | 'only' | 'collapsed' | 'paragraph';
+export const DISPLAY_MODES: readonly DisplayMode[] = ['below', 'above', 'only', 'collapsed', 'paragraph'];
+/** Paragraph view, interleaved: which of the pair comes first. */
+export type ParagraphOrder = 'source-first' | 'translation-first';
 /** 'whole': one request per message. 'paragraph': one request per paragraph (exact pairs). */
 export type TranslationUnit = 'whole' | 'paragraph';
 /** Paragraph view: original and translation interleaved, or translation with the original on tap. */
@@ -42,6 +51,8 @@ export interface ChatSettings {
    *   start ... end     from "start" through the next "end"
    */
   excludeRules: string;
+  /** Tag names (comma separated) whose whole element is never sent for translation. <style>/<script> are always kept. */
+  excludeTags: string;
   // Translation Tools 1.5.4 per-chat scope
   glossary: string;
   freeContextEnabled: boolean;
@@ -64,13 +75,15 @@ export interface UserPreset {
 /** Paragraph view settings, shared by every chat (like Paragraph Reader). */
 export interface ViewSettings {
   paragraphView: ParagraphView;
+  /** Order inside each interleaved pair. */
+  paragraphOrder: ParagraphOrder;
   sourceFontSize: number;
   translationFontSize: number;
 }
 
 export const FONT_MIN = 12;
 export const FONT_MAX = 32;
-export const DEFAULT_VIEW: ViewSettings = { paragraphView: 'interleave', sourceFontSize: 16, translationFontSize: 18 };
+export const DEFAULT_VIEW: ViewSettings = { paragraphView: 'interleave', paragraphOrder: 'source-first', sourceFontSize: 16, translationFontSize: 18 };
 
 export function fontSize(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -81,6 +94,7 @@ export function normalizeView(value: unknown): ViewSettings {
   const v = (value && typeof value === 'object' ? value : {}) as Partial<ViewSettings>;
   return {
     paragraphView: v.paragraphView === 'tap' ? 'tap' : 'interleave',
+    paragraphOrder: v.paragraphOrder === 'translation-first' ? 'translation-first' : 'source-first',
     sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
     translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize),
   };
@@ -118,6 +132,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   protectHtml: true,
   protectCode: true,
   excludeRules: '',
+  excludeTags: '',
   glossary: '',
   freeContextEnabled: false,
   freeContext: '',
@@ -149,13 +164,14 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
     translateMyMessages: bool(s.translateMyMessages, base.translateMyMessages),
     showDraftButton: bool(s.showDraftButton, base.showDraftButton),
     autoTranslate: bool(s.autoTranslate, base.autoTranslate),
-    displayMode: mode === 'below' || mode === 'only' || mode === 'collapsed' || mode === 'paragraph' ? mode : base.displayMode,
+    displayMode: DISPLAY_MODES.includes(mode as DisplayMode) ? (mode as DisplayMode) : base.displayMode,
     translationUnit: s.translationUnit === 'paragraph' ? 'paragraph' : s.translationUnit === 'whole' ? 'whole' : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200_000, split)) : base.longSplitChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
+    excludeTags: lenientTags(str(s.excludeTags, base.excludeTags)).join(', '),
     glossary: str(s.glossary, base.glossary),
     freeContextEnabled: bool(s.freeContextEnabled, base.freeContextEnabled),
     freeContext: str(s.freeContext, base.freeContext),
