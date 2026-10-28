@@ -25,7 +25,7 @@ export interface ChatSettings {
   myLanguage: string;
   outgoingPresetId: string;
   incomingPresetId: string;
-  /** Chat prompts used when the preset is "채팅 설정 유지" (builtin-inherit). Empty = Marinara's default prompt. */
+  /** Chat prompts used when the preset is "채팅 설정 유지" (builtin-inherit). Empty = the default translation prompt (BASE_PROMPT). */
   outgoingPrompt: string;
   incomingPrompt: string;
   /** Translate my messages into the model language before sending (stored translated, like Marinara). */

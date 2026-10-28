@@ -55,3 +55,22 @@ describe('limits and markers', () => {
     expect(buildTranslationRequest({ direction: 'incoming', text: 'a', settings: { ...settings, incomingPresetId: 'gone', incomingPrompt: 'OWN' }, presets, previous: [], hasMarkers: false }).system).toBe('OWN');
   });
 });
+
+describe('incoming prompt reaches the translation request', () => {
+  test('a changed chat prompt (and a changed preset) is what the model receives, after the store round-trip', async () => {
+    const { normalizeStore, settingsFor } = await import('../src/shared');
+    const { translate } = await import('../src/translate/engine');
+    const stored = JSON.parse(JSON.stringify(normalizeStore({ chats: { c1: { incomingPrompt: 'MY OWN PROMPT into {{targetLanguage}}' } } })));
+    const chat = settingsFor(normalizeStore(stored), 'c1');
+    const seen: string[] = [];
+    const complete = async (req: { system: string }) => (seen.push(req.system), { text: 'ok', finishReason: 'stop' });
+    const run = (s: typeof chat) => translate({ direction: 'incoming', source: 'Hello', settings: s, presets: promptPresets([]), previous: [] }, { complete: complete as never });
+    await run(chat);
+    expect(seen.at(-1)).toBe('MY OWN PROMPT into Korean');
+    await run({ ...chat, incomingPrompt: 'CHANGED' });
+    expect(seen.at(-1)).toBe('CHANGED');
+    await run({ ...chat, incomingPresetId: 'builtin-roleplay' });
+    expect(seen.at(-1)).not.toContain('CHANGED');
+    expect(seen.at(-1)).toContain('Korean');
+  });
+});

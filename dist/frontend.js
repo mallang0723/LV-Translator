@@ -106,6 +106,21 @@ function friendlyError(message) {
   return message;
 }
 
+// src/presets/upstream/general.ts
+var MARINARA_TRANSLATION_GENERAL_PROMPTS = Object.freeze({
+  base: `You are a translator. Translate the given text accurately into {{targetLanguage}}, preserving formatting, markdown, and any special characters like *asterisks* for actions. Output ONLY the translated text, nothing else -- no explanations, no extra commentary.`,
+  roleplay: `You are an expert literary and roleplay translator. Translate the given text naturally into {{targetLanguage}} while faithfully preserving meaning, characterization, emotional nuance, register, honorifics, dialogue voice, narrative rhythm, and the distinction between speech, narration, thoughts, and actions. Preserve formatting, paragraph breaks, markdown, punctuation, and special characters such as *asterisks*. Do not censor, summarize, sanitize, explain, or add content. Output ONLY the translated text.`,
+  literaryRoleplay: `You are an expert literary and roleplay translator.
+
+Translate the given text naturally into {{targetLanguage}} while faithfully preserving meaning, characterization, emotional nuance, register, honorifics, dialogue voice, narrative rhythm, and the distinction between speech, narration, thoughts, actions, and meta-level instructions. Naturalness applies to {{targetLanguage}} grammar, word order, and idiom. Add only what natural {{targetLanguage}} requires.
+
+Rules:
+- Translate the entire input without omitting any content, including user commands, OOC/meta instructions, and directives.
+- Preserve formatting, markdown, and special characters such as asterisks.
+- Do not censor, soften, or embellish the text.
+- Output ONLY the translated text. Do not include explanations or notes.`
+});
+
 // src/message-ui.ts
 function targetLabel(view) {
   const name = view.name.trim();
@@ -314,11 +329,11 @@ function mountToolbars(opts) {
 var CSS = `
 .stt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; font-size: 0.78em; }
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
-  color: var(--lumiverse-text, inherit); background: var(--lumiverse-fill-subtle, rgba(127,127,127,0.12));
+  color: var(--lumiverse-text, inherit); background: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 10%, transparent));
   border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); }
 .stt-btn:hover:not(:disabled) { border-color: var(--lumiverse-primary, currentColor); }
 .stt-btn:disabled { opacity: 0.5; cursor: default; }
-.stt-btn.stt-primary { background: var(--lumiverse-primary-015, rgba(100,140,255,0.15)); border-color: var(--lumiverse-primary, currentColor); }
+.stt-btn.stt-primary { background: var(--lumiverse-primary-015, color-mix(in srgb, var(--lumiverse-primary, currentColor) 15%, transparent)); border-color: var(--lumiverse-primary, currentColor); }
 .stt-btn.stt-danger { color: var(--lumiverse-danger, #d55); border-color: var(--lumiverse-danger, #d55); }
 .stt-note { color: var(--lumiverse-text-muted, inherit); opacity: 0.85; }
 .stt-note.stt-warn { color: var(--lumiverse-warning, #c90); opacity: 1; }
@@ -326,7 +341,7 @@ var CSS = `
 hr.stt-separator { border: 0; border-top: 1px dashed var(--lumiverse-border, rgba(127,127,127,0.4)); margin: 0.8em 0; }
 details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text-muted, inherit); }
 /* Paragraph Reader view (message content) */
-.stt-pr { --stt-accent: var(--lumiverse-primary, #6753cf); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.stt-pr { --stt-accent: var(--lumiverse-primary, currentColor); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .stt-pr-note { font-size: 12px; color: var(--lumiverse-text-muted, inherit); margin-bottom: 12px; white-space: pre-wrap; }
 .stt-pr-pair { margin: 0 0 18px; }
 .stt-pr-pair:last-child { margin-bottom: 0; }
@@ -340,23 +355,26 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-pr-tap .stt-pr-tgt { margin-top: 0; }
 .stt-pr-tfirst .stt-pr-tgt { margin-top: 0; margin-bottom: 8px; }
 .stt-pr-tfirst .stt-pr-src { margin-top: 8px; }
-.stt-pr-orig { border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); padding: 6px 0 12px 15px; }
+.stt-pr-orig { margin-top: 8px; color: var(--lumiverse-text-muted, inherit); font-size: max(13px, calc(var(--stt-src-size, 16px) * 0.85)); line-height: 1.75; }
 .stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
-.stt-pr-orig[open] > summary { color: var(--stt-accent); }
-.stt-pr-orig { color: var(--lumiverse-text-muted, inherit); font-size: var(--stt-src-size, 16px); line-height: 1.75; }
+.stt-pr-orig[open] { border-left: 4px solid var(--stt-accent); padding: 0.4rem 0.6rem; border-radius: 2px; background-color: color-mix(in srgb, currentColor 7%, var(--lumiverse-bg, transparent)); }
+.stt-pr-orig[open] > summary { color: var(--stt-accent); margin-bottom: 4px; }
+.stt-pr-orig > summary + * { margin-top: 0; }
+.stt-pr-orig p { margin: 0 0 .4em; }
+.stt-pr-orig p:last-child { margin-bottom: 0; }
 /* Message action row buttons (bubble pill and minimal row; the host's own classes are reused where possible) */
 .stt-tb { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 0; cursor: pointer; }
 .stt-tb svg { display: block; pointer-events: none; flex: none; }
 .stt-tb[data-stt-own] { width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: var(--lumiverse-text-dim, inherit); }
-.stt-tb[data-stt-own]:hover { background: var(--lumiverse-fill-subtle, rgba(127,127,127,0.15)); color: var(--lumiverse-text, inherit); }
-.stt-tb.stt-tb-del:hover { color: var(--lumiverse-danger, #ef4444); background: var(--lumiverse-danger-015, rgba(239,68,68,0.15)); }
-.stt-tb.stt-tb-busy { color: var(--lumiverse-primary, #8b7bff); animation: stt-pulse 1.1s ease-in-out infinite; }
+.stt-tb[data-stt-own]:hover { background: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 12%, transparent)); color: var(--lumiverse-text, inherit); }
+.stt-tb.stt-tb-del:hover { color: var(--lumiverse-danger, #ef4444); background: var(--lumiverse-danger-015, color-mix(in srgb, var(--lumiverse-danger, currentColor) 15%, transparent)); }
+.stt-tb.stt-tb-busy { color: var(--lumiverse-primary, currentColor); animation: stt-pulse 1.1s ease-in-out infinite; }
 @keyframes stt-pulse { 50% { opacity: 0.45; } }
 @media (prefers-reduced-motion: reduce) { .stt-tb.stt-tb-busy { animation: none; } }
 .stt-font-row { display: flex; align-items: center; gap: 7px; }
 .stt-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
 .stt-font-label > span { flex: none; min-width: 2.2em; }
-.stt-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--lumiverse-primary, #6753cf); }
+.stt-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--lumiverse-primary, currentColor); }
 .stt-font-row .stt-btn { width: 34px; min-width: 34px; padding: 0; font-size: 18px; }
 .stt-font-row output { min-width: 3em; text-align: center; font-variant-numeric: tabular-nums; }
 .stt-panel { display: flex; flex-direction: column; gap: 12px; padding: 10px; color: var(--lumiverse-text, inherit); font-size: 0.92em; }
@@ -366,23 +384,24 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-field { display: flex; flex-direction: column; gap: 3px; }
 .stt-field > span { color: var(--lumiverse-text-muted, inherit); font-size: 0.9em; }
 .stt-panel input[type=text], .stt-panel input[type=number], .stt-panel select, .stt-panel textarea, .stt-modal input, .stt-modal textarea {
-  font: inherit; color: inherit; background: var(--lumiverse-fill-subtle, rgba(127,127,127,0.08));
+  font: inherit; color: inherit; background: var(--lumiverse-input-bg, var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 8%, transparent)));
   border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); border-radius: 5px; padding: 5px 7px; box-sizing: border-box; width: 100%; }
 .stt-panel textarea, .stt-modal textarea { min-height: 70px; resize: vertical; }
 .stt-panel textarea.stt-prompt { min-height: 110px; font-size: 0.85em; }
 .stt-panel textarea[readonly] { opacity: 0.75; }
 .stt-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .stt-sub { padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
-.stt-sticky { position: sticky; bottom: 0; background: var(--lumiverse-bg-deep-080, rgba(20,20,24,0.9)); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
+.stt-sticky { position: sticky; bottom: 0; background: color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
-.stt-sticky.stt-unsaved { border-top: 2px solid var(--lumiverse-warning, #c90); background: color-mix(in srgb, var(--lumiverse-warning, #c90) 22%, var(--lumiverse-bg-deep-080, rgba(20,20,24,0.9))); padding: 8px; border-radius: 8px; }
+.stt-sticky.stt-unsaved { border-top: 2px solid var(--lumiverse-warning, #c90); background: color-mix(in srgb, var(--lumiverse-warning, #c90) 22%, color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent)); padding: 8px; border-radius: 8px; }
 .stt-unsaved-note { flex: 1 1 100%; font-weight: 700; color: var(--lumiverse-warning, #c90); }
 .stt-unsaved-note[hidden] { display: none; }
 /* Phones and touch screens: readable text (15px+) and tap targets of 44px+. */
 @media (max-width: 768px), (pointer: coarse) {
   .stt-bar, .stt-pr-note, .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
   .stt-pr-label, .stt-pr-orig > summary { font-size: 15px !important; }
+  .stt-pr-orig { font-size: max(15px, calc(var(--stt-src-size, 16px) * 0.85)); }
   .stt-panel textarea.stt-prompt, .stt-modal textarea { font-size: 15px; }
   .stt-field > span, .stt-section > h3 { font-size: 15px; }
   .stt-btn { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
@@ -767,13 +786,13 @@ function setup(ctx) {
     const options = presets.map((p) => [p.id, p.builtin ? p.name : `${p.name} (내 프리셋)`]);
     box.append(select(direction === "incoming" ? "응답 번역 프롬프트 (Incoming)" : "내 메시지 번역 프롬프트 (Outgoing)", presetId, options, (v) => {
       draft[presetKey] = v;
-      renderPanel();
-    }));
+    }, true, true));
     if (inherit) {
-      box.append(text("이 채팅의 프롬프트 (비워 두면 Marinara 기본 프롬프트, {{targetLanguage}} 사용 가능)", promptKey, { multiline: true, cls: "stt-prompt" }));
+      box.append(text("이 채팅의 프롬프트 (비워 두면 기본 번역 프롬프트, {{targetLanguage}} 사용 가능)", promptKey, { multiline: true, cls: "stt-prompt", placeholder: MARINARA_TRANSLATION_GENERAL_PROMPTS.base }));
     } else {
       box.append(el("textarea", { class: "stt-prompt", readOnly: true, value: preset.prompt }));
     }
+    box.append(el("span", { class: "stt-note" }, ['저장한 뒤 새로 번역하는 메시지부터 적용됩니다. 이미 번역된 메시지는 메시지의 "다시 번역" 버튼으로 새로 번역하세요.']));
     return box;
   }
   function editPreset(existing) {
