@@ -1293,7 +1293,7 @@ ${instruction}`;
 });
 
 // src/translate/prompt.ts
-var SYSTEM_PROMPT_MAX = 5000;
+var SYSTEM_PROMPT_MAX = 50000;
 var TRANSLATION_TEXT_MAX = 50000;
 
 class TranslationLimitError extends Error {

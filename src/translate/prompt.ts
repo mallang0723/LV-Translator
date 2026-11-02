@@ -1,6 +1,6 @@
 // Builds the translation request exactly the way Marinara Engine + Translation Tools 1.5.4 do:
 //   system = preset prompt, glossary rule, free context, character voice (incoming only),
-//            previous-context rule — with {{targetLanguage}} resolved; at most 5,000 characters
+//            previous-context rule — with {{targetLanguage}} resolved; at most 50,000 characters
 //   user   = "Translate the following text to <language>:\n\n" + glossary block + previous
 //            context block + [Text to Translate] ... [End Text]; the reference text at most 50,000
 // Ported from Marinara-Translation-Tools 1.5.4 extension.js (MIT, (c) 2026 minikkuen). The user message
@@ -14,7 +14,7 @@ import { MARKER_INSTRUCTION } from './protect';
 import { parseGlossary } from './glossary';
 export { parseGlossary } from './glossary';
 
-export const SYSTEM_PROMPT_MAX = 5000;
+export const SYSTEM_PROMPT_MAX = 50000;
 export const TRANSLATION_TEXT_MAX = 50000;
 
 export type Direction = 'incoming' | 'outgoing';
