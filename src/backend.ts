@@ -4,6 +4,7 @@
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import { BUILTIN_IDS, presetSummaries, promptPresets } from './presets';
+import { deleteBundle, saveBundle } from './bundles';
 import {
   type ChatSettings,
   type ConnectionSummary,
@@ -249,6 +250,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         direction: 'incoming',
         source,
         settings,
+        store,
         presets: promptPresets(store.userPresets),
         previous: contextBefore(messages, index),
         resume: mode === 'continue' ? existing : undefined,
@@ -300,7 +302,7 @@ async function translateOutgoing(uid: Uid, chatId: string, text: string): Promis
   const timer = setTimeout(() => controller.abort(), 180_000);
   try {
     const record = await translate(
-      { direction: 'outgoing' as Direction, source: text, settings, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) },
+      { direction: 'outgoing' as Direction, source: text, settings, store, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) },
       { complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal), signal: controller.signal },
     );
     if (record.status !== 'done') throw new Error('번역이 끝까지 되지 않았습니다.');
@@ -380,13 +382,27 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       return;
     case 'save_settings': {
       const store = await loadStore(uid);
-      const settings = normalizeSettings(msg.settings, store.defaults);
+      const settings = normalizeSettings(msg.settings, store.defaults, store.userBundles);
       if (msg.chatId) store.chats[msg.chatId] = settings;
       if (msg.asDefault || !msg.chatId) store.defaults = settings;
       await saveStore(uid, store);
       await sendState(uid);
       // The display mode may have changed: make the chat render again.
       if (msg.chatId) chatCache.delete(msg.chatId);
+      return;
+    }
+    case 'save_bundle': {
+      const store = await loadStore(uid);
+      saveBundle(store, msg.bundle);
+      await saveStore(uid, store);
+      await sendState(uid);
+      return;
+    }
+    case 'delete_bundle': {
+      const store = await loadStore(uid);
+      deleteBundle(store, msg.id);
+      await saveStore(uid, store);
+      await sendState(uid);
       return;
     }
     case 'save_preset': {

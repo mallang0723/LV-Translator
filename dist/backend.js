@@ -712,6 +712,83 @@ function presetSummaries(userPresets) {
   ];
 }
 
+// src/translate/glossary.ts
+function parseGlossary(raw) {
+  const pairs = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator < 1)
+      continue;
+    const left = line.slice(0, separator).trim();
+    const right = line.slice(separator + 1).trim();
+    if (left && right)
+      pairs.push({ left, right });
+  }
+  return pairs;
+}
+
+// src/bundles.ts
+function effectiveGuides(store, settings) {
+  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
+  if (!bundle)
+    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
+  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
+  const glossary = [
+    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
+    ...parseGlossary(settings.glossary)
+  ].map((p) => `${p.left} = ${p.right}`).join(`
+`);
+  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
+
+`);
+  return {
+    glossary,
+    freeContext: join(bundle.freeContext, settings.freeContext),
+    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
+  };
+}
+function newBundleId(cryptoApi = globalThis.crypto) {
+  if (typeof cryptoApi?.randomUUID === "function")
+    return `bundle-${cryptoApi.randomUUID()}`;
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoApi?.getRandomValues === "function")
+    cryptoApi.getRandomValues(bytes);
+  else
+    for (let i = 0;i < bytes.length; i++)
+      bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function saveBundle(store, value) {
+  if (!value || typeof value.name !== "string" || !value.name.trim())
+    throw new Error("\uBB36\uC74C \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
+  const existing = store.userBundles.findIndex((b) => b.id === value.id);
+  let id = existing >= 0 ? store.userBundles[existing].id : newBundleId();
+  while (existing < 0 && store.userBundles.some((b) => b.id === id))
+    id = newBundleId();
+  const bundle = {
+    id,
+    name: value.name.trim(),
+    glossary: typeof value.glossary === "string" ? value.glossary : "",
+    freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
+    incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
+  };
+  if (existing >= 0)
+    store.userBundles[existing] = bundle;
+  else
+    store.userBundles.push(bundle);
+  return bundle;
+}
+function deleteBundle(store, id) {
+  store.userBundles = store.userBundles.filter((b) => b.id !== id);
+  for (const settings of [store.defaults, ...Object.values(store.chats)]) {
+    if (settings.bundleId === id)
+      settings.bundleId = "";
+  }
+}
+
 // src/translate/protect.ts
 class ExcludeRuleError extends Error {
   constructor(message) {
@@ -906,6 +983,7 @@ var DEFAULT_SETTINGS = {
   protectCode: true,
   excludeRules: "",
   excludeTags: "",
+  bundleId: "",
   glossary: "",
   freeContextEnabled: false,
   freeContext: "",
@@ -919,7 +997,7 @@ var DEFAULT_SETTINGS = {
 };
 var str = (v, fallback) => typeof v === "string" ? v : fallback;
 var bool = (v, fallback) => typeof v === "boolean" ? v : fallback;
-function normalizeSettings(value, base = DEFAULT_SETTINGS) {
+function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
   const s = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const count = Number.parseInt(String(s.contextMessageCount ?? ""), 10);
   const split = Number.parseInt(String(s.longSplitChars ?? ""), 10);
@@ -943,6 +1021,7 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS) {
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
     excludeTags: lenientTags(str(s.excludeTags, base.excludeTags)).join(", "),
+    bundleId: typeof s.bundleId === "string" && bundles.some((b) => b.id === s.bundleId) ? s.bundleId : "",
     glossary: str(s.glossary, base.glossary),
     freeContextEnabled: bool(s.freeContextEnabled, base.freeContextEnabled),
     freeContext: str(s.freeContext, base.freeContext),
@@ -957,12 +1036,24 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS) {
 }
 function normalizeStore(value) {
   const raw = value && typeof value === "object" ? value : {};
-  const defaults = normalizeSettings(raw.defaults);
+  const userBundles = [];
+  const bundleIds = new Set;
+  for (const b of Array.isArray(raw.userBundles) ? raw.userBundles : []) {
+    if (!b || typeof b !== "object")
+      continue;
+    const id = str(b.id, "").trim();
+    const name = str(b.name, "").trim();
+    if (!id || !name || bundleIds.has(id))
+      continue;
+    bundleIds.add(id);
+    userBundles.push({ id, name, glossary: str(b.glossary, ""), freeContext: str(b.freeContext, ""), incomingVoicePrompt: str(b.incomingVoicePrompt, "") });
+  }
+  const defaults = normalizeSettings(raw.defaults, DEFAULT_SETTINGS, userBundles);
   const chats = {};
   if (raw.chats && typeof raw.chats === "object") {
     for (const [chatId, s] of Object.entries(raw.chats))
       if (chatId)
-        chats[chatId] = normalizeSettings(s, defaults);
+        chats[chatId] = normalizeSettings(s, defaults, userBundles);
   }
   const userPresets = [];
   const seen = new Set;
@@ -977,7 +1068,7 @@ function normalizeStore(value) {
     seen.add(id);
     userPresets.push({ id, name, prompt });
   }
-  return { version: 1, view: normalizeView(raw.view), userPresets, defaults, chats };
+  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, defaults, chats };
 }
 function settingsFor(store, chatId) {
   return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
@@ -1218,19 +1309,6 @@ class TranslationLimitError extends Error {
     this.name = "TranslationLimitError";
   }
 }
-function parseGlossary(raw) {
-  const pairs = [];
-  for (const line of raw.split(/\r?\n/u)) {
-    const separator = line.indexOf("=");
-    if (separator < 1)
-      continue;
-    const left = line.slice(0, separator).trim();
-    const right = line.slice(separator + 1).trim();
-    if (left && right)
-      pairs.push({ left, right });
-  }
-  return pairs;
-}
 function glossarySection(raw, sourceText, targetLanguage) {
   const pairs = parseGlossary(raw);
   if (!pairs.length)
@@ -1281,8 +1359,9 @@ ${parts.join(`
 }
 function buildTranslationRequest(input) {
   const { direction, text, settings } = input;
+  const guides = effectiveGuides(input.store ?? { userBundles: [] }, settings);
   const targetLanguage = direction === "incoming" ? settings.myLanguage : settings.modelLanguage;
-  const glossary = glossarySection(settings.glossary, text, targetLanguage);
+  const glossary = glossarySection(guides.glossary, text, targetLanguage);
   const glossaryPrefix = glossary ? `${glossary}
 
 ` : "";
@@ -1326,11 +1405,11 @@ ${text}
   const sections = [directionPrompt(settings, direction, input.presets)];
   if (glossary)
     sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.glossary);
-  const freeContext = freeContextSection(settings.freeContextEnabled ? settings.freeContext : "");
+  const freeContext = freeContextSection(settings.freeContextEnabled ? guides.freeContext : "");
   if (freeContext)
     sections.push(freeContext);
-  if (direction === "incoming" && settings.incomingVoiceEnabled && settings.incomingVoicePrompt.trim()) {
-    sections.push(MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice(settings.incomingVoicePrompt.trim()));
+  if (direction === "incoming" && settings.incomingVoiceEnabled && guides.incomingVoicePrompt.trim()) {
+    sections.push(MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice(guides.incomingVoicePrompt.trim()));
   }
   if (hasContext)
     sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.previousContext);
@@ -1468,6 +1547,7 @@ async function translate(job, deps) {
     direction: job.direction,
     text: part,
     settings,
+    store: job.store,
     presets: job.presets,
     previous: job.previous,
     hasMarkers: /\u27E6\d+\u27E7/.test(part)
@@ -1608,11 +1688,11 @@ function pairParagraphs(content, record, settings) {
   if (record.unit === "paragraph") {
     try {
       const prot = protect(content, settings);
-      const sources = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
-      if (sameArray2(prot.pieces, record.pieces) && sources.length === record.total) {
+      const sources2 = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
+      if (sameArray2(prot.pieces, record.pieces) && sources2.length === record.total) {
         return {
           kind: "paragraph",
-          pairs: sources.map((s, i) => ({
+          pairs: sources2.map((s, i) => ({
             source: restore(s, record.pieces),
             translation: i < record.parts.length && record.parts[i].trim() ? restore(record.parts[i], record.pieces) : null
           }))
@@ -1922,6 +2002,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       direction: "incoming",
       source,
       settings,
+      store,
       presets: promptPresets(store.userPresets),
       previous: contextBefore(messages, index),
       resume: mode === "continue" ? existing : undefined
@@ -1973,7 +2054,7 @@ async function translateOutgoing(uid, chatId, text) {
   const controller = new AbortController;
   const timer = setTimeout(() => controller.abort(), 180000);
   try {
-    const record = await translate({ direction: "outgoing", source: text, settings, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) }, { complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal), signal: controller.signal });
+    const record = await translate({ direction: "outgoing", source: text, settings, store, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) }, { complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal), signal: controller.signal });
     if (record.status !== "done")
       throw new Error("\uBC88\uC5ED\uC774 \uB05D\uAE4C\uC9C0 \uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
     const out = recordToText(record).trim();
@@ -2052,7 +2133,7 @@ async function handle(msg, uid) {
       return;
     case "save_settings": {
       const store = await loadStore(uid);
-      const settings = normalizeSettings(msg.settings, store.defaults);
+      const settings = normalizeSettings(msg.settings, store.defaults, store.userBundles);
       if (msg.chatId)
         store.chats[msg.chatId] = settings;
       if (msg.asDefault || !msg.chatId)
@@ -2061,6 +2142,20 @@ async function handle(msg, uid) {
       await sendState(uid);
       if (msg.chatId)
         chatCache.delete(msg.chatId);
+      return;
+    }
+    case "save_bundle": {
+      const store = await loadStore(uid);
+      saveBundle(store, msg.bundle);
+      await saveStore(uid, store);
+      await sendState(uid);
+      return;
+    }
+    case "delete_bundle": {
+      const store = await loadStore(uid);
+      deleteBundle(store, msg.id);
+      await saveStore(uid, store);
+      await sendState(uid);
       return;
     }
     case "save_preset": {

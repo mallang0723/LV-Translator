@@ -7,9 +7,12 @@
 // wording follows Marinara Engine (AGPL-3.0); see THIRD_PARTY_NOTICES.md.
 
 import { BASE_PROMPT } from '../presets/catalog';
+import { effectiveGuides, type GuideLibrary } from '../bundles';
 import { MARINARA_TRANSLATION_REFERENCE_PROMPTS, MARINARA_TRANSLATION_REFERENCE_RENDERERS } from '../presets/upstream/reference';
 import { type ChatSettings, INHERIT_PRESET_ID } from '../shared';
 import { MARKER_INSTRUCTION } from './protect';
+import { parseGlossary } from './glossary';
+export { parseGlossary } from './glossary';
 
 export const SYSTEM_PROMPT_MAX = 5000;
 export const TRANSLATION_TEXT_MAX = 50000;
@@ -42,18 +45,6 @@ export interface TranslationRequest {
   system: string;
   user: string;
   hasContext: boolean;
-}
-
-export function parseGlossary(raw: string): Array<{ left: string; right: string }> {
-  const pairs: Array<{ left: string; right: string }> = [];
-  for (const line of raw.split(/\r?\n/u)) {
-    const separator = line.indexOf('=');
-    if (separator < 1) continue;
-    const left = line.slice(0, separator).trim();
-    const right = line.slice(separator + 1).trim();
-    if (left && right) pairs.push({ left, right });
-  }
-  return pairs;
 }
 
 export function glossarySection(raw: string, sourceText: string, targetLanguage: string): string {
@@ -103,6 +94,8 @@ export interface BuildInput {
   /** Text to translate (already protected: markup replaced by ⟦n⟧ markers). */
   text: string;
   settings: ChatSettings;
+  /** Shared guides; omitted by callers that only use room text. */
+  store?: GuideLibrary;
   presets: PromptPreset[];
   /** Messages before the text, oldest first. Only the last contextMessageCount are used. */
   previous: ContextMessage[];
@@ -112,8 +105,9 @@ export interface BuildInput {
 
 export function buildTranslationRequest(input: BuildInput): TranslationRequest {
   const { direction, text, settings } = input;
+  const guides = effectiveGuides(input.store ?? { userBundles: [] }, settings);
   const targetLanguage = direction === 'incoming' ? settings.myLanguage : settings.modelLanguage;
-  const glossary = glossarySection(settings.glossary, text, targetLanguage);
+  const glossary = glossarySection(guides.glossary, text, targetLanguage);
   const glossaryPrefix = glossary ? `${glossary}\n\n` : '';
   const referenceText = glossary ? `${glossaryPrefix}[Text to Translate]\n${text}\n[End Text]` : text;
   if (referenceText.length > TRANSLATION_TEXT_MAX) throw new TranslationLimitError('text', referenceText.length, TRANSLATION_TEXT_MAX);
@@ -146,10 +140,10 @@ export function buildTranslationRequest(input: BuildInput): TranslationRequest {
 
   const sections = [directionPrompt(settings, direction, input.presets)];
   if (glossary) sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.glossary);
-  const freeContext = freeContextSection(settings.freeContextEnabled ? settings.freeContext : '');
+  const freeContext = freeContextSection(settings.freeContextEnabled ? guides.freeContext : '');
   if (freeContext) sections.push(freeContext);
-  if (direction === 'incoming' && settings.incomingVoiceEnabled && settings.incomingVoicePrompt.trim()) {
-    sections.push(MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice(settings.incomingVoicePrompt.trim()));
+  if (direction === 'incoming' && settings.incomingVoiceEnabled && guides.incomingVoicePrompt.trim()) {
+    sections.push(MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice(guides.incomingVoicePrompt.trim()));
   }
   if (hasContext) sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.previousContext);
   if (input.hasMarkers) sections.push(MARKER_INSTRUCTION);

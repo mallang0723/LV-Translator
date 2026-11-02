@@ -21,6 +21,7 @@ import {
   type Store,
   type ToBackend,
   type ToFrontend,
+  type UserBundle,
   effectiveConnectionId,
 } from './shared';
 import { ExcludeRuleError, parseTags } from './translate/protect';
@@ -97,6 +98,13 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-sticky { position: sticky; bottom: 0; background: color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
+.stt-panel, .stt-section, .stt-field, .stt-modal { min-width: 0; overflow-wrap: anywhere; }
+.stt-row > .stt-field { flex: 1 1 130px; }
+.stt-panel select { min-width: 0; max-width: 100%; }
+.stt-bundle-preview { min-width: 0; }
+.stt-bundle-preview > summary { cursor: pointer; color: var(--lumiverse-text-muted, inherit); }
+.stt-bundle-preview .stt-field { margin-top: 7px; }
+.stt-bundle-editor textarea { min-height: 90px; }
 .stt-sticky.stt-unsaved { border-top: 2px solid var(--lumiverse-warning, #c90); background: color-mix(in srgb, var(--lumiverse-warning, #c90) 22%, color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent)); padding: 8px; border-radius: 8px; }
 .stt-unsaved-note { flex: 1 1 100%; font-weight: 700; color: var(--lumiverse-warning, #c90); }
 .stt-unsaved-note[hidden] { display: none; }
@@ -110,6 +118,7 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
   .stt-btn { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
   .stt-panel input[type=text], .stt-panel input[type=number], .stt-panel select, .stt-modal input { min-height: 44px; font-size: 16px; }
   .stt-check { min-height: 44px; }
+  .stt-bundle-preview > summary { min-height: 44px; display: flex; align-items: center; }
   .stt-check input { width: 22px; height: 22px; flex: none; }
   .stt-font-label input[type=range] { min-height: 44px; }
   .stt-pr-orig > summary, details.stt-translation > summary { min-height: 44px; display: flex; align-items: center; }
@@ -586,6 +595,68 @@ export function setup(ctx: SpindleFrontendContext) {
     return el('div', { class: 'stt-field' }, [row, ...(list.length ? list : [el('span', { class: 'stt-note' }, ['내 프리셋이 없습니다. 기본 프리셋은 읽기 전용입니다.'])])]);
   }
 
+  function editBundle(existing: UserBundle | null): void {
+    const modal = ctx.ui.showModal({ title: existing ? '묶음 편집' : '새 묶음으로 저장', width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
+    const source = existing ?? draft;
+    const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '묶음 이름' });
+    const glossary = el('textarea', { value: source.glossary, spellcheck: false, placeholder: '내 언어 용어 = 모델 언어 용어' });
+    const freeContext = el('textarea', { value: source.freeContext, spellcheck: false });
+    const voice = el('textarea', { value: source.incomingVoicePrompt, spellcheck: false });
+    modal.root.replaceChildren(el('div', { class: 'stt-modal stt-bundle-editor' }, [
+      el('div', { class: 'stt-note' }, [existing
+        ? '저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다.'
+        : '이 방에 입력한 단어집·추가 지침·캐릭터 말투를 복사합니다. 저장 후 목록에서 선택해 주세요. 방의 입력 내용은 그대로 남습니다.']),
+      el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
+      el('label', { class: 'stt-field' }, [el('span', {}, ['단어집']), glossary]),
+      el('label', { class: 'stt-field' }, [el('span', {}, ['추가 지침']), freeContext]),
+      el('label', { class: 'stt-field' }, [el('span', {}, ['캐릭터 말투 (응답 번역에만)']), voice]),
+      el('div', { class: 'stt-row' }, [
+        button('저장', () => {
+          if (!name.value.trim()) return notify('warning', '묶음 이름을 입력해 주세요.');
+          toBackend({ type: 'save_bundle', bundle: {
+            id: existing?.id ?? '', name: name.value, glossary: glossary.value,
+            freeContext: freeContext.value, incomingVoicePrompt: voice.value,
+          } });
+          modal.dismiss();
+        }, 'stt-primary'),
+        button('취소', () => modal.dismiss()),
+      ]),
+    ]));
+  }
+
+  function bundleSection(): HTMLElement {
+    const bundles = store?.userBundles ?? [];
+    const selected = bundles.find((b) => b.id === draft.bundleId);
+    const edit = button('묶음 편집', () => { if (selected) editBundle(selected); });
+    const remove = button('삭제', async () => {
+      if (!selected) return;
+      const { confirmed } = await ctx.ui.showConfirm({
+        title: '묶음 삭제',
+        message: `"${selected.name}" 묶음을 삭제할까요? 이 묶음을 쓰는 모든 방과 새 채팅 기본값의 선택이 "없음"으로 바뀝니다. 각 방에 추가한 내용은 남습니다.`,
+        variant: 'danger', confirmLabel: '삭제',
+      });
+      if (confirmed) toBackend({ type: 'delete_bundle', id: selected.id });
+    }, 'stt-danger');
+    edit.disabled = remove.disabled = !selected;
+    const preview = selected ? el('details', { class: 'stt-bundle-preview' }, [
+      el('summary', {}, [`${selected.name} · 내용 보기 (읽기 전용)`]),
+      ...([
+        ['단어집', selected.glossary], ['추가 지침', selected.freeContext], ['캐릭터 말투', selected.incomingVoicePrompt],
+      ] as const).map(([label, value]) => el('label', { class: 'stt-field' }, [
+        el('span', {}, [label]), el('textarea', { readOnly: true, value, placeholder: '내용 없음' }),
+      ])),
+    ]) : null;
+    return el('div', { class: 'stt-section' }, [
+      el('h3', {}, ['번역 지침 묶음']),
+      select('이 방의 묶음', draft.bundleId, [['', '없음'], ...bundles.map((b): [string, string] => [b.id, b.name])], (value) => {
+        draft.bundleId = value;
+      }, true, true),
+      el('div', { class: 'stt-row' }, [button('새 묶음으로 저장', () => editBundle(null), '', '이 방의 현재 3개 내용으로 새 묶음 저장'), edit, remove]),
+      el('div', { class: 'stt-note' }, ['묶음 선택은 아래 저장 버튼으로 적용합니다. 추가 지침·말투의 사용 여부는 방마다 정하며, 묶음과 이 방 추가분에 함께 적용됩니다. 같은 용어는 이 방 단어장이 우선합니다.']),
+      preview,
+    ]);
+  }
+
   function markDirty(): void {
     dirty = true;
     status = '';
@@ -620,6 +691,8 @@ export function setup(ctx: SpindleFrontendContext) {
       draft = { ...current() };
       draft.connectionId = effectiveConnectionId(store, chatId);
     }
+    // A shared bundle can be deleted while this room has other unsaved edits.
+    if (draft.bundleId && !store.userBundles.some((b) => b.id === draft.bundleId)) draft.bundleId = '';
     const connectionOptions: Array<[string, string]> = [['', '자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)'], ...connections.map((c): [string, string] => [c.id, `${c.name} · ${c.model}${c.isDefault ? ' (기본)' : ''}`])];
     if (draft.connectionId && !connections.some((c) => c.id === draft.connectionId)) connectionOptions.push([draft.connectionId, '(삭제된 연결)']);
     const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), draft.connectionId || undefined, hint);
@@ -702,16 +775,17 @@ export function setup(ctx: SpindleFrontendContext) {
       ]),
       ...(paragraphMode ? [paragraphSection()] : []),
       el('div', { class: 'stt-section' }, [el('h3', {}, ['프롬프트 프리셋']), promptSection('incoming'), promptSection('outgoing'), presetManager()]),
+      bundleSection(),
       el('div', { class: 'stt-section' }, [
         el('h3', {}, ['단어장']),
-        text('한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)', 'glossary', { multiline: true, placeholder: '마리나라 = Marinara\n로어북 = lorebook' }),
+        text('이 방에만 추가 · 한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)', 'glossary', { multiline: true, placeholder: '마리나라 = Marinara\n로어북 = lorebook' }),
       ]),
       el('div', { class: 'stt-section' }, [
         el('h3', {}, ['참고 정보']),
         check('기타 지침 추가 (장르·시대·지역·배경 등)', 'freeContextEnabled', renderPanel),
-        draft.freeContextEnabled ? el('div', { class: 'stt-sub' }, [text('기타 지침', 'freeContext', { multiline: true })]) : null,
+        draft.freeContextEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 기타 지침', 'freeContext', { multiline: true })]) : null,
         check('대사 지침 추가 (응답 번역에만)', 'incomingVoiceEnabled', renderPanel),
-        draft.incomingVoiceEnabled ? el('div', { class: 'stt-sub' }, [text('대사 지침 (# Character Voice Instructions)', 'incomingVoicePrompt', { multiline: true })]) : null,
+        draft.incomingVoiceEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 대사 지침 (# Character Voice Instructions)', 'incomingVoicePrompt', { multiline: true })]) : null,
         check('이전 대화를 번역 참고로 포함', 'contextEnabled', renderPanel),
         draft.contextEnabled ? contextSub : null,
       ]),

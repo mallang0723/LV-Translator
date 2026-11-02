@@ -53,6 +53,8 @@ export interface ChatSettings {
   excludeRules: string;
   /** Tag names (comma separated) whose whole element is never sent for translation. <style>/<script> are always kept. */
   excludeTags: string;
+  /** Shared translation guide bundle. '' = none; the following text fields are room additions. */
+  bundleId: string;
   // Translation Tools 1.5.4 per-chat scope
   glossary: string;
   freeContextEnabled: boolean;
@@ -70,6 +72,14 @@ export interface UserPreset {
   id: string;
   name: string;
   prompt: string;
+}
+
+export interface UserBundle {
+  id: string;
+  name: string;
+  glossary: string;
+  freeContext: string;
+  incomingVoicePrompt: string;
 }
 
 /** Paragraph view settings, shared by every chat (like Paragraph Reader). */
@@ -104,6 +114,7 @@ export interface Store {
   version: 1;
   view: ViewSettings;
   userPresets: UserPreset[];
+  userBundles: UserBundle[];
   /** Settings for chats that have none of their own yet. */
   defaults: ChatSettings;
   chats: Record<string, ChatSettings>;
@@ -133,6 +144,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   protectCode: true,
   excludeRules: '',
   excludeTags: '',
+  bundleId: '',
   glossary: '',
   freeContextEnabled: false,
   freeContext: '',
@@ -148,7 +160,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
 const str = (v: unknown, fallback: string) => (typeof v === 'string' ? v : fallback);
 const bool = (v: unknown, fallback: boolean) => (typeof v === 'boolean' ? v : fallback);
 
-export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_SETTINGS): ChatSettings {
+export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_SETTINGS, bundles: readonly UserBundle[] = []): ChatSettings {
   const s = (value && typeof value === 'object' && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
   const count = Number.parseInt(String(s.contextMessageCount ?? ''), 10);
   const split = Number.parseInt(String(s.longSplitChars ?? ''), 10);
@@ -172,6 +184,7 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
     excludeTags: lenientTags(str(s.excludeTags, base.excludeTags)).join(', '),
+    bundleId: typeof s.bundleId === 'string' && bundles.some((b) => b.id === s.bundleId) ? s.bundleId : '',
     glossary: str(s.glossary, base.glossary),
     freeContextEnabled: bool(s.freeContextEnabled, base.freeContextEnabled),
     freeContext: str(s.freeContext, base.freeContext),
@@ -189,10 +202,20 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
 
 export function normalizeStore(value: unknown): Store {
   const raw = (value && typeof value === 'object' ? value : {}) as Partial<Store>;
-  const defaults = normalizeSettings(raw.defaults);
+  const userBundles: UserBundle[] = [];
+  const bundleIds = new Set<string>();
+  for (const b of Array.isArray(raw.userBundles) ? raw.userBundles : []) {
+    if (!b || typeof b !== 'object') continue;
+    const id = str(b.id, '').trim();
+    const name = str(b.name, '').trim();
+    if (!id || !name || bundleIds.has(id)) continue;
+    bundleIds.add(id);
+    userBundles.push({ id, name, glossary: str(b.glossary, ''), freeContext: str(b.freeContext, ''), incomingVoicePrompt: str(b.incomingVoicePrompt, '') });
+  }
+  const defaults = normalizeSettings(raw.defaults, DEFAULT_SETTINGS, userBundles);
   const chats: Record<string, ChatSettings> = {};
   if (raw.chats && typeof raw.chats === 'object') {
-    for (const [chatId, s] of Object.entries(raw.chats)) if (chatId) chats[chatId] = normalizeSettings(s, defaults);
+    for (const [chatId, s] of Object.entries(raw.chats)) if (chatId) chats[chatId] = normalizeSettings(s, defaults, userBundles);
   }
   const userPresets: UserPreset[] = [];
   const seen = new Set<string>();
@@ -205,7 +228,7 @@ export function normalizeStore(value: unknown): Store {
     seen.add(id);
     userPresets.push({ id, name, prompt });
   }
-  return { version: 1, view: normalizeView(raw.view), userPresets, defaults, chats };
+  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, defaults, chats };
 }
 
 export function settingsFor(store: Store, chatId: string | null): ChatSettings {
@@ -313,6 +336,8 @@ export type ToBackend =
   | { type: 'save_settings'; chatId: string | null; settings: ChatSettings; asDefault: boolean }
   | { type: 'save_preset'; preset: UserPreset }
   | { type: 'delete_preset'; id: string }
+  | { type: 'save_bundle'; bundle: UserBundle }
+  | { type: 'delete_bundle'; id: string }
   | { type: 'translate'; chatId: string; messageId: string; force: boolean }
   | { type: 'continue'; chatId: string; messageId: string }
   | { type: 'set_hidden'; chatId: string; messageId: string; hidden: boolean }

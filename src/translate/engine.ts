@@ -4,6 +4,7 @@
 // so a failure keeps what was already translated.
 
 import type { ChatSettings, TranslationRecord } from '../shared';
+import type { GuideLibrary } from '../bundles';
 import { isTruncatedFinish, joinContinuation, splitForTranslation, TRANSLATION_CHUNK_CHARS } from './chunk';
 import {
   buildContinuationRequest,
@@ -37,6 +38,7 @@ export interface EngineJob {
   direction: Direction;
   source: string;
   settings: ChatSettings;
+  store?: GuideLibrary;
   presets: PromptPreset[];
   previous: ContextMessage[];
   /** Continue this record instead of starting over. */
@@ -105,6 +107,7 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
       direction: job.direction,
       text: part,
       settings,
+      store: job.store,
       presets: job.presets,
       previous: job.previous,
       hasMarkers: /⟦\d+⟧/.test(part),
