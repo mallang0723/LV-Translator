@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { buildParagraphView } from '../src/display/paragraph-view';
 import { renderMessage } from '../src/display/render';
-import { DEFAULT_SETTINGS, DEFAULT_VIEW, normalizeSettings, normalizeView, type ChatSettings, type TranslationRecord } from '../src/shared';
+import { DEFAULT_SETTINGS, DEFAULT_VIEW, DISPLAY_MODES, normalizeSettings, normalizeStore, normalizeView, type ChatSettings, type TranslationRecord } from '../src/shared';
 
 const record: TranslationRecord = { parts: ['번역 하나\n\n번역 둘'], pieces: [], total: 1, truncatedPart: -1, status: 'done', updatedAt: 0 };
 const content = 'One.\n\nTwo.';
@@ -27,6 +27,41 @@ describe('display modes', () => {
     expect(c).toContain('<details class="stt-translation">');
   });
 
+  test('collapsed-source: translation first, original in a closed expandable section', () => {
+    const rendered = renderMessage(content, record, settings('collapsed-source'), DEFAULT_VIEW);
+    expect(rendered).toBe(`번역 하나\n\n번역 둘\n\n<details class="stt-translation"><summary>원문</summary>\n\n${content}\n\n</details>`);
+    expect(rendered).not.toContain(' open');
+  });
+
+  test('collapsed-source preserves source Markdown/HTML and restores translation markup', () => {
+    const source = '**One.**\n\n<div>Two.</div>';
+    const protectedRecord = { ...record, parts: ['**번역 하나**\n\n⟦1⟧번역 둘⟦2⟧'], pieces: ['<div>', '</div>'] };
+    expect(renderMessage(source, protectedRecord, settings('collapsed-source'), DEFAULT_VIEW)).toBe(
+      `**번역 하나**\n\n<div>번역 둘</div>\n\n<details class="stt-translation"><summary>원문</summary>\n\n${source}\n\n</details>`,
+    );
+  });
+
+  for (const mode of ['only', 'collapsed-source'] as const) {
+    test(`${mode}: missing, pending and failed translations leave the original unfolded`, () => {
+      const unavailable = [
+        null,
+        undefined,
+        { ...record, parts: [], status: 'partial' as const },
+        { ...record, parts: [], status: 'error' as const, error: 'Translation failed' },
+        { ...record, parts: [' ', '\n'] },
+      ];
+      for (const entry of unavailable) {
+        expect(renderMessage(content, entry, settings(mode), DEFAULT_VIEW)).toBe(content);
+      }
+    });
+  }
+
+  test('collapsed-source keeps available partial text visible like only mode', () => {
+    const partial = { ...record, status: 'partial' as const, total: 2 };
+    const text = renderMessage(content, partial, settings('only'), DEFAULT_VIEW);
+    expect(renderMessage(content, partial, settings('collapsed-source'), DEFAULT_VIEW)).toStartWith(`${text}\n\n<details`);
+  });
+
   test('paragraph view: order inside each pair', () => {
     const src = renderMessage(content, record, settings('paragraph'), { ...DEFAULT_VIEW, paragraphOrder: 'source-first' });
     expect(at(src, '원문 1')).toBeLessThan(at(src, '번역 1'));
@@ -45,8 +80,22 @@ describe('display modes', () => {
 
   test('settings: new mode and order are stored, unknown values fall back', () => {
     expect(normalizeSettings({ displayMode: 'above' }).displayMode).toBe('above');
+    expect(normalizeSettings({ displayMode: 'collapsed-source' }).displayMode).toBe('collapsed-source');
     expect(normalizeSettings({ displayMode: 'nope' }).displayMode).toBe('below');
     expect(normalizeView({ paragraphOrder: 'translation-first' }).paragraphOrder).toBe('translation-first');
     expect(normalizeView({}).paragraphOrder).toBe('source-first');
+  });
+
+  test('stores preserve existing modes and round-trip collapsed-source without changing defaults', () => {
+    expect(DISPLAY_MODES).toEqual(['below', 'above', 'only', 'collapsed', 'collapsed-source', 'paragraph']);
+    for (const mode of DISPLAY_MODES) {
+      const raw = { version: 1, defaults: { displayMode: mode }, chats: { existing: { displayMode: mode }, inherited: {} } };
+      const store = normalizeStore(JSON.parse(JSON.stringify(raw)));
+      expect(store.defaults.displayMode).toBe(mode);
+      expect(store.chats.existing?.displayMode).toBe(mode);
+      expect(store.chats.inherited?.displayMode).toBe(mode);
+      expect(normalizeStore(JSON.parse(JSON.stringify(store)))).toEqual(store);
+    }
+    expect(normalizeStore(null).defaults.displayMode).toBe('below');
   });
 });

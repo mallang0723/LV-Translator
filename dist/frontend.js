@@ -457,6 +457,7 @@ var DISPLAY_LABELS = {
   above: "번역문 먼저 (번역문 아래에 원문)",
   only: "번역문만 (원문 숨김)",
   collapsed: "원문 + 접힌 번역문",
+  "collapsed-source": "번역문 + 접힌 원문",
   paragraph: "문단 대조 (Paragraph Reader)"
 };
 function setup(ctx) {

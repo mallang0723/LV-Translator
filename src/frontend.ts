@@ -161,6 +161,7 @@ const DISPLAY_LABELS: Record<DisplayMode, string> = {
   above: '번역문 먼저 (번역문 아래에 원문)',
   only: '번역문만 (원문 숨김)',
   collapsed: '원문 + 접힌 번역문',
+  'collapsed-source': '번역문 + 접힌 원문',
   paragraph: '문단 대조 (Paragraph Reader)',
 };
 
@@ -244,7 +245,7 @@ export function setup(ctx: SpindleFrontendContext) {
   const barWanted = (v: MessageView) => wantsBar(v, current().displayMode);
 
   /**
-   * Slim row under a message (below / only / collapsed modes) for what the toolbar does not cover:
+   * Slim row under a message (including collapsed-source) for what the toolbar does not cover:
    * progress, trouble, continue, and (outside the paragraph view) showing or hiding the translation.
    */
   function renderBar(bar: HTMLElement, view: MessageView): void {

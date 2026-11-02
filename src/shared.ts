@@ -4,10 +4,11 @@ import { lenientTags } from './translate/protect';
 
 /**
  * below: original, then translation. above: translation, then original. only: translation alone.
- * collapsed: original with a folded translation. paragraph: paragraph-by-paragraph comparison.
+ * collapsed: original with a folded translation. collapsed-source: translation with a folded original.
+ * paragraph: paragraph-by-paragraph comparison.
  */
-export type DisplayMode = 'below' | 'above' | 'only' | 'collapsed' | 'paragraph';
-export const DISPLAY_MODES: readonly DisplayMode[] = ['below', 'above', 'only', 'collapsed', 'paragraph'];
+export type DisplayMode = 'below' | 'above' | 'only' | 'collapsed' | 'collapsed-source' | 'paragraph';
+export const DISPLAY_MODES: readonly DisplayMode[] = ['below', 'above', 'only', 'collapsed', 'collapsed-source', 'paragraph'];
 /** Paragraph view, interleaved: which of the pair comes first. */
 export type ParagraphOrder = 'source-first' | 'translation-first';
 /** 'whole': one request per message. 'paragraph': one request per paragraph (exact pairs). */

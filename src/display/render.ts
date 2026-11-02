@@ -4,7 +4,9 @@ import type { ChatSettings, TranslationRecord, ViewSettings } from '../shared';
 import { recordToText } from '../translate/engine';
 import { buildParagraphView } from './paragraph-view';
 
-export function renderMessage(content: string, record: TranslationRecord, settings: ChatSettings, view: ViewSettings): string {
+export function renderMessage(content: string, record: TranslationRecord | null | undefined, settings: ChatSettings, view: ViewSettings): string {
+  // Keep the original visible until translated text exists, as in the backend render processor.
+  if (!record || !record.parts.some((p) => p.trim())) return content;
   if (settings.displayMode === 'paragraph') return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
   const text = recordToText(record);
   switch (settings.displayMode) {
@@ -14,6 +16,8 @@ export function renderMessage(content: string, record: TranslationRecord, settin
       return text;
     case 'collapsed':
       return `${content}\n\n<details class="stt-translation"><summary>번역</summary>\n\n${text}\n\n</details>`;
+    case 'collapsed-source':
+      return `${text}\n\n<details class="stt-translation"><summary>원문</summary>\n\n${content}\n\n</details>`;
     default:
       return `${content}\n\n<hr class="stt-separator">\n\n${text}`;
   }

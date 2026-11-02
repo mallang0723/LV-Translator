@@ -943,7 +943,7 @@ function restore(text, pieces) {
 }
 
 // src/shared.ts
-var DISPLAY_MODES = ["below", "above", "only", "collapsed", "paragraph"];
+var DISPLAY_MODES = ["below", "above", "only", "collapsed", "collapsed-source", "paragraph"];
 var FONT_MIN = 12;
 var FONT_MAX = 32;
 var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
@@ -1781,6 +1781,8 @@ ${tgt}`}
 
 // src/display/render.ts
 function renderMessage(content, record, settings, view) {
+  if (!record || !record.parts.some((p) => p.trim()))
+    return content;
   if (settings.displayMode === "paragraph")
     return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
   const text = recordToText(record);
@@ -1799,6 +1801,14 @@ ${content}`;
 <details class="stt-translation"><summary>\uBC88\uC5ED</summary>
 
 ${text}
+
+</details>`;
+    case "collapsed-source":
+      return `${text}
+
+<details class="stt-translation"><summary>\uC6D0\uBB38</summary>
+
+${content}
 
 </details>`;
     default:

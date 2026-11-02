@@ -49,7 +49,8 @@ export function messageIdFromScope(scope: string): string | null {
 
 /**
  * The show / hide translation toggle. The paragraph view always sits next to the original, so hiding
- * it is pointless there (the toolbar's delete button removes a translation); the other modes keep it.
+ * it is pointless there (the toolbar's delete button removes a translation); the other modes,
+ * including collapsed-source, keep it.
  */
 export function showsToggle(view: Pick<MessageView, 'text'>, mode: DisplayMode): boolean {
   return mode !== 'paragraph' && !!view.text;
@@ -57,8 +58,8 @@ export function showsToggle(view: Pick<MessageView, 'text'>, mode: DisplayMode):
 
 /**
  * Whether the slim bar is shown. Outside the paragraph view any message with a translation state gets
- * one (it carries the show / hide toggle). In the paragraph view only trouble does: busy, error or a
- * partial translation. A normally translated message has no bar there.
+ * one (including collapsed-source; it carries the show / hide toggle). In the paragraph view only
+ * trouble does: busy, error or a partial translation. A normally translated message has no bar there.
  */
 export function wantsBar(view: Pick<MessageView, 'role' | 'busy' | 'status'>, mode: DisplayMode): boolean {
   if (view.role === 'system') return false;
@@ -67,7 +68,7 @@ export function wantsBar(view: Pick<MessageView, 'role' | 'busy' | 'status'>, mo
   return view.status !== null;
 }
 
-/** Whether the translation is hidden for display. A stale hidden flag never hides the paragraph view. */
+/** A hidden flag shows the original in every mode, including collapsed-source, except paragraph view. */
 export function isTranslationHidden(hidden: boolean | undefined, mode: DisplayMode): boolean {
   return mode !== 'paragraph' && hidden === true;
 }
