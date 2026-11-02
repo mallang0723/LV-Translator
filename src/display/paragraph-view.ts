@@ -7,6 +7,7 @@ import { currentIllustrations, normalizeIllustrations } from '../illustrations';
 
 import type { ChatSettings, ParagraphOrder, ParagraphView, TranslationRecord } from '../shared';
 import { partSources, recordToText } from '../translate/engine';
+import { cleanReply } from '../translate/clean-reply';
 import { htmlGroups, splitParagraphs } from '../translate/paragraphs';
 import { protect, restore } from '../translate/protect';
 
@@ -36,11 +37,13 @@ export function pairParagraphs(content: string, record: TranslationRecord, setti
       const sources = partSources(prot.text, { ...settings, translationUnit: 'paragraph' });
       if (sameArray(prot.pieces, record.pieces) && sources.length === record.total) {
         const current = currentIllustrations(content);
-        const pairs = sources.map((s, i) => ({
-          source: restore(s, prot.pieces),
-          translation: i < record.parts.length && record.parts[i]!.trim()
-            ? current.replace(restore(record.parts[i]!, record.pieces)) : null,
-        }));
+        const pairs = sources.map((s, i) => {
+          const text = cleanReply(record.parts[i] ?? '');
+          return {
+            source: restore(s, prot.pieces),
+            translation: text.trim() ? current.replace(restore(text, record.pieces)) : null,
+          };
+        });
         const rest = current.remaining();
         const last = pairs.findLast((pair) => pair.translation !== null);
         if (rest && last) last.translation += `\n\n${rest}`;

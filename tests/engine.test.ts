@@ -37,6 +37,69 @@ const job = (source: string, s: ChatSettings, resume?: TranslationRecord) => ({
 });
 
 describe('translate', () => {
+  for (const translationUnit of ['whole', 'paragraph'] as const) {
+    test(`${translationUnit}: cleans every chunk before progress is saved`, async () => {
+      const source = Array.from({ length: 6 }, (_, i) => `Para ${i} ` + 'x'.repeat(1500)).join('\n\n');
+      const saved: TranslationRecord[] = [];
+      const m = model((req) => ({ text: `${fakeTranslate(target(req))}\n [ eNd TeXt ] \n` }));
+      const r = await translate(job(source, settings({ translationUnit, longSplitChars: 7000 })), {
+        ...m, onProgress: (entry) => void saved.push(entry),
+      });
+      expect(r.total).toBeGreaterThan(1);
+      expect(r.parts).toEqual(m.calls.map((req) => fakeTranslate(target(req))));
+      expect(saved.every((entry) => entry.parts.every((part) => !/end text/i.test(part)))).toBe(true);
+      expect(recordToText(r)).toBe(fakeTranslate(source));
+    });
+  }
+
+  test('leading wrapper and context headers are removed with whitespace and mixed case', async () => {
+    const m = model(() => ({ text: '\n [ previous context — reference only ]\n [ tExT to Translate ] \n번역\n [ END TEXT ]\n[ Previous Context — Reference Only ] \n' }));
+    const r = await translate(job('Hello', settings()), m);
+    expect(r.parts).toEqual(['번역']);
+  });
+
+  test('literal markers inside real text and markers at the wrong edge are kept', async () => {
+    const literal = '[End Text] 시작 [Text to Translate] 중간 [End Text] 그리고 [Previous Context — Reference Only] 끝 [Text to Translate]';
+    const r = await translate(job('Hello', settings()), model(() => ({ text: literal })));
+    expect(r.parts).toEqual([literal]);
+    expect(recordToText(r)).toBe(literal);
+  });
+
+  for (const autoContinue of [true, false]) {
+    test(`continuation cleans replies before joining and saving (auto=${autoContinue})`, async () => {
+      const s = settings({ autoContinue });
+      const saved: TranslationRecord[] = [];
+      const m = model((req, call) => {
+        if (call === 1) return { text: '[Text to Translate]\nHello wor\n[End Text]', finishReason: 'length' };
+        expect(req.user).toContain('[Translation So Far]\nHello wor\n[End Translation So Far]');
+        return { text: '\n[Text to Translate]\nld.\n[End Text]', finishReason: 'stop' };
+      });
+      const deps = { ...m, onProgress: (entry: TranslationRecord) => void saved.push(entry) };
+      let r = await translate(job('Hello world.', s), deps);
+      if (!autoContinue) r = await translate(job('Hello world.', s, r), deps);
+      expect(r.parts).toEqual(['Hello world.']);
+      expect(r.status).toBe('done');
+      expect(saved.every((entry) => entry.parts.every((part) => !/\[(?:Text to Translate|End Text)\]/.test(part)))).toBe(true);
+    });
+  }
+
+  test('a marker-only reply to continue a finished translation adds nothing', async () => {
+    const done = await translate(job('Hello.', settings()), model());
+    const r = await translate(job('Hello.', settings(), done), model(() => ({ text: '[Text to Translate]\n[End Text]' })));
+    expect(r.parts).toEqual(done.parts);
+    expect(r.status).toBe('done');
+  });
+
+  test('fallback segments are cleaned before being rejoined with protected markup', async () => {
+    const m = model((req) => ({ text: /⟦\d+⟧/.test(target(req))
+      ? 'missing protected markers'
+      : `[Text to Translate]\n${fakeTranslate(target(req))}\n[End Text]` }));
+    const r = await translate(job('<b>Hello</b> and <i>bye</i>', settings()), m);
+    expect(m.calls).toHaveLength(5);
+    expect(r.parts.join('')).not.toContain('[End Text]');
+    expect(recordToText(r)).toBe('<b>[KO]Hello</b> [KO]and <i>[KO]bye</i>');
+  });
+
   test('HTML structure survives; only text is translated', async () => {
     const m = model();
     const r = await translate(job('<div class="a">Hello</div> <status>HP 3</status>', settings({ excludeRules: '<status>' })), m);

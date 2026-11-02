@@ -8,6 +8,7 @@ import { normalizeIllustrations, restoreCurrentIllustrations } from '../illustra
 import type { ChatSettings, TranslationRecord } from '../shared';
 import type { GuideLibrary } from '../bundles';
 import { isTruncatedFinish, joinContinuation, splitForTranslation, TRANSLATION_CHUNK_CHARS } from './chunk';
+import { cleanReply } from './clean-reply';
 import {
   buildContinuationRequest,
   buildTranslationRequest,
@@ -55,7 +56,7 @@ export class TranslationError extends Error {
 }
 
 export function recordToText(r: TranslationRecord, currentContent?: string): string {
-  const text = restore(r.parts.filter((p) => p.trim()).join('\n\n'), r.pieces);
+  const text = restore(r.parts.map(cleanReply).filter((p) => p.trim()).join('\n\n'), r.pieces);
   return currentContent === undefined ? text : restoreCurrentIllustrations(text, currentContent);
 }
 
@@ -92,6 +93,10 @@ function sameArray(a: string[], b: string[]): boolean {
 
 export async function translate(job: EngineJob, deps: EngineDeps): Promise<TranslationRecord> {
   const { settings } = job;
+  const complete = async (request: TranslationRequest): Promise<Completion> => {
+    const result = await deps.complete(request);
+    return { ...result, text: cleanReply(result.text) };
+  };
   const prot = protect(job.source, settings);
   const sources = partSources(prot.text, settings);
   const targetLanguage = job.direction === 'incoming' ? settings.myLanguage : settings.modelLanguage;
@@ -126,7 +131,7 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
     const base = requestFor(sources[i]!);
     for (let round = 0; round < rounds; round++) {
       aborted();
-      const result = await deps.complete(buildContinuationRequest(base, record.parts[i]!, targetLanguage));
+      const result = await complete(buildContinuationRequest(base, record.parts[i]!, targetLanguage));
       const before = record.parts[i]!;
       record.parts[i] = joinContinuation(before, result.text);
       const truncated = isTruncatedFinish(result.finishReason);
@@ -157,7 +162,7 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
       aborted();
       const lead = /^\s*/.exec(seg)![0];
       const trail = /\s*$/.exec(seg)![0];
-      const result = await deps.complete(requestFor(seg.trim()));
+      const result = await complete(requestFor(seg.trim()));
       const text = result.text.trim();
       if (!text || isTruncatedFinish(result.finishReason) || /⟦\s*\d+\s*⟧/.test(text)) return null;
       out.push(lead + text + trail);
@@ -176,7 +181,7 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
     const request = requestFor(sources[i]!);
     for (let attempt = 0; attempt < 2; attempt++) {
       aborted();
-      const result = await deps.complete(request);
+      const result = await complete(request);
       record.parts[i] = result.text.trim();
       if (isTruncatedFinish(result.finishReason)) {
         record.truncatedPart = i;

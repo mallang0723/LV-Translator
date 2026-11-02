@@ -9,6 +9,28 @@ const settings = (displayMode: ChatSettings['displayMode']): ChatSettings => ({ 
 const at = (text: string, needle: string) => text.indexOf(needle);
 
 describe('display modes', () => {
+  for (const unit of ['whole', 'paragraph'] as const) {
+    test(`old ${unit} records render clean in every mode without mutation`, () => {
+      const old: TranslationRecord = {
+        ...record, unit, total: 2,
+        parts: ['\n[ text to translate ]\n번역 하나\n[ end text ]\n', '[Previous Context — Reference Only]\n번역 둘\n[End Text]'],
+      };
+      const snapshot = JSON.stringify(old);
+      const clean = { ...old, parts: ['번역 하나', '번역 둘'] };
+      for (const mode of DISPLAY_MODES) {
+        expect(renderMessage(content, old, settings(mode), DEFAULT_VIEW)).toBe(renderMessage(content, clean, settings(mode), DEFAULT_VIEW));
+      }
+      expect(JSON.stringify(old)).toBe(snapshot);
+    });
+  }
+
+  test('display preserves interior literals and protected source text restored at the edges', () => {
+    const literal = '앞 [End Text] 중간 [Text to Translate] [Previous Context — Reference Only] 뒤';
+    expect(renderMessage(content, { ...record, parts: [literal] }, settings('only'), DEFAULT_VIEW)).toBe(literal);
+    const protectedRecord = { ...record, parts: ['[Text to Translate]\n⟦1⟧번역⟦2⟧\n[End Text]'], pieces: ['[Text to Translate]', '[End Text]'] };
+    expect(renderMessage(content, protectedRecord, settings('only'), DEFAULT_VIEW)).toBe('[Text to Translate]번역[End Text]');
+  });
+
   test('below: original first, translation after', () => {
     const t = renderMessage(content, record, settings('below'), DEFAULT_VIEW);
     expect(at(t, 'One.')).toBeLessThan(at(t, '번역 하나'));

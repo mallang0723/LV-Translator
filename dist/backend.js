@@ -1340,6 +1340,11 @@ function isTruncatedFinish(reason) {
   return r === "length" || r.includes("max_tokens") || r.includes("max_output") || r === "max_tokens";
 }
 
+// src/translate/clean-reply.ts
+function cleanReply(text) {
+  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
+}
+
 // src/presets/upstream/reference.ts
 var MARINARA_TRANSLATION_REFERENCE_PROMPTS = Object.freeze({
   previousContext: `Previous Context is reference only. Never translate, repeat, or include it in the output. Translate only the content under [Text to Translate].`,
@@ -1601,7 +1606,7 @@ class TranslationError extends Error {
   }
 }
 function recordToText(r, currentContent) {
-  const text = restore(r.parts.filter((p) => p.trim()).join(`
+  const text = restore(r.parts.map(cleanReply).filter((p) => p.trim()).join(`
 
 `), r.pieces);
   return currentContent === undefined ? text : restoreCurrentIllustrations(text, currentContent);
@@ -1622,6 +1627,10 @@ function sameArray(a, b) {
 }
 async function translate(job, deps) {
   const { settings } = job;
+  const complete = async (request) => {
+    const result = await deps.complete(request);
+    return { ...result, text: cleanReply(result.text) };
+  };
   const prot = protect(job.source, settings);
   const sources = partSources(prot.text, settings);
   const targetLanguage = job.direction === "incoming" ? settings.myLanguage : settings.modelLanguage;
@@ -1648,7 +1657,7 @@ async function translate(job, deps) {
     const base = requestFor(sources[i]);
     for (let round = 0;round < rounds; round++) {
       aborted();
-      const result = await deps.complete(buildContinuationRequest(base, record.parts[i], targetLanguage));
+      const result = await complete(buildContinuationRequest(base, record.parts[i], targetLanguage));
       const before = record.parts[i];
       record.parts[i] = joinContinuation(before, result.text);
       const truncated = isTruncatedFinish(result.finishReason);
@@ -1676,7 +1685,7 @@ async function translate(job, deps) {
       aborted();
       const lead = /^\s*/.exec(seg)[0];
       const trail = /\s*$/.exec(seg)[0];
-      const result = await deps.complete(requestFor(seg.trim()));
+      const result = await complete(requestFor(seg.trim()));
       const text = result.text.trim();
       if (!text || isTruncatedFinish(result.finishReason) || /\u27E6\s*\d+\s*\u27E7/.test(text))
         return null;
@@ -1693,7 +1702,7 @@ async function translate(job, deps) {
     const request = requestFor(sources[i]);
     for (let attempt = 0;attempt < 2; attempt++) {
       aborted();
-      const result = await deps.complete(request);
+      const result = await complete(request);
       record.parts[i] = result.text.trim();
       if (isTruncatedFinish(result.finishReason)) {
         record.truncatedPart = i;
@@ -1737,14 +1746,14 @@ async function translate(job, deps) {
         const i = record.total - 1;
         const before = record.parts[i];
         record.truncatedPart = i;
-        const complete = await continuePart(i, 1);
+        const complete2 = await continuePart(i, 1);
         const problem = checkMarkers(sources[i], record.parts[i]);
         if (problem) {
           record.parts[i] = before;
           record.truncatedPart = -1;
           throw new TranslationError(`${problem} \uC774\uC5B4\uC11C \uBC88\uC5ED\uD55C \uB0B4\uC6A9\uC740 \uBC84\uB838\uC2B5\uB2C8\uB2E4.`, record);
         }
-        if (!complete)
+        if (!complete2)
           return finish();
         record.truncatedPart = -1;
       }
@@ -1779,10 +1788,13 @@ function pairParagraphs(content, record, settings) {
       const sources2 = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
       if (sameArray2(prot.pieces, record.pieces) && sources2.length === record.total) {
         const current = currentIllustrations(content);
-        const pairs = sources2.map((s, i) => ({
-          source: restore(s, prot.pieces),
-          translation: i < record.parts.length && record.parts[i].trim() ? current.replace(restore(record.parts[i], record.pieces)) : null
-        }));
+        const pairs = sources2.map((s, i) => {
+          const text = cleanReply(record.parts[i] ?? "");
+          return {
+            source: restore(s, prot.pieces),
+            translation: text.trim() ? current.replace(restore(text, record.pieces)) : null
+          };
+        });
         const rest = current.remaining();
         const last = pairs.findLast((pair) => pair.translation !== null);
         if (rest && last)
@@ -1874,7 +1886,7 @@ ${tgt}`}
 
 // src/display/render.ts
 function renderMessage(content, record, settings, view) {
-  if (!record || !record.parts.some((p) => p.trim()))
+  if (!record || !record.parts.some((p) => cleanReply(p).trim()))
     return content;
   if (settings.displayMode === "paragraph")
     return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);

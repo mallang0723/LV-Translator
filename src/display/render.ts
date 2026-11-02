@@ -2,11 +2,12 @@
 
 import type { ChatSettings, TranslationRecord, ViewSettings } from '../shared';
 import { recordToText } from '../translate/engine';
+import { cleanReply } from '../translate/clean-reply';
 import { buildParagraphView } from './paragraph-view';
 
 export function renderMessage(content: string, record: TranslationRecord | null | undefined, settings: ChatSettings, view: ViewSettings): string {
   // Keep the original visible until translated text exists, as in the backend render processor.
-  if (!record || !record.parts.some((p) => p.trim())) return content;
+  if (!record || !record.parts.some((p) => cleanReply(p).trim())) return content;
   if (settings.displayMode === 'paragraph') return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
   const text = recordToText(record, content);
   switch (settings.displayMode) {
