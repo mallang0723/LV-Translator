@@ -37,7 +37,7 @@ describe('translation requests match Translation Tools 1.5.4', () => {
 
 describe('limits and markers', () => {
   const settings = { ...DEFAULT_SETTINGS };
-  test('system prompt over 50,000 characters stops instead of cutting', () => {
+  test('system prompt over 200,000 characters stops instead of cutting', () => {
     const s = { ...settings, freeContextEnabled: true, freeContext: 'x'.repeat(SYSTEM_PROMPT_MAX) };
     expect(() => buildTranslationRequest({ direction: 'incoming', text: 'a', settings: s, presets: promptPresets([]), previous: [], hasMarkers: false })).toThrow(TranslationLimitError);
   });
