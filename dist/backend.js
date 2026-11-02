@@ -789,6 +789,89 @@ function deleteBundle(store, id) {
   }
 }
 
+// src/illustrations.ts
+var MALFORMED_ANNOTATION = "\u27E6\uC0BD\uD654\uAC00: \uADF8\uB9BC \uD0DC\uADF8 \uD615\uC2DD \uC624\uB958 \u2014 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uC2DC\uB3C4\uB429\uB2C8\uB2E4\u27E7";
+var START = /<pic(?=[\s/>]|$)|<pic\u27E6\uC0BD\uD654\uAC00:|!\[\uADF8\uB9BC:|\[\u26A0\uFE0F \uADF8\uB9BC \uC0DD\uC131 \uC2E4\uD328\(|\[\uD55C \uB2F5\uBCC0\uB2F9 \uADF8\uB9BC \uC0C1\uD55C\(|<pic-(?:failed|skipped)\b/g;
+var TAG = /^<pic(?:\u27E6\uC0BD\uD654\uAC00: \uADF8\uB9BC \uD0DC\uADF8 \uD615\uC2DD \uC624\uB958 \u2014 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uC2DC\uB3C4\uB429\uB2C8\uB2E4\u27E7)?(?=[\s/>]|$)(?:[^<>"']|"[^"<]*"|'[^'<]*')*>/;
+var STATUS = /^\[(?:\u26A0\uFE0F \uADF8\uB9BC \uC0DD\uC131 \uC2E4\uD328\(|\uD55C \uB2F5\uBCC0\uB2F9 \uADF8\uB9BC \uC0C1\uD55C\()[\s\S]*?<pic-(?:failed|skipped) id="[a-z0-9]+">\]/;
+var SENTINEL = /^<pic-(?:failed|skipped)\s+id="[a-z0-9]+"\s*\/?>/;
+function imageLength(text) {
+  const alt = /^!\[\uADF8\uB9BC:[^\]\n]*\]\(/.exec(text);
+  if (!alt)
+    return 0;
+  let depth = 1;
+  for (let i = alt[0].length;i < text.length; i++) {
+    if (text[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (text[i] === "(")
+      depth++;
+    if (text[i] === ")" && --depth === 0)
+      return i + 1;
+  }
+  return 0;
+}
+function replaceIllustrations(text, replace) {
+  const scan = new RegExp(START);
+  let out = "", cursor = 0, count = 0;
+  for (let match;match = scan.exec(text); ) {
+    const start = match.index;
+    const rest = text.slice(start);
+    let length = 0;
+    if (rest.startsWith("!["))
+      length = imageLength(rest);
+    else if (rest.startsWith("["))
+      length = STATUS.exec(rest)?.[0].length ?? 0;
+    else if (rest.startsWith("<pic-"))
+      length = SENTINEL.exec(rest)?.[0].length ?? 0;
+    else {
+      length = TAG.exec(rest)?.[0].length ?? 0;
+      if (!length) {
+        const offset = rest.startsWith(`<pic${MALFORMED_ANNOTATION}`) ? 4 + MALFORMED_ANNOTATION.length : 4;
+        const stop = /[<>\r\n]/.exec(rest.slice(offset));
+        length = stop ? offset + stop.index + (stop[0] === ">" ? 1 : 0) : rest.length;
+      }
+    }
+    if (!length)
+      continue;
+    length += /^\s*<\/pic\s*>/.exec(rest.slice(length))?.[0].length ?? 0;
+    out += text.slice(cursor, start) + replace(text.slice(start, start + length), count++);
+    cursor = start + length;
+    scan.lastIndex = cursor;
+  }
+  return out + text.slice(cursor);
+}
+function normalizeIllustrations(text) {
+  return replaceIllustrations(text, (_markup, index) => `\u27EAlv-illustration:${index + 1}\u27EB`);
+}
+function currentIllustrations(content) {
+  const pieces = [];
+  replaceIllustrations(content, (piece) => {
+    pieces.push(piece);
+    return piece;
+  });
+  let index = 0;
+  return {
+    replace(text) {
+      return replaceIllustrations(text, () => pieces[index++] ?? "");
+    },
+    remaining() {
+      return pieces.slice(index).join(`
+
+`);
+    }
+  };
+}
+function restoreCurrentIllustrations(translated, content) {
+  const current = currentIllustrations(content);
+  const text = current.replace(translated);
+  const rest = current.remaining();
+  return rest ? `${text}
+
+${rest}` : text;
+}
+
 // src/translate/protect.ts
 class ExcludeRuleError extends Error {
   constructor(message) {
@@ -911,6 +994,7 @@ function protect(source, options) {
   if (options.protectCode)
     text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
   text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
+  text = replaceIllustrations(text, hold);
   if (options.protectHtml) {
     text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
     text = text.replace(/<\/?[A-Za-z][\w:.-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'">\s/]+|\/(?!>))*)*\s*\/?>/g, (m) => hold(m));
@@ -1077,6 +1161,9 @@ function effectiveConnectionId(store, chatId) {
   return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
 }
 function sourceHash(text) {
+  return rawSourceHash(normalizeIllustrations(text));
+}
+function rawSourceHash(text) {
   let hash = 2166136261;
   for (let i = 0;i < text.length; i++) {
     hash ^= text.charCodeAt(i);
@@ -1347,9 +1434,9 @@ function directionPrompt(settings, direction, presets) {
 function formatContextMessage(message, settings) {
   const parts = [];
   if (settings.contextIncludeOriginal && message.content)
-    parts.push(`<original>${escapeContextValue(message.content)}</original>`);
+    parts.push(`<original>${escapeContextValue(normalizeIllustrations(message.content))}</original>`);
   if (settings.contextIncludeTranslation && message.translation)
-    parts.push(`<translation>${escapeContextValue(message.translation)}</translation>`);
+    parts.push(`<translation>${escapeContextValue(normalizeIllustrations(message.translation))}</translation>`);
   if (!parts.length)
     return "";
   return `<message role="${message.role}">
@@ -1513,10 +1600,11 @@ class TranslationError extends Error {
     this.name = "TranslationError";
   }
 }
-function recordToText(r) {
-  return restore(r.parts.filter((p) => p.trim()).join(`
+function recordToText(r, currentContent) {
+  const text = restore(r.parts.filter((p) => p.trim()).join(`
 
 `), r.pieces);
+  return currentContent === undefined ? text : restoreCurrentIllustrations(text, currentContent);
 }
 function partSources(protectedText, settings) {
   if (settings.translationUnit === "paragraph") {
@@ -1530,7 +1618,7 @@ function resumable(record, pieces, total, settings) {
   return !!record && sameArray(record.pieces, pieces) && record.total === total && (record.unit ?? "whole") === settings.translationUnit;
 }
 function sameArray(a, b) {
-  return a.length === b.length && a.every((v, i) => v === b[i]);
+  return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]));
 }
 async function translate(job, deps) {
   const { settings } = job;
@@ -1542,7 +1630,7 @@ async function translate(job, deps) {
       throw new TranslationError("\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.", record);
   };
   const resume = resumable(job.resume, prot.pieces, sources.length, settings) ? job.resume : null;
-  const record = resume ? { ...resume, parts: [...resume.parts], status: "partial", error: undefined, updatedAt: Date.now() } : { parts: [], pieces: prot.pieces, unit: settings.translationUnit, total: sources.length, truncatedPart: -1, status: "partial", updatedAt: Date.now() };
+  const record = resume ? { ...resume, pieces: prot.pieces, parts: [...resume.parts], status: "partial", error: undefined, updatedAt: Date.now() } : { parts: [], pieces: prot.pieces, unit: settings.translationUnit, total: sources.length, truncatedPart: -1, status: "partial", updatedAt: Date.now() };
   const requestFor = (part) => buildTranslationRequest({
     direction: job.direction,
     text: part,
@@ -1682,7 +1770,7 @@ async function translate(job, deps) {
 // src/display/paragraph-view.ts
 var PENDING_TEXT = "\uC544\uC9C1 \uBC88\uC5ED\uD558\uC9C0 \uC54A\uC740 \uBB38\uB2E8\uC785\uB2C8\uB2E4.";
 function sameArray2(a, b) {
-  return a.length === b.length && a.every((v, i) => v === b[i]);
+  return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]));
 }
 function pairParagraphs(content, record, settings) {
   if (record.unit === "paragraph") {
@@ -1690,22 +1778,27 @@ function pairParagraphs(content, record, settings) {
       const prot = protect(content, settings);
       const sources2 = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
       if (sameArray2(prot.pieces, record.pieces) && sources2.length === record.total) {
-        return {
-          kind: "paragraph",
-          pairs: sources2.map((s, i) => ({
-            source: restore(s, record.pieces),
-            translation: i < record.parts.length && record.parts[i].trim() ? restore(record.parts[i], record.pieces) : null
-          }))
-        };
+        const current = currentIllustrations(content);
+        const pairs = sources2.map((s, i) => ({
+          source: restore(s, prot.pieces),
+          translation: i < record.parts.length && record.parts[i].trim() ? current.replace(restore(record.parts[i], record.pieces)) : null
+        }));
+        const rest = current.remaining();
+        const last = pairs.findLast((pair) => pair.translation !== null);
+        if (rest && last)
+          last.translation += `
+
+${rest}`;
+        return { kind: "paragraph", pairs };
       }
     } catch {}
   }
   const sources = splitParagraphs(content);
-  const translations = splitParagraphs(recordToText(record));
+  const translations = splitParagraphs(recordToText(record, content));
   if (sources.length === translations.length && record.status !== "partial") {
     return { kind: "matched", pairs: sources.map((source, i) => ({ source, translation: translations[i] })) };
   }
-  return { kind: "whole", pairs: [{ source: content.trim(), translation: recordToText(record).trim() || null }] };
+  return { kind: "whole", pairs: [{ source: content.trim(), translation: recordToText(record, content).trim() || null }] };
 }
 function groupPairs(pairs) {
   return htmlGroups(pairs.map((p) => p.source)).map((group) => {
@@ -1785,7 +1878,7 @@ function renderMessage(content, record, settings, view) {
     return content;
   if (settings.displayMode === "paragraph")
     return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
-  const text = recordToText(record);
+  const text = recordToText(record, content);
   switch (settings.displayMode) {
     case "above":
       return `${text}
@@ -1829,7 +1922,37 @@ function skipFresh(mode, existing, force) {
   return mode === "fresh" && status === "done" && !force;
 }
 function recordFor(mt, content) {
-  return mt?.entries?.[sourceHash(content)] ?? null;
+  const key = recordKeyFor(mt, content);
+  return key ? mt?.entries?.[key] ?? null : null;
+}
+function recordKeyFor(mt, content) {
+  for (const key of [sourceHash(content), rawSourceHash(content)]) {
+    if (mt?.entries?.[key])
+      return key;
+  }
+  const current = [];
+  replaceIllustrations(content, (piece) => {
+    current.push(piece);
+    return piece;
+  });
+  if (current.length) {
+    const entries = Object.entries(mt?.entries ?? {}).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+    for (const [key, record] of entries) {
+      const original = [];
+      replaceIllustrations(restore(record.parts.join(`
+
+`), record.pieces), (piece) => {
+        original.push(piece);
+        return piece;
+      });
+      if (original.length !== current.length)
+        continue;
+      const candidate = replaceIllustrations(content, (_piece, index) => original[index]);
+      if (rawSourceHash(candidate) === key)
+        return key;
+    }
+  }
+  return null;
 }
 function clearTranslation(mt, key) {
   delete mt.entries[key];
@@ -1925,9 +2048,9 @@ function viewOf(chatId, message, settings, overrideRecord, position = 0) {
   const record = overrideRecord !== undefined ? overrideRecord : recordFor(mt, message.content);
   return {
     messageId: message.id,
-    sourceKey: sourceHash(message.content ?? ""),
+    sourceKey: recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? ""),
     role: message.role,
-    text: record && record.parts.some((p) => p.trim()) ? recordToText(record) : null,
+    text: record && record.parts.some((p) => p.trim()) ? recordToText(record, message.content) : null,
     status: record?.status ?? null,
     hasMore: record ? recordHasMore(record) : false,
     progress: record && record.total > 1 ? { done: record.parts.length, total: record.total } : null,
@@ -1952,7 +2075,7 @@ function isHidden(m) {
 }
 function contextBefore(messages, end) {
   return messages.slice(0, end).filter((m) => (m.role === "user" || m.role === "assistant") && !isHidden(m) && typeof m.content === "string").map((m) => {
-    const entry = readTranslations(m)?.entries[sourceHash(m.content)];
+    const entry = recordFor(readTranslations(m), m.content);
     return { role: m.role, content: m.content, translation: entry && entry.parts.length ? recordToText(entry) : null };
   });
 }
@@ -1984,30 +2107,66 @@ function errorText(e) {
     return "\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.";
   return friendlyError(e instanceof Error ? e.message : String(e));
 }
+function warnAutomatic(reason, context) {
+  spindle.log.warn(`[translator] auto translate: ${reason} ${JSON.stringify(context)}`);
+}
 async function translateMessage(uid, chatId, messageId, mode, options) {
   const key = jobKey(chatId, messageId);
-  if (jobs.has(key)) {
-    if (!options.automatic)
+  const context = { chatId, messageId, generationId: options.generationId, generationType: options.generationType };
+  const warn = (reason, details = {}) => {
+    if (options.automatic)
+      warnAutomatic(reason, { ...context, ...details });
+  };
+  while (jobs.has(key)) {
+    if (!options.automatic) {
       spindle.toast.info("\uC774 \uBA54\uC2DC\uC9C0\uB294 \uC774\uBBF8 \uBC88\uC5ED \uC911\uC785\uB2C8\uB2E4.", { userId: uid });
-    return;
+      return;
+    }
+    warn("in-flight: waiting for the current translation");
+    await jobs.get(key).finished;
   }
   const controller = new AbortController;
-  jobs.set(key, controller);
+  let finish;
+  const finished = new Promise((resolve) => {
+    finish = resolve;
+  });
+  jobs.set(key, { controller, finished });
   let message;
+  let source;
   try {
     const store = await loadStore(uid);
     const settings = settingsFor(store, chatId);
+    if (options.automatic && !settings.autoTranslate)
+      return;
     const messages = await getMessages(chatId);
     const index = messages.findIndex((m) => m.id === messageId);
     message = messages[index];
-    if (!message || !message.content.trim())
+    if (!message) {
+      warn("message-not-found");
       return;
-    const hash = sourceHash(message.content);
-    const existing = readTranslations(message)?.entries[hash];
-    if (skipFresh(mode, existing, options.force))
+    }
+    if (options.automatic && message.role !== "assistant") {
+      warn("unexpected-role", { role: message.role });
       return;
+    }
+    source = options.generatedContent ?? message.content;
+    if (sourceHash(source) !== sourceHash(message.content) && !message.swipes?.some((swipe) => sourceHash(swipe) === sourceHash(source))) {
+      warn("generated-content-not-found", { sourceKey: sourceHash(source) });
+      source = undefined;
+      return;
+    }
+    if (!source.trim()) {
+      warn("empty-content");
+      return;
+    }
+    const hash = sourceHash(source);
+    const existingKey = recordKeyFor(readTranslations(message), source);
+    const existing = existingKey ? readTranslations(message)?.entries[existingKey] : undefined;
+    if (skipFresh(mode, existing, options.force)) {
+      warn("already-translated", { sourceKey: hash, status: existing?.status });
+      return;
+    }
     await sendView(uid, chatId, message);
-    const source = message.content;
     const record = await translate({
       direction: "incoming",
       source,
@@ -2021,27 +2180,39 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       signal: controller.signal,
       onProgress: async (progress) => {
         const updated = await writeTranslations(chatId, messageId, (mt) => {
+          if (existingKey)
+            delete mt.entries[existingKey];
+          delete mt.entries[rawSourceHash(source)];
           mt.entries[hash] = progress;
           mt.hidden = false;
         });
-        if (updated)
-          await sendView(uid, chatId, updated);
+        if (!updated)
+          throw new Error("Message disappeared while saving translation progress");
+        await sendView(uid, chatId, updated);
       }
     });
     const saved = await writeTranslations(chatId, messageId, (mt) => {
+      if (existingKey)
+        delete mt.entries[existingKey];
+      delete mt.entries[rawSourceHash(source)];
       mt.entries[hash] = record;
       mt.hidden = false;
     });
-    if (record.status === "partial" && !options.automatic) {
-      spindle.toast.info('\uBC88\uC5ED\uC774 \uC911\uAC04\uC5D0 \uB04A\uACBC\uC2B5\uB2C8\uB2E4. "\uC774\uC5B4\uC11C \uBC88\uC5ED"\uC744 \uB204\uB974\uBA74 \uC774\uC5B4\uC11C \uBC88\uC5ED\uD569\uB2C8\uB2E4.', { userId: uid });
+    if (!saved)
+      throw new Error("Message disappeared while saving translation");
+    if (record.status === "partial") {
+      warn("partial-translation", { sourceKey: hash });
+      if (!options.automatic)
+        spindle.toast.info('\uBC88\uC5ED\uC774 \uC911\uAC04\uC5D0 \uB04A\uACBC\uC2B5\uB2C8\uB2E4. "\uC774\uC5B4\uC11C \uBC88\uC5ED"\uC744 \uB204\uB974\uBA74 \uC774\uC5B4\uC11C \uBC88\uC5ED\uD569\uB2C8\uB2E4.', { userId: uid });
     }
     if (saved)
       message = saved;
   } catch (e) {
     const text = errorText(e);
+    warn("translation-failed", { error: text });
     const partial = e instanceof TranslationError ? e.record : null;
-    if (message) {
-      const hash = sourceHash(message.content);
+    if (message && source !== undefined) {
+      const hash = sourceHash(source);
       const updated = await writeTranslations(chatId, messageId, (mt) => {
         const prev = mt.entries[hash];
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: "error", updatedAt: 0 };
@@ -2052,9 +2223,13 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
     }
     spindle.toast.error(`\uBC88\uC5ED \uC2E4\uD328: ${text}`, { userId: uid });
   } finally {
-    jobs.delete(key);
-    if (message)
-      await sendView(uid, chatId, message).catch(() => {});
+    try {
+      jobs.delete(key);
+      if (message)
+        await sendView(uid, chatId, message).catch((e) => warn("view-update-failed", { error: errorText(e) }));
+    } finally {
+      finish();
+    }
   }
 }
 async function translateOutgoing(uid, chatId, text) {
@@ -2086,24 +2261,30 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const settings = settingsFor(store, ctx.chatId);
   if (isTranslationHidden(mt.hidden, settings.displayMode))
     return;
-  const record = mt.entries[sourceHash(ctx.content)];
+  const record = recordFor(mt, ctx.content);
   if (!record || !record.parts.some((p) => p.trim()))
     return;
   return { content: renderMessage(ctx.content, record, settings, store.view) };
 });
 spindle.on("GENERATION_ENDED", (payload, userId) => {
-  if (!payload?.chatId || !payload.messageId || payload.error)
+  const context = { chatId: payload?.chatId, messageId: payload?.messageId, generationId: payload?.generationId, generationType: payload?.generationType };
+  if (payload?.generationType === "impersonate")
     return;
-  (async () => {
-    const store = await loadStore(userId);
-    if (!settingsFor(store, payload.chatId).autoTranslate)
-      return;
-    const messages = await getMessages(payload.chatId);
-    const message = messages.find((m) => m.id === payload.messageId);
-    if (!message || message.role !== "assistant")
-      return;
-    await translateMessage(userId, payload.chatId, payload.messageId, "fresh", { force: false, automatic: true });
-  })().catch((e) => spindle.log.error(`[translator] auto translate: ${errorText(e)}`));
+  if (payload?.error) {
+    warnAutomatic("generation-error", { ...context, error: payload.error });
+    return;
+  }
+  if (!payload?.chatId || !payload.messageId) {
+    warnAutomatic(!payload?.chatId ? "missing-chat-id" : "missing-message-id", context);
+    return;
+  }
+  translateMessage(userId, payload.chatId, payload.messageId, "fresh", {
+    force: false,
+    automatic: true,
+    generatedContent: payload.content,
+    generationId: payload.generationId,
+    generationType: payload.generationType
+  }).catch((e) => warnAutomatic("handler-failed", { ...context, error: errorText(e) }));
 });
 for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "MESSAGE_DELETED", "MESSAGE_SENT"]) {
   spindle.on(event, (payload) => {
@@ -2205,7 +2386,7 @@ async function handle(msg, uid) {
       await translateMessage(uid, msg.chatId, msg.messageId, "continue", { force: true, automatic: false });
       return;
     case "cancel":
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
+      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
       return;
     case "set_hidden": {
       const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
@@ -2216,9 +2397,9 @@ async function handle(msg, uid) {
       return;
     }
     case "delete_translation": {
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
+      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
       const key = typeof msg.sourceKey === "string" && msg.sourceKey ? msg.sourceKey : null;
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? sourceHash(message.content ?? "")));
+      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? "")));
       if (updated)
         await sendView(uid, msg.chatId, updated);
       return;

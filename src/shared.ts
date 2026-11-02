@@ -1,5 +1,6 @@
 // Types, defaults and messages shared by the backend and frontend.
 
+import { normalizeIllustrations } from './illustrations';
 import { lenientTags } from './translate/protect';
 
 /**
@@ -244,8 +245,13 @@ export function effectiveConnectionId(store: Store, chatId: string | null): stri
   return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
 }
 
-/** FNV-1a hash of a message source, used to tie a translation to the exact text it came from. */
+/** Stable across LV-Illust tag/image/status changes; ordinary prose edits keep separate records. */
 export function sourceHash(text: string): string {
+  return rawSourceHash(normalizeIllustrations(text));
+}
+
+/** Pre-0.3.4 key, retained for reading existing message metadata. */
+export function rawSourceHash(text: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     hash ^= text.charCodeAt(i);
@@ -276,7 +282,7 @@ export interface TranslationRecord {
 
 export interface MessageTranslations {
   v: 1;
-  /** Keyed by sourceHash(content), so every swipe and edit keeps its own translation. */
+  /** Keyed by sourceHash(content); illustration replacements share a key, prose edits do not. */
   entries: Record<string, TranslationRecord>;
   /** Translation hidden for this message (show the original). */
   hidden?: boolean;
@@ -299,7 +305,7 @@ export interface MessageView {
   role: 'user' | 'assistant' | 'system';
   /** Translation of the current content (the visible swipe), if any. */
   text: string | null;
-  /** sourceHash of the content this view describes, i.e. the visible swipe's storage key. */
+  /** The visible swipe's actual storage key (normalized, or a legacy raw hash). */
   sourceKey: string;
   status: TranslationStatus | null;
   hasMore: boolean;

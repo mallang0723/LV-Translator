@@ -8,7 +8,7 @@ export function renderMessage(content: string, record: TranslationRecord | null 
   // Keep the original visible until translated text exists, as in the backend render processor.
   if (!record || !record.parts.some((p) => p.trim())) return content;
   if (settings.displayMode === 'paragraph') return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
-  const text = recordToText(record);
+  const text = recordToText(record, content);
   switch (settings.displayMode) {
     case 'above':
       return `${text}\n\n<hr class="stt-separator">\n\n${content}`;

@@ -5,9 +5,12 @@
 //   1. user exclude rules (<tag> elements, /regex/, "start ... end" ranges)
 //   1b. elements named in the excluded tag list (excludeTags), nested tags counted
 //   2. fenced code blocks                      (protectCode)
-//   3. <style>/<script> elements (always), comments (protectHtml)
-//   4. every other HTML tag, attributes and all (protectHtml) — text between tags stays translatable
+//   3. <style>/<script> elements (always)
+//   3b. LV-Illust tags, image Markdown and status markers (always)
+//   4. HTML comments and tags, attributes and all (protectHtml) — inner text stays translatable
 //   5. {{macros}}
+
+import { replaceIllustrations } from '../illustrations';
 
 export interface ProtectOptions {
   protectHtml: boolean;
@@ -165,6 +168,8 @@ export function protect(source: string, options: ProtectOptions): Protected {
   if (options.protectCode) text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
   // <style> and <script> are never translated, whatever the HTML setting says.
   text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
+  // Always hold illustrations atomically, including failure/skip text and paired tags.
+  text = replaceIllustrations(text, hold);
   if (options.protectHtml) {
     text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
     // Tags: opening, closing, self-closing, with quoted attributes that may contain ">".

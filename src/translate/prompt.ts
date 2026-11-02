@@ -6,6 +6,8 @@
 // Ported from Marinara-Translation-Tools 1.5.4 extension.js (MIT, (c) 2026 minikkuen). The user message
 // wording follows Marinara Engine (AGPL-3.0); see THIRD_PARTY_NOTICES.md.
 
+import { normalizeIllustrations } from '../illustrations';
+
 import { BASE_PROMPT } from '../presets/catalog';
 import { effectiveGuides, type GuideLibrary } from '../bundles';
 import { MARINARA_TRANSLATION_REFERENCE_PROMPTS, MARINARA_TRANSLATION_REFERENCE_RENDERERS } from '../presets/upstream/reference';
@@ -83,8 +85,8 @@ export function directionPrompt(settings: ChatSettings, direction: Direction, pr
 
 function formatContextMessage(message: ContextMessage, settings: ChatSettings): string {
   const parts: string[] = [];
-  if (settings.contextIncludeOriginal && message.content) parts.push(`<original>${escapeContextValue(message.content)}</original>`);
-  if (settings.contextIncludeTranslation && message.translation) parts.push(`<translation>${escapeContextValue(message.translation)}</translation>`);
+  if (settings.contextIncludeOriginal && message.content) parts.push(`<original>${escapeContextValue(normalizeIllustrations(message.content))}</original>`);
+  if (settings.contextIncludeTranslation && message.translation) parts.push(`<translation>${escapeContextValue(normalizeIllustrations(message.translation))}</translation>`);
   if (!parts.length) return '';
   return `<message role="${message.role}">\n${parts.join('\n')}\n</message>`;
 }

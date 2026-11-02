@@ -3,6 +3,8 @@
 // paragraph render exactly like the original message. Paragraph text is kept between blank
 // lines so Markdown is parsed inside the wrapper elements.
 
+import { currentIllustrations, normalizeIllustrations } from '../illustrations';
+
 import type { ChatSettings, ParagraphOrder, ParagraphView, TranslationRecord } from '../shared';
 import { partSources, recordToText } from '../translate/engine';
 import { htmlGroups, splitParagraphs } from '../translate/paragraphs';
@@ -24,7 +26,7 @@ export interface Pairing {
 }
 
 function sameArray(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((v, i) => v === b[i]);
+  return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]!));
 }
 
 export function pairParagraphs(content: string, record: TranslationRecord, settings: ChatSettings): Pairing {
@@ -33,24 +35,27 @@ export function pairParagraphs(content: string, record: TranslationRecord, setti
       const prot = protect(content, settings);
       const sources = partSources(prot.text, { ...settings, translationUnit: 'paragraph' });
       if (sameArray(prot.pieces, record.pieces) && sources.length === record.total) {
-        return {
-          kind: 'paragraph',
-          pairs: sources.map((s, i) => ({
-            source: restore(s, record.pieces),
-            translation: i < record.parts.length && record.parts[i]!.trim() ? restore(record.parts[i]!, record.pieces) : null,
-          })),
-        };
+        const current = currentIllustrations(content);
+        const pairs = sources.map((s, i) => ({
+          source: restore(s, prot.pieces),
+          translation: i < record.parts.length && record.parts[i]!.trim()
+            ? current.replace(restore(record.parts[i]!, record.pieces)) : null,
+        }));
+        const rest = current.remaining();
+        const last = pairs.findLast((pair) => pair.translation !== null);
+        if (rest && last) last.translation += `\n\n${rest}`;
+        return { kind: 'paragraph', pairs };
       }
     } catch {
       // exclude rules changed and no longer parse: fall through to matching by count
     }
   }
   const sources = splitParagraphs(content);
-  const translations = splitParagraphs(recordToText(record));
+  const translations = splitParagraphs(recordToText(record, content));
   if (sources.length === translations.length && record.status !== 'partial') {
     return { kind: 'matched', pairs: sources.map((source, i) => ({ source, translation: translations[i]! })) };
   }
-  return { kind: 'whole', pairs: [{ source: content.trim(), translation: recordToText(record).trim() || null }] };
+  return { kind: 'whole', pairs: [{ source: content.trim(), translation: recordToText(record, content).trim() || null }] };
 }
 
 /** Merges pairs whose HTML spans several paragraphs, so every block is rendered whole. */

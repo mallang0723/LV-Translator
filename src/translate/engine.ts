@@ -3,6 +3,8 @@
 // autoContinue is on, otherwise when the user asks). Progress is reported after every part
 // so a failure keeps what was already translated.
 
+import { normalizeIllustrations, restoreCurrentIllustrations } from '../illustrations';
+
 import type { ChatSettings, TranslationRecord } from '../shared';
 import type { GuideLibrary } from '../bundles';
 import { isTruncatedFinish, joinContinuation, splitForTranslation, TRANSLATION_CHUNK_CHARS } from './chunk';
@@ -52,8 +54,9 @@ export class TranslationError extends Error {
   }
 }
 
-export function recordToText(r: TranslationRecord): string {
-  return restore(r.parts.filter((p) => p.trim()).join('\n\n'), r.pieces);
+export function recordToText(r: TranslationRecord, currentContent?: string): string {
+  const text = restore(r.parts.filter((p) => p.trim()).join('\n\n'), r.pieces);
+  return currentContent === undefined ? text : restoreCurrentIllustrations(text, currentContent);
 }
 
 /** The source parts that are translated one request each. */
@@ -84,7 +87,7 @@ export function requestsNeeded(source: string, settings: ChatSettings, record: T
 }
 
 function sameArray(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((v, i) => v === b[i]);
+  return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]!));
 }
 
 export async function translate(job: EngineJob, deps: EngineDeps): Promise<TranslationRecord> {
@@ -99,7 +102,7 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
   // A resumable record must come from the same protected text and split.
   const resume = resumable(job.resume, prot.pieces, sources.length, settings) ? job.resume! : null;
   const record: TranslationRecord = resume
-    ? { ...resume, parts: [...resume.parts], status: 'partial', error: undefined, updatedAt: Date.now() }
+    ? { ...resume, pieces: prot.pieces, parts: [...resume.parts], status: 'partial', error: undefined, updatedAt: Date.now() }
     : { parts: [], pieces: prot.pieces, unit: settings.translationUnit, total: sources.length, truncatedPart: -1, status: 'partial', updatedAt: Date.now() };
 
   const requestFor = (part: string) =>

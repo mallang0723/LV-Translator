@@ -19,6 +19,7 @@ import {
   recordHasMore,
   settingsFor,
   sourceHash,
+  rawSourceHash,
   type Store,
   type ToBackend,
   type ToFrontend,
@@ -26,7 +27,7 @@ import {
 } from './shared';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { renderMessage } from './display/render';
-import { clearTranslation, isTranslationHidden, recordFor, skipFresh } from './message-ui';
+import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, skipFresh } from './message-ui';
 import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
@@ -45,6 +46,7 @@ interface ChatMessage {
   metadata?: Record<string, unknown>;
   index_in_chat?: number;
   name?: string;
+  swipes?: string[];
 }
 
 // ---- store ----
@@ -140,7 +142,7 @@ async function writeTranslations(chatId: string, messageId: string, change: (mt:
 
 // ---- views ----
 
-const jobs = new Map<string, AbortController>();
+const jobs = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 const jobKey = (chatId: string, messageId: string) => `${chatId}:${messageId}`;
 
 function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, overrideRecord?: TranslationRecord | null, position = 0): MessageView {
@@ -148,9 +150,9 @@ function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, ov
   const record = overrideRecord !== undefined ? overrideRecord : recordFor(mt, message.content);
   return {
     messageId: message.id,
-    sourceKey: sourceHash(message.content ?? ''),
+    sourceKey: recordKeyFor(mt, message.content ?? '') ?? sourceHash(message.content ?? ''),
     role: message.role,
-    text: record && record.parts.some((p) => p.trim()) ? recordToText(record) : null,
+    text: record && record.parts.some((p) => p.trim()) ? recordToText(record, message.content) : null,
     status: record?.status ?? null,
     hasMore: record ? recordHasMore(record) : false,
     progress: record && record.total > 1 ? { done: record.parts.length, total: record.total } : null,
@@ -185,7 +187,7 @@ function contextBefore(messages: ChatMessage[], end: number): ContextMessage[] {
     .slice(0, end)
     .filter((m) => (m.role === 'user' || m.role === 'assistant') && !isHidden(m) && typeof m.content === 'string')
     .map((m) => {
-      const entry = readTranslations(m)?.entries[sourceHash(m.content)];
+      const entry = recordFor(readTranslations(m), m.content);
       return { role: m.role as 'user' | 'assistant', content: m.content, translation: entry && entry.parts.length ? recordToText(entry) : null };
     });
 }
@@ -223,28 +225,77 @@ function errorText(e: unknown): string {
   return friendlyError(e instanceof Error ? e.message : String(e));
 }
 
-async function translateMessage(uid: Uid, chatId: string, messageId: string, mode: 'fresh' | 'continue', options: { force: boolean; automatic: boolean }): Promise<void> {
+interface TranslationOptions {
+  force: boolean;
+  automatic: boolean;
+  generatedContent?: string;
+  generationId?: string;
+  generationType?: string;
+}
+
+function warnAutomatic(reason: string, context: Record<string, unknown>): void {
+  spindle.log.warn(`[translator] auto translate: ${reason} ${JSON.stringify(context)}`);
+}
+
+async function translateMessage(uid: Uid, chatId: string, messageId: string, mode: 'fresh' | 'continue', options: TranslationOptions): Promise<void> {
   const key = jobKey(chatId, messageId);
-  if (jobs.has(key)) {
-    if (!options.automatic) spindle.toast.info('이 메시지는 이미 번역 중입니다.', { userId: uid });
-    return;
+  const context = { chatId, messageId, generationId: options.generationId, generationType: options.generationType };
+  const warn = (reason: string, details: Record<string, unknown> = {}) => {
+    if (options.automatic) warnAutomatic(reason, { ...context, ...details });
+  };
+  // A new generation can finish on the same message while its old swipe is
+  // translating. Serialize metadata writes, but do not discard the new event.
+  while (jobs.has(key)) {
+    if (!options.automatic) {
+      spindle.toast.info('이 메시지는 이미 번역 중입니다.', { userId: uid });
+      return;
+    }
+    warn('in-flight: waiting for the current translation');
+    await jobs.get(key)!.finished;
   }
   const controller = new AbortController();
-  jobs.set(key, controller);
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => { finish = resolve; });
+  jobs.set(key, { controller, finished });
   let message: ChatMessage | undefined;
+  let source: string | undefined;
   try {
     const store = await loadStore(uid);
     const settings = settingsFor(store, chatId);
+    if (options.automatic && !settings.autoTranslate) return;
     const messages = await getMessages(chatId);
     const index = messages.findIndex((m) => m.id === messageId);
     message = messages[index];
-    if (!message || !message.content.trim()) return;
-    const hash = sourceHash(message.content);
-    const existing = readTranslations(message)?.entries[hash];
-    if (skipFresh(mode, existing, options.force)) return;
+    if (!message) {
+      warn('message-not-found');
+      return;
+    }
+    if (options.automatic && message.role !== 'assistant') {
+      warn('unexpected-role', { role: message.role });
+      return;
+    }
+    // GENERATION_ENDED.content is the generated swipe, whereas getMessages()
+    // returns the currently displayed swipe. Navigation can make them differ;
+    // LV-Illust can also replace markup on that same swipe before this read.
+    source = options.generatedContent ?? message.content;
+    if (sourceHash(source) !== sourceHash(message.content) && !message.swipes?.some((swipe) => sourceHash(swipe) === sourceHash(source!))) {
+      warn('generated-content-not-found', { sourceKey: sourceHash(source) });
+      source = undefined;
+      return;
+    }
+    if (!source.trim()) {
+      warn('empty-content');
+      return;
+    }
+    const hash = sourceHash(source);
+    const existingKey = recordKeyFor(readTranslations(message), source);
+    const existing = existingKey ? readTranslations(message)?.entries[existingKey] : undefined;
+    if (skipFresh(mode, existing, options.force)) {
+      warn('already-translated', { sourceKey: hash, status: existing?.status });
+      return;
+    }
     await sendView(uid, chatId, message);
 
-    const source = message.content;
     const record = await translate(
       {
         direction: 'incoming',
@@ -260,26 +311,34 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         signal: controller.signal,
         onProgress: async (progress) => {
           const updated = await writeTranslations(chatId, messageId, (mt) => {
+            if (existingKey) delete mt.entries[existingKey];
+            delete mt.entries[rawSourceHash(source!)];
             mt.entries[hash] = progress;
             mt.hidden = false;
           });
-          if (updated) await sendView(uid, chatId, updated);
+          if (!updated) throw new Error('Message disappeared while saving translation progress');
+          await sendView(uid, chatId, updated);
         },
       },
     );
     const saved = await writeTranslations(chatId, messageId, (mt) => {
+      if (existingKey) delete mt.entries[existingKey];
+      delete mt.entries[rawSourceHash(source!)];
       mt.entries[hash] = record;
       mt.hidden = false;
     });
-    if (record.status === 'partial' && !options.automatic) {
-      spindle.toast.info('번역이 중간에 끊겼습니다. "이어서 번역"을 누르면 이어서 번역합니다.', { userId: uid });
+    if (!saved) throw new Error('Message disappeared while saving translation');
+    if (record.status === 'partial') {
+      warn('partial-translation', { sourceKey: hash });
+      if (!options.automatic) spindle.toast.info('번역이 중간에 끊겼습니다. "이어서 번역"을 누르면 이어서 번역합니다.', { userId: uid });
     }
     if (saved) message = saved;
   } catch (e) {
     const text = errorText(e);
+    warn('translation-failed', { error: text });
     const partial = e instanceof TranslationError ? e.record : null;
-    if (message) {
-      const hash = sourceHash(message.content);
+    if (message && source !== undefined) {
+      const hash = sourceHash(source);
       const updated = await writeTranslations(chatId, messageId, (mt) => {
         const prev = mt.entries[hash];
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: 'error' as const, updatedAt: 0 };
@@ -289,8 +348,14 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     }
     spindle.toast.error(`번역 실패: ${text}`, { userId: uid });
   } finally {
-    jobs.delete(key);
-    if (message) await sendView(uid, chatId, message).catch(() => {});
+    try {
+      // Finish the old job's view before a queued job begins publishing its own.
+      // The view should show busy=false once this job is done.
+      jobs.delete(key);
+      if (message) await sendView(uid, chatId, message).catch((e) => warn('view-update-failed', { error: errorText(e) }));
+    } finally {
+      finish();
+    }
   }
 }
 
@@ -325,7 +390,7 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const settings = settingsFor(store, ctx.chatId);
   // The paragraph view has no hide toggle, so a "hidden" flag left over from another mode must not hide it.
   if (isTranslationHidden(mt.hidden, settings.displayMode)) return;
-  const record = mt.entries[sourceHash(ctx.content)];
+  const record = recordFor(mt, ctx.content);
   if (!record || !record.parts.some((p) => p.trim())) return;
   return { content: renderMessage(ctx.content, record, settings, store.view) };
 });
@@ -333,15 +398,24 @@ spindle.registerMessageContentProcessor(async (ctx) => {
 // ---- events ----
 
 spindle.on('GENERATION_ENDED', (payload, userId) => {
-  if (!payload?.chatId || !payload.messageId || payload.error) return;
-  void (async () => {
-    const store = await loadStore(userId);
-    if (!settingsFor(store, payload.chatId).autoTranslate) return;
-    const messages = await getMessages(payload.chatId);
-    const message = messages.find((m) => m.id === payload.messageId);
-    if (!message || message.role !== 'assistant') return;
-    await translateMessage(userId, payload.chatId, payload.messageId!, 'fresh', { force: false, automatic: true });
-  })().catch((e) => spindle.log.error(`[translator] auto translate: ${errorText(e)}`));
+  const context = { chatId: payload?.chatId, messageId: payload?.messageId, generationId: payload?.generationId, generationType: payload?.generationType };
+  // Impersonation produces user text (or an unsaved draft), not an AI reply.
+  if (payload?.generationType === 'impersonate') return;
+  if (payload?.error) {
+    warnAutomatic('generation-error', { ...context, error: payload.error });
+    return;
+  }
+  if (!payload?.chatId || !payload.messageId) {
+    warnAutomatic(!payload?.chatId ? 'missing-chat-id' : 'missing-message-id', context);
+    return;
+  }
+  void translateMessage(userId, payload.chatId, payload.messageId, 'fresh', {
+    force: false,
+    automatic: true,
+    generatedContent: payload.content,
+    generationId: payload.generationId,
+    generationType: payload.generationType,
+  }).catch((e) => warnAutomatic('handler-failed', { ...context, error: errorText(e) }));
 });
 
 for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_SENT'] as const) {
@@ -437,7 +511,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       await translateMessage(uid, msg.chatId, msg.messageId, 'continue', { force: true, automatic: false });
       return;
     case 'cancel':
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
+      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
       return;
     case 'set_hidden': {
       const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
@@ -447,10 +521,10 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       return;
     }
     case 'delete_translation': {
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.abort();
+      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
       // Only the translation of the swipe that was showing; the other swipes keep theirs.
       const key = typeof msg.sourceKey === 'string' && msg.sourceKey ? msg.sourceKey : null;
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? sourceHash(message.content ?? '')));
+      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? '') ?? sourceHash(message.content ?? '')));
       if (updated) await sendView(uid, msg.chatId, updated);
       return;
     }
