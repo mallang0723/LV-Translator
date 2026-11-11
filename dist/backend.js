@@ -1027,6 +1027,7 @@ function restore(text, pieces) {
 }
 
 // src/shared.ts
+var VIEW_WINDOW = 30;
 var DISPLAY_MODES = ["below", "above", "only", "collapsed", "collapsed-source", "paragraph"];
 var FONT_MIN = 12;
 var FONT_MAX = 32;
@@ -1746,14 +1747,14 @@ async function translate(job, deps) {
         const i = record.total - 1;
         const before = record.parts[i];
         record.truncatedPart = i;
-        const complete2 = await continuePart(i, 1);
+        const complete = await continuePart(i, 1);
         const problem = checkMarkers(sources[i], record.parts[i]);
         if (problem) {
           record.parts[i] = before;
           record.truncatedPart = -1;
           throw new TranslationError(`${problem} \uC774\uC5B4\uC11C \uBC88\uC5ED\uD55C \uB0B4\uC6A9\uC740 \uBC84\uB838\uC2B5\uB2C8\uB2E4.`, record);
         }
-        if (!complete2)
+        if (!complete)
           return finish();
         record.truncatedPart = -1;
       }
@@ -1785,10 +1786,10 @@ function pairParagraphs(content, record, settings) {
   if (record.unit === "paragraph") {
     try {
       const prot = protect(content, settings);
-      const sources2 = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
-      if (sameArray2(prot.pieces, record.pieces) && sources2.length === record.total) {
+      const sources = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
+      if (sameArray2(prot.pieces, record.pieces) && sources.length === record.total) {
         const current = currentIllustrations(content);
-        const pairs = sources2.map((s, i) => {
+        const pairs = sources.map((s, i) => {
           const text = cleanReply(record.parts[i] ?? "");
           return {
             source: restore(s, prot.pieces),
@@ -2017,29 +2018,67 @@ function readTranslations(message) {
   return mt;
 }
 var chatCache = new Map;
-var chatLoads = new Map;
-function cacheMessages(chatId, messages) {
-  chatCache.set(chatId, new Map(messages.map((m) => [m.id, readTranslations(m)])));
-}
-async function getMessages(chatId) {
-  const messages = await spindle.chat.getMessages(chatId);
-  cacheMessages(chatId, messages);
-  return messages;
-}
-function cachedChat(chatId) {
-  const hit = chatCache.get(chatId);
-  if (hit)
-    return Promise.resolve(hit);
-  let load = chatLoads.get(chatId);
-  if (!load) {
-    load = getMessages(chatId).then(() => chatCache.get(chatId)).finally(() => chatLoads.delete(chatId));
-    chatLoads.set(chatId, load);
+function snapshotFor(chatId) {
+  let snapshot = chatCache.get(chatId);
+  if (!snapshot) {
+    snapshot = { messages: new Map, loaded: false, reading: false, invalidations: 0, changes: new Map };
+    chatCache.set(chatId, snapshot);
   }
-  return load;
+  return snapshot;
 }
-async function writeTranslations(chatId, messageId, change) {
-  const messages = await getMessages(chatId);
-  const message = messages.find((m) => m.id === messageId);
+function cacheMessage(snapshot, message) {
+  const current = snapshot.messages.get(message.id);
+  if (current)
+    Object.assign(current, message);
+  else
+    snapshot.messages.set(message.id, message);
+  if (snapshot.reading)
+    snapshot.changes.set(message.id, snapshot.messages.get(message.id));
+}
+async function cachedChat(chatId, refresh = false) {
+  const snapshot = snapshotFor(chatId);
+  if (snapshot.load)
+    return snapshot.load;
+  if (snapshot.loaded && !refresh)
+    return snapshot;
+  snapshot.changes.clear();
+  snapshot.reading = true;
+  const invalidations = snapshot.invalidations;
+  snapshot.load = (async () => {
+    const messages = await spindle.chat.getMessages(chatId);
+    const changes = new Map(snapshot.changes);
+    const present = new Set(messages.map((message) => message.id));
+    for (const id of snapshot.messages.keys())
+      if (!present.has(id))
+        snapshot.messages.delete(id);
+    for (const message of messages) {
+      const changed = changes.get(message.id);
+      if (changed)
+        changed.role = message.role;
+      if (!changes.has(message.id))
+        cacheMessage(snapshot, message);
+    }
+    for (const [id, message] of changes) {
+      if (message)
+        cacheMessage(snapshot, message);
+      else
+        snapshot.messages.delete(id);
+    }
+    snapshot.loaded = snapshot.invalidations === invalidations;
+    return snapshot;
+  })().finally(() => {
+    snapshot.load = undefined;
+    snapshot.reading = false;
+    snapshot.changes.clear();
+  });
+  return snapshot.load;
+}
+function orderedMessages(snapshot) {
+  return [...snapshot.messages.values()].sort((a, b) => (a.index_in_chat ?? 0) - (b.index_in_chat ?? 0));
+}
+async function writeTranslations(chatId, messageId, change, snapshot) {
+  snapshot ??= await cachedChat(chatId);
+  const message = snapshot.messages.get(messageId);
   if (!message)
     return null;
   const mt = structuredClone(readTranslations(message) ?? { v: 1, entries: {} });
@@ -2048,9 +2087,14 @@ async function writeTranslations(chatId, messageId, change) {
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE))
     delete mt.entries[k];
   const metadata = { ...message.metadata ?? {}, [METADATA_KEY]: mt };
+  const previousMetadata = message.metadata;
   await spindle.chat.updateMessage(chatId, messageId, { metadata });
-  message.metadata = metadata;
-  chatCache.get(chatId)?.set(messageId, mt);
+  if (!snapshot.messages.has(messageId))
+    return null;
+  if (message.metadata === previousMetadata)
+    message.metadata = metadata;
+  if (snapshot.reading)
+    snapshot.changes.set(messageId, message);
   return message;
 }
 var jobs = new Map;
@@ -2073,10 +2117,21 @@ function viewOf(chatId, message, settings, overrideRecord, position = 0) {
     name: typeof message.name === "string" ? message.name : ""
   };
 }
-async function sendChatViews(uid, chatId) {
+async function sendChatViews(uid, chatId, messageIds, replace = true) {
   const settings = settingsFor(await loadStore(uid), chatId);
-  const messages = await getMessages(chatId);
-  send({ type: "views", chatId, views: messages.map((m, i) => viewOf(chatId, m, settings, undefined, i)), replace: true }, uid);
+  const snapshot = await cachedChat(chatId);
+  const ids = messageIds ? [...new Set(messageIds.filter((id) => typeof id === "string"))].slice(0, VIEW_WINDOW) : orderedMessages(snapshot).slice(-VIEW_WINDOW).map((message) => message.id);
+  const views = ids.flatMap((id) => {
+    const message = snapshot.messages.get(id);
+    if (!message || !readTranslations(message) && !jobs.has(jobKey(chatId, id)))
+      return [];
+    return [viewOf(chatId, message, settings)];
+  });
+  const plainIds = ids.filter((id) => {
+    const message = snapshot.messages.get(id);
+    return message && message.role !== "system" && !readTranslations(message) && !jobs.has(jobKey(chatId, id));
+  });
+  send({ type: "views", chatId, views, replace, requestedIds: ids, plainIds }, uid);
 }
 async function sendView(uid, chatId, message, record) {
   const settings = settingsFor(await loadStore(uid), chatId);
@@ -2145,12 +2200,14 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
   jobs.set(key, { controller, finished });
   let message;
   let source;
+  let snapshot;
   try {
     const store = await loadStore(uid);
     const settings = settingsFor(store, chatId);
     if (options.automatic && !settings.autoTranslate)
       return;
-    const messages = await getMessages(chatId);
+    snapshot = await cachedChat(chatId, true);
+    const messages = orderedMessages(snapshot);
     const index = messages.findIndex((m) => m.id === messageId);
     message = messages[index];
     if (!message) {
@@ -2179,6 +2236,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       return;
     }
     await sendView(uid, chatId, message);
+    let lastProgressSave = -Infinity;
     const record = await translate({
       direction: "incoming",
       source,
@@ -2191,13 +2249,16 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal),
       signal: controller.signal,
       onProgress: async (progress) => {
+        if (Date.now() - lastProgressSave < 1000)
+          return;
+        lastProgressSave = Date.now();
         const updated = await writeTranslations(chatId, messageId, (mt) => {
           if (existingKey)
             delete mt.entries[existingKey];
           delete mt.entries[rawSourceHash(source)];
           mt.entries[hash] = progress;
           mt.hidden = false;
-        });
+        }, snapshot);
         if (!updated)
           throw new Error("Message disappeared while saving translation progress");
         await sendView(uid, chatId, updated);
@@ -2209,7 +2270,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       delete mt.entries[rawSourceHash(source)];
       mt.entries[hash] = record;
       mt.hidden = false;
-    });
+    }, snapshot);
     if (!saved)
       throw new Error("Message disappeared while saving translation");
     if (record.status === "partial") {
@@ -2229,7 +2290,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
         const prev = mt.entries[hash];
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: "error", updatedAt: 0 };
         mt.entries[hash] = { ...base, status: "error", error: text, updatedAt: Date.now() };
-      }).catch(() => null);
+      }, snapshot).catch(() => null);
       if (updated)
         message = updated;
     }
@@ -2237,6 +2298,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
   } finally {
     try {
       jobs.delete(key);
+      message = snapshot?.messages.get(messageId);
       if (message)
         await sendView(uid, chatId, message).catch((e) => warn("view-update-failed", { error: errorText(e) }));
     } finally {
@@ -2247,7 +2309,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
 async function translateOutgoing(uid, chatId, text) {
   const store = await loadStore(uid);
   const settings = { ...settingsFor(store, chatId), autoContinue: true };
-  const messages = settings.contextEnabled && settings.contextIncludeUserInput ? await getMessages(chatId) : [];
+  const messages = settings.contextEnabled && settings.contextIncludeUserInput ? orderedMessages(await cachedChat(chatId)) : [];
   const controller = new AbortController;
   const timer = setTimeout(() => controller.abort(), 180000);
   try {
@@ -2266,7 +2328,8 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   if (ctx.origin !== "render" || !ctx.messageId || !ctx.content)
     return;
   const chat = await cachedChat(ctx.chatId);
-  const mt = chat.get(ctx.messageId);
+  const message = chat.messages.get(ctx.messageId);
+  const mt = message ? readTranslations(message) : null;
   if (!mt)
     return;
   const store = await loadStore(ctx.userId);
@@ -2298,10 +2361,36 @@ spindle.on("GENERATION_ENDED", (payload, userId) => {
     generationType: payload.generationType
   }).catch((e) => warnAutomatic("handler-failed", { ...context, error: errorText(e) }));
 });
-for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "MESSAGE_DELETED", "MESSAGE_SENT"]) {
+for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAGE_DELETED", "MESSAGE_SENT"]) {
   spindle.on(event, (payload) => {
-    if (payload?.chatId)
-      chatCache.delete(payload.chatId);
+    if (!payload?.chatId)
+      return;
+    const snapshot = chatCache.get(payload.chatId);
+    if (!snapshot)
+      return;
+    const id = payload.messageId ?? payload.message?.id;
+    if (event === "MESSAGE_DELETED" && id) {
+      snapshot.messages.delete(id);
+      if (snapshot.reading)
+        snapshot.changes.set(id, null);
+      jobs.get(jobKey(payload.chatId, id))?.controller.abort();
+    } else if (payload.message && id) {
+      const raw = payload.message;
+      if (!raw.role && raw.is_user !== true && !snapshot.messages.has(id)) {
+        snapshot.loaded = false;
+        snapshot.invalidations++;
+      }
+      const { spindle_metadata, ...extra } = raw.extra ?? {};
+      cacheMessage(snapshot, {
+        ...raw,
+        role: raw.role ?? snapshot.messages.get(id)?.role ?? (raw.is_user ? "user" : "assistant"),
+        extra,
+        metadata: raw.metadata ?? spindle_metadata
+      });
+    } else {
+      snapshot.loaded = false;
+      snapshot.invalidations++;
+    }
   });
 }
 async function handle(msg, uid) {
@@ -2332,7 +2421,10 @@ async function handle(msg, uid) {
       return;
     }
     case "chat":
-      await sendChatViews(uid, msg.chatId);
+      await sendChatViews(uid, msg.chatId, msg.messageIds);
+      return;
+    case "view_messages":
+      await sendChatViews(uid, msg.chatId, msg.messageIds, false);
       return;
     case "save_settings": {
       const store = await loadStore(uid);
@@ -2343,8 +2435,6 @@ async function handle(msg, uid) {
         store.defaults = settings;
       await saveStore(uid, store);
       await sendState(uid);
-      if (msg.chatId)
-        chatCache.delete(msg.chatId);
       return;
     }
     case "save_bundle": {
@@ -2409,7 +2499,9 @@ async function handle(msg, uid) {
       return;
     }
     case "delete_translation": {
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
+      const job = jobs.get(jobKey(msg.chatId, msg.messageId));
+      job?.controller.abort();
+      await job?.finished;
       const key = typeof msg.sourceKey === "string" && msg.sourceKey ? msg.sourceKey : null;
       const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? "")));
       if (updated)

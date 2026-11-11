@@ -1,6 +1,9 @@
 // Types, defaults and messages shared by the backend and frontend.
 
 import { normalizeIllustrations } from './illustrations';
+
+/** Maximum per-message views in a chat/window response. */
+export const VIEW_WINDOW = 30;
 import { lenientTags } from './translate/protect';
 
 /**
@@ -339,7 +342,8 @@ export type ToBackend =
   | { type: 'hello' }
   | { type: 'hint'; chatId: string | null; activeId?: string; chatConnectionId?: string }
   | { type: 'save_connection'; chatId: string | null; connectionId: string }
-  | { type: 'chat'; chatId: string }
+  | { type: 'chat'; chatId: string; messageIds?: string[] }
+  | { type: 'view_messages'; chatId: string; messageIds: string[] }
   | { type: 'save_settings'; chatId: string | null; settings: ChatSettings; asDefault: boolean }
   | { type: 'save_preset'; preset: UserPreset }
   | { type: 'delete_preset'; id: string }
@@ -358,5 +362,5 @@ export type ToBackend =
 // backend -> frontend
 export type ToFrontend =
   | { type: 'state'; store: Store; presets: PresetSummary[]; connections: ConnectionSummary[] }
-  | { type: 'views'; chatId: string; views: MessageView[]; replace: boolean }
+  | { type: 'views'; chatId: string; views: MessageView[]; replace: boolean; requestedIds?: string[]; plainIds?: string[] }
   | { type: 'text_result'; reqId: string; ok: boolean; text?: string; error?: string };
