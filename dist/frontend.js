@@ -17,6 +17,7 @@ function parseTags(raw) {
 }
 
 // src/shared.ts
+var VIEW_WINDOW = 30;
 var FONT_MIN = 12;
 var FONT_MAX = 32;
 var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
@@ -215,7 +216,7 @@ function mountToolbars(opts) {
       return;
     const view = opts.getView(meta.id);
     const state = toolbarState(view ?? null);
-    const show = !!view && view.role !== "system";
+    const show = view ? view.role !== "system" : opts.canTranslate?.(meta.id) === true;
     const look = show ? lookOf(slot) : { kind: "own" };
     const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${look.kind === "host" ? look.className : look.kind}` : "";
     if (slot.getAttribute("data-stt-sig") === sig)
@@ -324,6 +325,34 @@ function mountToolbars(opts) {
     },
     stats: () => ({ slots: slots.size, hostMount: hostUnregister !== null })
   };
+}
+
+// src/view-requests.ts
+function visibleMessageIds(messages, viewportHeight) {
+  return messages.filter(({ element }) => {
+    const rect = element.getBoundingClientRect();
+    return rect.height > 0 && rect.bottom >= -300 && rect.top <= viewportHeight + 300;
+  }).map(({ messageId }) => messageId);
+}
+
+class ViewRequests {
+  requested = new Set;
+  reset() {
+    this.requested.clear();
+  }
+  invalidate(ids) {
+    ids.forEach((id) => this.requested.delete(id));
+  }
+  take(ids, refresh = false) {
+    const pending = [...new Set(ids)].filter((id) => refresh || !this.requested.has(id));
+    const batches = [];
+    for (let i = 0;i < pending.length; i += VIEW_WINDOW) {
+      const batch = pending.slice(i, i + VIEW_WINDOW);
+      batch.forEach((id) => this.requested.add(id));
+      batches.push(batch);
+    }
+    return batches;
+  }
 }
 
 // src/frontend.ts
@@ -467,13 +496,15 @@ function setup(ctx) {
   let chatId = null;
   const views = new Map;
   const bars = new Map;
+  const viewRequests = new ViewRequests;
+  const plainMessages = new Set;
   const pending = new Map;
   let reqCounter = 0;
   let lastDraftTranslation = null;
   let dirty = false;
   let markDirtyUi = null;
   const toBackend = (msg) => ctx.sendToBackend(msg);
-  const notify = (kind, text2) => toBackend({ type: "notify", kind, text: text2 });
+  const notify = (kind, text) => toBackend({ type: "notify", kind, text });
   const current = () => store ? settingsFor(store, chatId) : DEFAULT_SETTINGS;
   const removeStyle = ctx.dom.addStyle(CSS);
   function chatIdFromLocation() {
@@ -497,12 +528,12 @@ function setup(ctx) {
     hint = next;
     toBackend({ type: "hint", chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId });
   }
-  async function translateText(text2, forChat) {
+  async function translateText(text, forChat) {
     await sendHint(forChat);
     const reqId = `t${++reqCounter}`;
     return new Promise((resolve, reject) => {
       pending.set(reqId, { resolve, reject });
-      toBackend({ type: "translate_text", reqId, chatId: forChat, text: text2 });
+      toBackend({ type: "translate_text", reqId, chatId: forChat, text });
     });
   }
   const act = (id, type, force = false) => () => {
@@ -596,6 +627,7 @@ function setup(ctx) {
     registerDecorator: typeof registerDecorator === "function" ? (spec) => registerDecorator.call(ctx.ui, spec) : null,
     listMessageElements: () => ctx.dom.listMessageElements(),
     getView: (id) => views.get(id),
+    canTranslate: (id) => plainMessages.has(id),
     onTranslate: (id, force) => {
       act(id, "translate", force)();
     },
@@ -640,33 +672,49 @@ function setup(ctx) {
     }
     toolbars.refresh();
   }
-  let decorateQueued = false;
-  const queueDecorate = () => {
-    if (decorateQueued)
+  function requestVisibleViews() {
+    if (!chatId)
       return;
-    decorateQueued = true;
-    setTimeout(() => {
-      decorateQueued = false;
-      decorate();
+    const ids = visibleMessageIds(ctx.dom.listMessageElements(), window.innerHeight);
+    for (const messageIds of viewRequests.take(ids)) {
+      toBackend({ type: "view_messages", chatId, messageIds });
+    }
+  }
+  let decorateTimer = null;
+  const queueDecorate = () => {
+    if (decorateTimer)
+      return;
+    decorateTimer = setTimeout(() => {
+      decorateTimer = null;
+      requestVisibleViews();
+      if ([...views.values()].some((view) => barWanted(view) && !bars.has(view.messageId) && ctx.dom.findMessageElement(view.messageId))) {
+        decorate();
+      }
     }, 150);
   };
-  const missingBar = () => [...views.values()].some((v) => barWanted(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
   const observer = new MutationObserver(() => {
-    if (chatId && missingBar())
+    if (chatId)
       queueDecorate();
   });
   observer.observe(document.body, { childList: true, subtree: true });
+  document.addEventListener("scroll", queueDecorate, true);
+  window.addEventListener("resize", queueDecorate);
   function resetChat(next) {
     for (const bar of bars.values())
       ctx.dom.uninject(bar);
     bars.clear();
     views.clear();
+    plainMessages.clear();
+    viewRequests.reset();
     chatId = next;
     renderDraftButton();
     renderPanel();
     if (next) {
       sendHint(next);
-      toBackend({ type: "chat", chatId: next });
+      const messageIds = ctx.dom.listMessageElements().slice(-VIEW_WINDOW).map(({ messageId }) => messageId);
+      viewRequests.take(messageIds);
+      toBackend({ type: "chat", chatId: next, messageIds: messageIds.length ? messageIds : undefined });
+      queueDecorate();
     }
   }
   const routeTimer = setInterval(() => {
@@ -674,17 +722,36 @@ function setup(ctx) {
     if (next !== chatId)
       resetChat(next);
   }, 700);
-  const refreshViews = () => chatId && toBackend({ type: "chat", chatId });
+  const refreshViews = () => requestVisibleViews();
   let refreshTimer = null;
   const queueRefresh = () => {
     if (refreshTimer)
       clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refreshViews, 400);
   };
-  const offEvents = ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_SWIPED", "MESSAGE_DELETED", "GENERATION_ENDED"].map((name) => ctx.events.on(name, (payload) => {
+  const offEvents = ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAGE_DELETED", "GENERATION_ENDED"].map((name) => ctx.events.on(name, (payload) => {
     const p = payload;
-    if (!p?.chatId || p.chatId === chatId)
+    if (!p?.chatId || p.chatId === chatId) {
+      const changed = payload;
+      const changedId = changed?.messageId ?? changed?.message?.id;
+      if (changedId)
+        viewRequests.invalidate([changedId]);
+      else
+        viewRequests.reset();
+      if (name === "MESSAGE_DELETED") {
+        const deleted = payload;
+        const id = deleted?.messageId ?? deleted?.message?.id;
+        if (id) {
+          views.delete(id);
+          plainMessages.delete(id);
+          const bar = bars.get(id);
+          if (bar)
+            ctx.dom.uninject(bar);
+          bars.delete(id);
+        }
+      }
       queueRefresh();
+    }
   }));
   const originalFetch = window.fetch;
   const translatingFetch = async function(input, init) {
@@ -1093,7 +1160,23 @@ function setup(ctx) {
       case "views":
         if (msg.chatId !== chatId)
           return;
-        if (msg.replace) {
+        if (msg.requestedIds) {
+          for (const id of msg.requestedIds) {
+            views.delete(id);
+            plainMessages.delete(id);
+          }
+          for (const id of msg.plainIds ?? [])
+            plainMessages.add(id);
+          viewRequests.take(msg.requestedIds);
+          const keep = new Set(msg.views.map((view) => view.messageId));
+          for (const id of msg.requestedIds)
+            if (!keep.has(id)) {
+              const bar = bars.get(id);
+              if (bar)
+                ctx.dom.uninject(bar);
+              bars.delete(id);
+            }
+        } else if (msg.replace) {
           const keep = new Set(msg.views.map((v) => v.messageId));
           for (const [id, bar] of bars)
             if (!keep.has(id)) {
@@ -1102,8 +1185,10 @@ function setup(ctx) {
             }
           views.clear();
         }
-        for (const v of msg.views)
+        for (const v of msg.views) {
           views.set(v.messageId, v);
+          viewRequests.take([v.messageId]);
+        }
         decorate();
         return;
       case "text_result": {
@@ -1130,6 +1215,12 @@ function setup(ctx) {
       clearTimeout(viewSaveTimer);
     removeFontStyle?.();
     observer.disconnect();
+    document.removeEventListener("scroll", queueDecorate, true);
+    window.removeEventListener("resize", queueDecorate);
+    if (refreshTimer)
+      clearTimeout(refreshTimer);
+    if (decorateTimer)
+      clearTimeout(decorateTimer);
     toolbars.destroy();
     offEvents.forEach((off) => off());
     offBackend();

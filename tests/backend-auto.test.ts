@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test, spyOn } from 'bun:test';
 import { METADATA_KEY, normalizeStore, sourceHash, rawSourceHash, type MessageTranslations, type Store, type ToBackend, type ToFrontend } from '../src/shared';
 
 interface Message {
@@ -13,6 +13,14 @@ interface Message {
 
 const makeMessage = (id: string, content: string, role: Message['role'] = 'assistant'): Message =>
   ({ id, role, content, extra: {}, swipes: [content], swipe_id: 0 });
+
+function translatedMessage(id: string): Message {
+  const message = makeMessage(id, `Source ${id}.`);
+  message.metadata = { otherExtension: { kept: true }, [METADATA_KEY]: { v: 1, entries: {
+    [sourceHash(message.content)]: { parts: [`번역 ${id}`], pieces: [], total: 1, truncatedPart: -1, status: 'done', updatedAt: 1 },
+  } } };
+  return message;
+}
 
 async function settle() {
   // The real worker dispatches events without awaiting extension callbacks.
@@ -42,6 +50,9 @@ async function fakeHost() {
     [chatId]: { autoTranslate: true, translateMyMessages: true, contextEnabled: true, contextIncludeUserInput: true },
   } });
   const messages: Message[] = [];
+  const chats = new Map<string, Message[]>([[chatId, messages]]);
+  const counts = { reads: 0, writes: 0 };
+  let onRead = async (_rows: Message[]) => {};
   const sent: ToFrontend[] = [];
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -64,21 +75,28 @@ async function fakeHost() {
     connections: { async list(userId: string) { expect(userId).toBe(uid); return [{ id: 'connection', is_default: true }]; } },
     generate: { async quiet(input: Record<string, any>) { calls.push(input); return complete(input); } },
     chat: {
-      async getMessages(id: string) { expect(id).toBe(chatId); return structuredClone(messages); },
+      async getMessages(id: string) {
+        counts.reads++;
+        const rows = structuredClone(chats.get(id) ?? []);
+        await onRead(rows);
+        return rows;
+      },
       async updateMessage(id: string, messageId: string, patch: { metadata: Record<string, unknown> }) {
-        expect(id).toBe(chatId);
-        const message = messages.find((m) => m.id === messageId);
+        counts.writes++;
+        const message = chats.get(id)?.find((m) => m.id === messageId);
         if (!message) throw new Error('Message not found');
         // worker-host splits extra.spindle_metadata into metadata on read and
         // merges it back on update. Content/swipe selection stays unchanged.
         message.metadata = structuredClone(patch.metadata);
-        handlers.get('MESSAGE_EDITED')?.({ chatId, message: structuredClone(message) }, uid);
+        handlers.get('MESSAGE_EDITED')?.({ chatId: id, message: structuredClone(message) }, uid);
       },
     },
   };
   return {
-    api, chatId, messages, sent, calls, warnings, errors,
-    async render(message: Message) { return processor({ origin: 'render', chatId, messageId: message.id, content: message.content, userId: uid }); },
+    api, chatId, messages, sent, calls, warnings, errors, counts, chats,
+    event(name: string, payload: Record<string, unknown>) { handlers.get(name)?.(structuredClone(payload), uid); },
+    setRead(fn: typeof onRead) { onRead = fn; },
+    async render(message: Message, forChat = chatId) { return processor({ origin: 'render', chatId: forChat, messageId: message.id, content: message.content, userId: uid }); },
     edit(message: Message, content: string) {
       message.content = content;
       message.swipes[message.swipe_id] = content;
@@ -306,5 +324,256 @@ test('image swap while model completion is pending saves under the stable key', 
     expect(h.record(reply)?.status).toBe('done');
     expect((await h.render(reply))?.content).toContain(`앞 ${illustrationImage} 뒤`);
     expect(Object.keys((reply.metadata?.[METADATA_KEY] as MessageTranslations).entries)).toEqual([sourceHash(reply.content)]);
+  });
+});
+
+test('fetch diet: 500-message open sends at most 30 views and shares one read with renders', async () => {
+  await withHost(async (h) => {
+    h.messages.push(...Array.from({ length: 500 }, (_, i) => translatedMessage(`m${i}`)));
+    await Promise.all([
+      h.send({ type: 'chat', chatId: h.chatId }),
+      ...h.messages.slice(-30).map((message) => h.render(message)),
+    ]);
+    expect(h.counts.reads).toBe(1);
+    const open = h.sent.filter((m) => m.type === 'views');
+    expect(open).toHaveLength(1);
+    expect(open[0]!.views).toHaveLength(30);
+    expect(open[0]!.views[0]!.messageId).toBe('m470');
+    // Older rows are delivered only when the browser requests their ids.
+    await h.send({ type: 'view_messages', chatId: h.chatId, messageIds: ['m2', 'm3'] });
+    expect(h.sent.at(-1)).toMatchObject({ type: 'views', replace: false, views: [{ messageId: 'm2' }, { messageId: 'm3' }] });
+    expect(h.counts.reads).toBe(1);
+    // Even a malformed/oversized client window cannot cause a full-chat push.
+    await h.send({ type: 'chat', chatId: h.chatId, messageIds: h.messages.map((m) => m.id) });
+    const capped = h.sent.at(-1);
+    expect(capped?.type === 'views' && capped.views.length).toBe(30);
+  });
+});
+
+test('fetch diet: untranslated rows carry only ids, and missing/deleted state is acknowledged', async () => {
+  await withHost(async (h) => {
+    h.messages.push(...Array.from({ length: 500 }, (_, i) => makeMessage(`m${i}`, 'Hello.')));
+    h.messages[499]!.role = 'system';
+    await h.send({ type: 'chat', chatId: h.chatId });
+    expect(h.counts.reads).toBe(1);
+    const open = h.sent.at(-1);
+    expect(open?.type).toBe('views');
+    if (open?.type !== 'views') throw new Error('Missing views');
+    expect(open.views).toEqual([]);
+    expect(open.plainIds).toHaveLength(29);
+    expect(open.plainIds).not.toContain('m499');
+    await h.send({ type: 'view_messages', chatId: h.chatId, messageIds: ['missing'] });
+    expect(h.sent.at(-1)).toMatchObject({ views: [], requestedIds: ['missing'], plainIds: [] });
+  });
+});
+
+test('fetch diet: ten rapid progress ticks use one read, two saves and single-message views', async () => {
+  const now = spyOn(Date, 'now').mockReturnValue(10_000);
+  try {
+    await withHost(async (h) => {
+      const settings = { ...normalizeStore(null).defaults, translationUnit: 'paragraph' as const };
+      await h.send({ type: 'save_settings', chatId: h.chatId, settings, asDefault: false });
+      const reply = makeMessage('ten', Array.from({ length: 10 }, (_, i) => `Paragraph ${i}.`).join('\n\n'));
+      h.messages.push(reply);
+      await h.send({ type: 'translate', chatId: h.chatId, messageId: reply.id, force: false });
+      expect(h.calls).toHaveLength(10); // engine emits one onProgress for each paragraph
+      expect(h.counts).toEqual({ reads: 1, writes: 2 });
+      expect(h.record(reply)?.parts).toHaveLength(10);
+      expect(h.record(reply)?.status).toBe('done');
+      const views = h.sent.filter((m) => m.type === 'views');
+      expect(views.map((m) => m.views.length)).toEqual([1, 1, 1]);
+      expect(views.at(-1)?.views[0]?.busy).toBe(false);
+      expect(h.errors).toEqual([]);
+    });
+  } finally { now.mockRestore(); }
+});
+
+test('fetch diet: spaced progress ticks save at 1s intervals and always flush the final result', async () => {
+  let clock = 10_000;
+  const now = spyOn(Date, 'now').mockImplementation(() => clock);
+  try {
+    await withHost(async (h) => {
+      const settings = { ...normalizeStore(null).defaults, translationUnit: 'paragraph' as const };
+      await h.send({ type: 'save_settings', chatId: h.chatId, settings, asDefault: false });
+      const reply = makeMessage('ten', Array.from({ length: 10 }, (_, i) => `Paragraph ${i}.`).join('\n\n'));
+      h.messages.push(reply);
+      h.setComplete(async () => { clock += 250; return { content: '번역', finish_reason: 'stop' }; });
+      await h.send({ type: 'translate', chatId: h.chatId, messageId: reply.id, force: false });
+      expect(h.counts).toEqual({ reads: 1, writes: 4 }); // ticks 1, 5, 9 + final
+      expect(h.record(reply)?.parts).toHaveLength(10);
+    });
+  } finally { now.mockRestore(); }
+});
+
+test('fetch diet: new-message automatic translation reads once after chat open', async () => {
+  await withHost(async (h) => {
+    h.messages.push(...Array.from({ length: 500 }, (_, i) => translatedMessage(`m${i}`)));
+    await h.send({ type: 'chat', chatId: h.chatId });
+    const before = h.counts.reads;
+    const reply = makeMessage('new', 'New reply.');
+    h.messages.push(reply);
+    h.event('MESSAGE_SENT', { chatId: h.chatId, message: reply });
+    await h.emit({ messageId: reply.id, content: reply.content });
+    expect(h.counts.reads - before).toBe(1);
+    expect(h.record(reply)?.status).toBe('done');
+    expect(h.sent.filter((m) => m.type === 'views').map((m) => m.views.length)).toEqual([30, 1, 1, 1]);
+    expect((await h.render(reply))?.content).toContain('번역문');
+    expect(h.counts.reads - before).toBe(1);
+  });
+});
+
+test.each(['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED'])('fetch diet: wire DTO %s updates cached metadata/content without another read', async (event) => {
+  await withHost(async (h) => {
+    const reply = translatedMessage('reply');
+    h.messages.push(reply);
+    await h.send({ type: 'chat', chatId: h.chatId });
+    const original = reply.content;
+    reply.content = 'New swipe.';
+    reply.swipes.push(reply.content);
+    const metadata = reply.metadata!;
+    (metadata[METADATA_KEY] as MessageTranslations).entries[sourceHash(reply.content)] = {
+      parts: ['새 번역'], pieces: [], total: 1, truncatedPart: -1, status: 'done', updatedAt: 2,
+    };
+    const { role, metadata: _metadata, ...wire } = reply;
+    h.event(event, { chatId: h.chatId, message: { ...wire, is_user: false, extra: { spindle_metadata: metadata } } });
+    expect((await h.render(reply))?.content).toContain('새 번역');
+    await h.send({ type: 'view_messages', chatId: h.chatId, messageIds: [reply.id] });
+    expect(h.sent.at(-1)).toMatchObject({ views: [{ sourceKey: sourceHash(reply.content), text: '새 번역' }] });
+    await h.send({ type: 'set_hidden', chatId: h.chatId, messageId: reply.id, hidden: true });
+    expect(reply.metadata?.otherExtension).toEqual({ kept: true });
+    expect(h.record(reply, original)?.status).toBe('done');
+    expect(h.counts.reads).toBe(1);
+  });
+});
+
+test('fetch diet: edit/delete events during an in-flight read win over stale rows', async () => {
+  await withHost(async (h) => {
+    const reply = translatedMessage('reply');
+    const deleted = translatedMessage('deleted');
+    h.messages.push(reply, deleted);
+    h.setRead(async () => {
+      h.edit(reply, 'Edited text.');
+      h.messages.splice(1, 1);
+      h.event('MESSAGE_DELETED', { chatId: h.chatId, messageId: deleted.id });
+    });
+    await h.send({ type: 'chat', chatId: h.chatId });
+    expect(await h.render(reply)).toBeUndefined();
+    expect(await h.render(deleted)).toBeUndefined();
+    expect(h.sent.at(-1)).toMatchObject({ views: [{ messageId: 'reply', text: null }] });
+    expect(h.counts.reads).toBe(1);
+  });
+});
+
+test('fetch diet: a deleted message is not saved or pushed again when its completion returns', async () => {
+  await withHost(async (h) => {
+    const reply = makeMessage('reply', 'Pending reply.');
+    h.messages.push(reply);
+    h.setComplete(async () => {
+      h.messages.splice(0, 1);
+      h.event('MESSAGE_DELETED', { chatId: h.chatId, messageId: reply.id });
+      return { content: '번역', finish_reason: 'stop' };
+    });
+    await h.emit({ messageId: reply.id, content: reply.content });
+    expect(h.counts).toEqual({ reads: 1, writes: 0 });
+    expect(h.sent.filter((m) => m.type === 'views')).toHaveLength(1); // initial busy view only
+    await h.send({ type: 'view_messages', chatId: h.chatId, messageIds: [reply.id] });
+    expect(h.sent.at(-1)).toMatchObject({ views: [], requestedIds: ['reply'] });
+  });
+});
+
+test('fetch diet: chat switches keep snapshots isolated, including edits to the inactive chat', async () => {
+  await withHost(async (h) => {
+    const first = translatedMessage('first');
+    const second = translatedMessage('second');
+    h.messages.push(first);
+    h.chats.set('other', [second]);
+    await h.send({ type: 'chat', chatId: h.chatId });
+    await h.send({ type: 'chat', chatId: 'other' });
+    h.edit(first, 'Edited while away.');
+    await h.send({ type: 'chat', chatId: h.chatId });
+    expect(h.sent.at(-1)).toMatchObject({ chatId: h.chatId, views: [{ messageId: 'first', text: null }] });
+    expect((await h.render(second, 'other'))?.content).toContain('번역 second');
+    expect(h.counts.reads).toBe(2);
+  });
+});
+
+test('fetch diet: id-only host events invalidate once, including during a pending read', async () => {
+  await withHost(async (h) => {
+    const reply = translatedMessage('reply');
+    h.messages.push(reply);
+    h.setRead(async () => { h.event('MESSAGE_EDITED', { chatId: h.chatId }); });
+    await h.send({ type: 'chat', chatId: h.chatId });
+    h.setRead(async () => {});
+    reply.content = 'Changed without a message DTO.';
+    await h.send({ type: 'chat', chatId: h.chatId });
+    await h.send({ type: 'chat', chatId: h.chatId });
+    expect(h.counts.reads).toBe(2);
+    expect(await h.render(reply)).toBeUndefined();
+  });
+});
+
+test('fetch diet: failure flushes progress that was skipped by throttling', async () => {
+  const now = spyOn(Date, 'now').mockReturnValue(10_000);
+  try {
+    await withHost(async (h) => {
+      const settings = { ...normalizeStore(null).defaults, translationUnit: 'paragraph' as const };
+      await h.send({ type: 'save_settings', chatId: h.chatId, settings, asDefault: false });
+      const reply = makeMessage('reply', 'First.\n\nSecond.\n\nThird.');
+      h.messages.push(reply);
+      h.setComplete(async () => {
+        if (h.calls.length === 3) throw new Error('provider failed');
+        return { content: '번역', finish_reason: 'stop' };
+      });
+      await h.send({ type: 'translate', chatId: h.chatId, messageId: reply.id, force: false });
+      expect(h.counts).toEqual({ reads: 1, writes: 2 });
+      expect(h.record(reply)?.parts).toHaveLength(2);
+      expect(h.record(reply)?.status).toBe('error');
+    });
+  } finally { now.mockRestore(); }
+});
+
+test('fetch diet: delete translation waits for cancellation so a final save cannot resurrect it', async () => {
+  await withHost(async (h) => {
+    const reply = translatedMessage('reply');
+    h.messages.push(reply);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    h.setComplete(async () => { await pending; return { content: '새 번역', finish_reason: 'stop' }; });
+    await h.send({ type: 'translate', chatId: h.chatId, messageId: reply.id, force: true });
+    await h.send({ type: 'delete_translation', chatId: h.chatId, messageId: reply.id, sourceKey: sourceHash(reply.content) });
+    release();
+    await settle();
+    expect(h.record(reply)).toBeUndefined();
+    expect(reply.metadata?.otherExtension).toEqual({ kept: true });
+    expect(h.counts.reads).toBe(1);
+    expect(h.sent.at(-1)).toMatchObject({ views: [{ text: null, status: null, busy: false }] });
+  });
+});
+
+test('fetch diet: outgoing context and hide/delete controls reuse the open snapshot', async () => {
+  await withHost(async (h) => {
+    const reply = translatedMessage('reply');
+    h.messages.push(reply);
+    await h.send({ type: 'chat', chatId: h.chatId });
+    await h.send({ type: 'translate_text', reqId: 'outgoing', chatId: h.chatId, text: '안녕' });
+    expect(h.calls[0]!.messages[1].content).toContain('<translation>번역 reply</translation>');
+    expect(h.counts.reads).toBe(1);
+    await h.send({ type: 'set_hidden', chatId: h.chatId, messageId: reply.id, hidden: true });
+    await h.send({ type: 'delete_translation', chatId: h.chatId, messageId: reply.id });
+    expect(h.counts.reads).toBe(1);
+    expect(h.record(reply)).toBeUndefined();
+  });
+});
+
+test('fetch diet: new wire system rows obtain the host-normalized role before offering translation', async () => {
+  await withHost(async (h) => {
+    await h.send({ type: 'chat', chatId: h.chatId });
+    const system = makeMessage('system', 'System row.', 'system');
+    h.messages.push(system);
+    const { role, ...wire } = system;
+    h.event('MESSAGE_SENT', { chatId: h.chatId, message: { ...wire, is_user: false } });
+    await h.send({ type: 'view_messages', chatId: h.chatId, messageIds: ['system'] });
+    expect(h.sent.at(-1)).toMatchObject({ views: [], plainIds: [] });
+    expect(h.counts.reads).toBe(2); // initial snapshot + one necessary role normalization
   });
 });

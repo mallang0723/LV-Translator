@@ -57,6 +57,8 @@ export interface ToolbarOptions {
   registerDecorator: ((spec: DecoratorSpec) => unknown) | null;
   listMessageElements: () => Array<{ messageId: string; element: Element }>;
   getView: (messageId: string) => MessageView | undefined;
+  /** Sparse view responses identify untranslated non-system rows by id only. */
+  canTranslate?: (messageId: string) => boolean;
   onTranslate: (messageId: string, force: boolean) => void;
   onCancel: (messageId: string) => void;
   onDelete: (messageId: string) => void;
@@ -111,7 +113,7 @@ export function mountToolbars(opts: ToolbarOptions): ToolbarHandle {
     if (!meta) return;
     const view = opts.getView(meta.id);
     const state = toolbarState(view ?? null);
-    const show = !!view && view.role !== 'system';
+    const show = view ? view.role !== 'system' : opts.canTranslate?.(meta.id) === true;
     const look = show ? lookOf(slot) : ({ kind: 'own' } as Look);
     const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${look.kind === 'host' ? look.className : look.kind}` : '';
     if (slot.getAttribute('data-stt-sig') === sig) return;

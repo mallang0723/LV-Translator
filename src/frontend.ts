@@ -5,6 +5,7 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import {
   type ChatSettings,
+  VIEW_WINDOW,
   type ConnectionSummary,
   DEFAULT_SETTINGS,
   DEFAULT_VIEW,
@@ -29,6 +30,7 @@ import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } fro
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './presets/upstream/general';
 import { showsToggle, targetLabel, wantsBar } from './message-ui';
 import { type DecoratorSpec, mountToolbars } from './toolbar';
+import { ViewRequests, visibleMessageIds } from './view-requests';
 
 const CSS = `
 .stt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; font-size: 0.78em; }
@@ -172,6 +174,8 @@ export function setup(ctx: SpindleFrontendContext) {
   let chatId: string | null = null;
   const views = new Map<string, MessageView>();
   const bars = new Map<string, HTMLElement>();
+  const viewRequests = new ViewRequests();
+  const plainMessages = new Set<string>();
   const pending = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void }>();
   let reqCounter = 0;
   let lastDraftTranslation: string | null = null;
@@ -326,6 +330,7 @@ export function setup(ctx: SpindleFrontendContext) {
     registerDecorator: typeof registerDecorator === 'function' ? (spec) => registerDecorator.call(ctx.ui, spec) : null,
     listMessageElements: () => ctx.dom.listMessageElements(),
     getView: (id) => views.get(id),
+    canTranslate: (id) => plainMessages.has(id),
     onTranslate: (id, force) => {
       act(id, 'translate', force)();
     },
@@ -369,32 +374,50 @@ export function setup(ctx: SpindleFrontendContext) {
     toolbars.refresh();
   }
 
-  let decorateQueued = false;
+  function requestVisibleViews(): void {
+    if (!chatId) return;
+    const ids = visibleMessageIds(ctx.dom.listMessageElements(), window.innerHeight);
+    for (const messageIds of viewRequests.take(ids)) {
+      toBackend({ type: 'view_messages', chatId, messageIds });
+    }
+  }
+
+  let decorateTimer: ReturnType<typeof setTimeout> | null = null;
   const queueDecorate = () => {
-    if (decorateQueued) return;
-    decorateQueued = true;
-    setTimeout(() => {
-      decorateQueued = false;
-      decorate();
+    if (decorateTimer) return;
+    decorateTimer = setTimeout(() => {
+      decorateTimer = null;
+      requestVisibleViews();
+      // Our own controls mutate the DOM too; only decorate missing mounts.
+      if ([...views.values()].some((view) => barWanted(view)
+        && !bars.has(view.messageId) && ctx.dom.findMessageElement(view.messageId))) {
+        decorate();
+      }
     }, 150);
   };
-  /** A message that should have a bar but has none yet, and is on screen now. */
-  const missingBar = () => [...views.values()].some((v) => barWanted(v) && !bars.has(v.messageId) && ctx.dom.findMessageElement(v.messageId));
+  // Rendering and scrolling older history request only the newly visible rows.
   const observer = new MutationObserver(() => {
-    if (chatId && missingBar()) queueDecorate();
+    if (chatId) queueDecorate();
   });
   observer.observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('scroll', queueDecorate, true);
+  window.addEventListener('resize', queueDecorate);
 
   function resetChat(next: string | null): void {
     for (const bar of bars.values()) ctx.dom.uninject(bar);
     bars.clear();
     views.clear();
+    plainMessages.clear();
+    viewRequests.reset();
     chatId = next;
     renderDraftButton();
     renderPanel();
     if (next) {
       void sendHint(next);
-      toBackend({ type: 'chat', chatId: next });
+      const messageIds = ctx.dom.listMessageElements().slice(-VIEW_WINDOW).map(({ messageId }) => messageId);
+      viewRequests.take(messageIds);
+      toBackend({ type: 'chat', chatId: next, messageIds: messageIds.length ? messageIds : undefined });
+      queueDecorate();
     }
   }
 
@@ -403,16 +426,34 @@ export function setup(ctx: SpindleFrontendContext) {
     if (next !== chatId) resetChat(next);
   }, 700);
 
-  const refreshViews = () => chatId && toBackend({ type: 'chat', chatId });
+  const refreshViews = () => requestVisibleViews();
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   const queueRefresh = () => {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refreshViews, 400);
   };
-  const offEvents = ['MESSAGE_SENT', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'GENERATION_ENDED'].map((name) =>
+  const offEvents = ['MESSAGE_SENT', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAGE_DELETED', 'GENERATION_ENDED'].map((name) =>
     ctx.events.on(name, (payload) => {
       const p = payload as { chatId?: string } | null;
-      if (!p?.chatId || p.chatId === chatId) queueRefresh();
+      if (!p?.chatId || p.chatId === chatId) {
+        // An offscreen row may already have been requested before it changed.
+        const changed = payload as { messageId?: string; message?: { id?: string } };
+        const changedId = changed?.messageId ?? changed?.message?.id;
+        if (changedId) viewRequests.invalidate([changedId]);
+        else viewRequests.reset();
+        if (name === 'MESSAGE_DELETED') {
+          const deleted = payload as { messageId?: string; message?: { id?: string } };
+          const id = deleted?.messageId ?? deleted?.message?.id;
+          if (id) {
+            views.delete(id);
+            plainMessages.delete(id);
+            const bar = bars.get(id);
+            if (bar) ctx.dom.uninject(bar);
+            bars.delete(id);
+          }
+        }
+        queueRefresh();
+      }
     }),
   );
 
@@ -854,7 +895,21 @@ export function setup(ctx: SpindleFrontendContext) {
       }
       case 'views':
         if (msg.chatId !== chatId) return;
-        if (msg.replace) {
+        if (msg.requestedIds) {
+          // A sparse response also acknowledges untranslated/deleted messages.
+          for (const id of msg.requestedIds) {
+            views.delete(id);
+            plainMessages.delete(id);
+          }
+          for (const id of msg.plainIds ?? []) plainMessages.add(id);
+          viewRequests.take(msg.requestedIds);
+          const keep = new Set(msg.views.map((view) => view.messageId));
+          for (const id of msg.requestedIds) if (!keep.has(id)) {
+            const bar = bars.get(id);
+            if (bar) ctx.dom.uninject(bar);
+            bars.delete(id);
+          }
+        } else if (msg.replace) {
           const keep = new Set(msg.views.map((v) => v.messageId));
           for (const [id, bar] of bars) if (!keep.has(id)) {
             ctx.dom.uninject(bar);
@@ -862,7 +917,10 @@ export function setup(ctx: SpindleFrontendContext) {
           }
           views.clear();
         }
-        for (const v of msg.views) views.set(v.messageId, v);
+        for (const v of msg.views) {
+          views.set(v.messageId, v);
+          viewRequests.take([v.messageId]);
+        }
         decorate();
         return;
       case 'text_result': {
@@ -887,6 +945,10 @@ export function setup(ctx: SpindleFrontendContext) {
     if (viewSaveTimer) clearTimeout(viewSaveTimer);
     removeFontStyle?.();
     observer.disconnect();
+    document.removeEventListener('scroll', queueDecorate, true);
+    window.removeEventListener('resize', queueDecorate);
+    if (refreshTimer) clearTimeout(refreshTimer);
+    if (decorateTimer) clearTimeout(decorateTimer);
     toolbars.destroy();
     offEvents.forEach((off) => off());
     offBackend();

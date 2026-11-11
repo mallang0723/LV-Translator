@@ -7,6 +7,7 @@ import { BUILTIN_IDS, presetSummaries, promptPresets } from './presets';
 import { deleteBundle, saveBundle } from './bundles';
 import {
   type ChatSettings,
+  VIEW_WINDOW,
   type ConnectionSummary,
   effectiveConnectionId,
   INHERIT_PRESET_ID,
@@ -97,46 +98,86 @@ function readTranslations(message: ChatMessage): MessageTranslations | null {
   return mt;
 }
 
-/** chatId -> messageId -> translations; used by the render transform. */
-const chatCache = new Map<string, Map<string, MessageTranslations | null>>();
-const chatLoads = new Map<string, Promise<Map<string, MessageTranslations | null>>>();
-
-function cacheMessages(chatId: string, messages: ChatMessage[]): void {
-  chatCache.set(chatId, new Map(messages.map((m) => [m.id, readTranslations(m)])));
+/** One shared snapshot per chat; render, controls and saves reuse the same rows. */
+interface ChatSnapshot {
+  messages: Map<string, ChatMessage>;
+  loaded: boolean;
+  reading: boolean;
+  invalidations: number;
+  load?: Promise<ChatSnapshot>;
+  // Events arriving during a read must win over the older fetched rows.
+  changes: Map<string, ChatMessage | null>;
 }
+const chatCache = new Map<string, ChatSnapshot>();
 
-async function getMessages(chatId: string): Promise<ChatMessage[]> {
-  const messages = (await spindle.chat.getMessages(chatId)) as unknown as ChatMessage[];
-  cacheMessages(chatId, messages);
-  return messages;
-}
-
-function cachedChat(chatId: string): Promise<Map<string, MessageTranslations | null>> {
-  const hit = chatCache.get(chatId);
-  if (hit) return Promise.resolve(hit);
-  let load = chatLoads.get(chatId);
-  if (!load) {
-    load = getMessages(chatId)
-      .then(() => chatCache.get(chatId)!)
-      .finally(() => chatLoads.delete(chatId));
-    chatLoads.set(chatId, load);
+function snapshotFor(chatId: string): ChatSnapshot {
+  let snapshot = chatCache.get(chatId);
+  if (!snapshot) {
+    snapshot = { messages: new Map(), loaded: false, reading: false, invalidations: 0, changes: new Map() };
+    chatCache.set(chatId, snapshot);
   }
-  return load;
+  return snapshot;
+}
+
+function cacheMessage(snapshot: ChatSnapshot, message: ChatMessage): void {
+  const current = snapshot.messages.get(message.id);
+  if (current) Object.assign(current, message);
+  else snapshot.messages.set(message.id, message);
+  if (snapshot.reading) snapshot.changes.set(message.id, snapshot.messages.get(message.id)!);
+}
+
+async function cachedChat(chatId: string, refresh = false): Promise<ChatSnapshot> {
+  const snapshot = snapshotFor(chatId);
+  if (snapshot.load) return snapshot.load;
+  if (snapshot.loaded && !refresh) return snapshot;
+  snapshot.changes.clear();
+  snapshot.reading = true;
+  const invalidations = snapshot.invalidations;
+  snapshot.load = (async () => {
+    const messages = (await spindle.chat.getMessages(chatId)) as unknown as ChatMessage[];
+    const changes = new Map(snapshot.changes);
+    const present = new Set(messages.map((message) => message.id));
+    for (const id of snapshot.messages.keys()) if (!present.has(id)) snapshot.messages.delete(id);
+    for (const message of messages) {
+      const changed = changes.get(message.id);
+      // The read supplies the host's normalized role (including system rows).
+      if (changed) changed.role = message.role;
+      if (!changes.has(message.id)) cacheMessage(snapshot, message);
+    }
+    for (const [id, message] of changes) {
+      if (message) cacheMessage(snapshot, message);
+      else snapshot.messages.delete(id);
+    }
+    snapshot.loaded = snapshot.invalidations === invalidations;
+    return snapshot;
+  })().finally(() => {
+    snapshot.load = undefined;
+    snapshot.reading = false;
+    snapshot.changes.clear();
+  });
+  return snapshot.load;
+}
+
+function orderedMessages(snapshot: ChatSnapshot): ChatMessage[] {
+  return [...snapshot.messages.values()].sort((a, b) => (a.index_in_chat ?? 0) - (b.index_in_chat ?? 0));
 }
 
 /** Read-modify-write of our key only; other extensions' metadata is kept. */
-async function writeTranslations(chatId: string, messageId: string, change: (mt: MessageTranslations, message: ChatMessage) => void): Promise<ChatMessage | null> {
-  const messages = await getMessages(chatId);
-  const message = messages.find((m) => m.id === messageId);
+async function writeTranslations(chatId: string, messageId: string, change: (mt: MessageTranslations, message: ChatMessage) => void, snapshot?: ChatSnapshot): Promise<ChatMessage | null> {
+  snapshot ??= await cachedChat(chatId);
+  const message = snapshot.messages.get(messageId);
   if (!message) return null;
   const mt: MessageTranslations = structuredClone(readTranslations(message) ?? { v: 1, entries: {} });
   change(mt, message);
   const keys = Object.keys(mt.entries).sort((a, b) => (mt.entries[b]!.updatedAt ?? 0) - (mt.entries[a]!.updatedAt ?? 0));
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE)) delete mt.entries[k];
   const metadata = { ...(message.metadata ?? {}), [METADATA_KEY]: mt };
+  const previousMetadata = message.metadata;
   await spindle.chat.updateMessage(chatId, messageId, { metadata });
-  message.metadata = metadata;
-  chatCache.get(chatId)?.set(messageId, mt);
+  if (!snapshot.messages.has(messageId)) return null;
+  // A newer event may already have updated this row while the write awaited.
+  if (message.metadata === previousMetadata) message.metadata = metadata;
+  if (snapshot.reading) snapshot.changes.set(messageId, message);
   return message;
 }
 
@@ -164,10 +205,24 @@ function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, ov
   };
 }
 
-async function sendChatViews(uid: Uid, chatId: string): Promise<void> {
+async function sendChatViews(uid: Uid, chatId: string, messageIds?: string[], replace = true): Promise<void> {
   const settings = settingsFor(await loadStore(uid), chatId);
-  const messages = await getMessages(chatId);
-  send({ type: 'views', chatId, views: messages.map((m, i) => viewOf(chatId, m, settings, undefined, i)), replace: true }, uid);
+  const snapshot = await cachedChat(chatId);
+  const ids = messageIds
+    ? [...new Set(messageIds.filter((id) => typeof id === 'string'))].slice(0, VIEW_WINDOW)
+    : orderedMessages(snapshot).slice(-VIEW_WINDOW).map((message) => message.id);
+  const views = ids.flatMap((id) => {
+    const message = snapshot.messages.get(id);
+    if (!message || (!readTranslations(message) && !jobs.has(jobKey(chatId, id)))) return [];
+    return [viewOf(chatId, message, settings)];
+  });
+  // Include the requested ids so the frontend can clear deleted/edited state
+  // without sending empty per-message views for untranslated messages.
+  const plainIds = ids.filter((id) => {
+    const message = snapshot.messages.get(id);
+    return message && message.role !== 'system' && !readTranslations(message) && !jobs.has(jobKey(chatId, id));
+  });
+  send({ type: 'views', chatId, views, replace, requestedIds: ids, plainIds }, uid);
 }
 
 async function sendView(uid: Uid, chatId: string, message: ChatMessage, record?: TranslationRecord | null): Promise<void> {
@@ -259,11 +314,15 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
   jobs.set(key, { controller, finished });
   let message: ChatMessage | undefined;
   let source: string | undefined;
+  let snapshot: ChatSnapshot | undefined;
   try {
     const store = await loadStore(uid);
     const settings = settingsFor(store, chatId);
     if (options.automatic && !settings.autoTranslate) return;
-    const messages = await getMessages(chatId);
+    // Generation may persist a new swipe without a preceding message event.
+    // Refresh once at job entry, then all saves use this event-updated snapshot.
+    snapshot = await cachedChat(chatId, true);
+    const messages = orderedMessages(snapshot);
     const index = messages.findIndex((m) => m.id === messageId);
     message = messages[index];
     if (!message) {
@@ -296,6 +355,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     }
     await sendView(uid, chatId, message);
 
+    let lastProgressSave = -Infinity;
     const record = await translate(
       {
         direction: 'incoming',
@@ -310,12 +370,14 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal),
         signal: controller.signal,
         onProgress: async (progress) => {
+          if (Date.now() - lastProgressSave < 1_000) return;
+          lastProgressSave = Date.now();
           const updated = await writeTranslations(chatId, messageId, (mt) => {
             if (existingKey) delete mt.entries[existingKey];
             delete mt.entries[rawSourceHash(source!)];
             mt.entries[hash] = progress;
             mt.hidden = false;
-          });
+          }, snapshot);
           if (!updated) throw new Error('Message disappeared while saving translation progress');
           await sendView(uid, chatId, updated);
         },
@@ -326,7 +388,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
       delete mt.entries[rawSourceHash(source!)];
       mt.entries[hash] = record;
       mt.hidden = false;
-    });
+    }, snapshot);
     if (!saved) throw new Error('Message disappeared while saving translation');
     if (record.status === 'partial') {
       warn('partial-translation', { sourceKey: hash });
@@ -343,7 +405,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         const prev = mt.entries[hash];
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: 'error' as const, updatedAt: 0 };
         mt.entries[hash] = { ...base, status: 'error', error: text, updatedAt: Date.now() };
-      }).catch(() => null);
+      }, snapshot).catch(() => null);
       if (updated) message = updated;
     }
     spindle.toast.error(`번역 실패: ${text}`, { userId: uid });
@@ -352,6 +414,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
       // Finish the old job's view before a queued job begins publishing its own.
       // The view should show busy=false once this job is done.
       jobs.delete(key);
+      message = snapshot?.messages.get(messageId);
       if (message) await sendView(uid, chatId, message).catch((e) => warn('view-update-failed', { error: errorText(e) }));
     } finally {
       finish();
@@ -362,7 +425,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
 async function translateOutgoing(uid: Uid, chatId: string, text: string): Promise<string> {
   const store = await loadStore(uid);
   const settings = { ...settingsFor(store, chatId), autoContinue: true };
-  const messages = settings.contextEnabled && settings.contextIncludeUserInput ? await getMessages(chatId) : [];
+  const messages = settings.contextEnabled && settings.contextIncludeUserInput ? orderedMessages(await cachedChat(chatId)) : [];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000);
   try {
@@ -384,7 +447,8 @@ async function translateOutgoing(uid: Uid, chatId: string, text: string): Promis
 spindle.registerMessageContentProcessor(async (ctx) => {
   if (ctx.origin !== 'render' || !ctx.messageId || !ctx.content) return;
   const chat = await cachedChat(ctx.chatId);
-  const mt = chat.get(ctx.messageId);
+  const message = chat.messages.get(ctx.messageId);
+  const mt = message ? readTranslations(message) : null;
   if (!mt) return;
   const store = await loadStore(ctx.userId);
   const settings = settingsFor(store, ctx.chatId);
@@ -418,9 +482,37 @@ spindle.on('GENERATION_ENDED', (payload, userId) => {
   }).catch((e) => warnAutomatic('handler-failed', { ...context, error: errorText(e) }));
 });
 
-for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_SENT'] as const) {
-  spindle.on(event as never, ((payload: { chatId?: string }) => {
-    if (payload?.chatId) chatCache.delete(payload.chatId);
+for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SENT'] as const) {
+  spindle.on(event as never, ((payload: { chatId?: string; messageId?: string; message?: ChatMessage & { is_user?: boolean } }) => {
+    if (!payload?.chatId) return;
+    const snapshot = chatCache.get(payload.chatId);
+    if (!snapshot) return;
+    const id = payload.messageId ?? payload.message?.id;
+    if (event === 'MESSAGE_DELETED' && id) {
+      snapshot.messages.delete(id);
+      if (snapshot.reading) snapshot.changes.set(id, null);
+      jobs.get(jobKey(payload.chatId, id))?.controller.abort();
+    } else if (payload.message && id) {
+      // Event DTOs carry metadata inside extra; getMessages normalizes it.
+      const raw = payload.message;
+      if (!raw.role && raw.is_user !== true && !snapshot.messages.has(id)) {
+        // A new non-user wire DTO does not expose the normalized system role.
+        // Refresh on demand rather than guessing its toolbar/context behavior.
+        snapshot.loaded = false;
+        snapshot.invalidations++;
+      }
+      const { spindle_metadata, ...extra } = raw.extra ?? {};
+      cacheMessage(snapshot, {
+        ...raw,
+        role: raw.role ?? snapshot.messages.get(id)?.role ?? (raw.is_user ? 'user' : 'assistant'),
+        extra,
+        metadata: raw.metadata ?? (spindle_metadata as Record<string, unknown> | undefined),
+      });
+    } else {
+      // Older hosts may send only a chat id. The next consumer refreshes once.
+      snapshot.loaded = false;
+      snapshot.invalidations++;
+    }
   }) as never);
 }
 
@@ -452,7 +544,10 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       return;
     }
     case 'chat':
-      await sendChatViews(uid, msg.chatId);
+      await sendChatViews(uid, msg.chatId, msg.messageIds);
+      return;
+    case 'view_messages':
+      await sendChatViews(uid, msg.chatId, msg.messageIds, false);
       return;
     case 'save_settings': {
       const store = await loadStore(uid);
@@ -461,8 +556,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       if (msg.asDefault || !msg.chatId) store.defaults = settings;
       await saveStore(uid, store);
       await sendState(uid);
-      // The display mode may have changed: make the chat render again.
-      if (msg.chatId) chatCache.delete(msg.chatId);
+      // The frontend invalidates display settings; message data is unchanged.
       return;
     }
     case 'save_bundle': {
@@ -521,7 +615,9 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       return;
     }
     case 'delete_translation': {
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
+      const job = jobs.get(jobKey(msg.chatId, msg.messageId));
+      job?.controller.abort();
+      await job?.finished;
       // Only the translation of the swipe that was showing; the other swipes keep theirs.
       const key = typeof msg.sourceKey === 'string' && msg.sourceKey ? msg.sourceKey : null;
       const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? '') ?? sourceHash(message.content ?? '')));
