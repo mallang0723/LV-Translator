@@ -308,6 +308,11 @@ export interface MessageTranslations {
   entries: Record<string, TranslationRecord>;
   /** Translation hidden for this message (show the original). */
   hidden?: boolean;
+  /**
+   * Public projection of the visible swipe's finished translation for the memory extension (LV-TX v1,
+   * src/adapter/contract.ts). Written only while that extension is present; its `h` is the FNV-1a of the content.
+   */
+  pub?: { v: 1; h: string; lang: string; text: string; paras?: Record<string, string>; edited?: Record<string, 1>; at: number };
 }
 
 export const METADATA_KEY = 'st_translator';
@@ -385,7 +390,7 @@ export type ToBackend =
 
 // backend -> frontend
 export type ToFrontend =
-  | { type: 'state'; store: Store; presets: PresetSummary[]; connections: ConnectionSummary[] }
+  | { type: 'state'; store: Store; presets: PresetSummary[]; connections: ConnectionSummary[]; /** Link with the memory extension: not installed, working, or a contract version we do not share. */ link?: 'none' | 'ok' | 'incompatible' }
   | { type: 'views'; chatId: string; views: MessageView[]; replace: boolean; requestedIds?: string[]; plainIds?: string[] }
   | { type: 'text_result'; reqId: string; ok: boolean; text?: string; error?: string }
   | { type: 'edit_data'; chatId: string; messageId: string; ok: boolean; error?: string; sourceKey?: string; pairs?: Array<{ source: string; translation: string; edited: boolean }> }

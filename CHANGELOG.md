@@ -1,5 +1,20 @@
 # 변경 기록
 
+## 0.4.0 — 2026-11-15
+
+번역 프리셋·단어장 1.8.0 이식 ([tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools) `807d6a3`, 원작 [minikkuen/Marinara-Translation-Tools](https://github.com/minikkeuen/Marinara-Translation-Tools), 원저작자 허락). 통이식: 원본의 순수 로직을 `src/vendor/tt-1.8.0/`에 그대로 복사하고(SHA-256 고정) 호스트에 묶인 부분만 어댑터로 바꿨습니다.
+
+- 프리셋 3종 추가(한국어 문체·이름 중심: 외국인 대사 병기 2종, 모델 병기 유지 지문만 번역). 한국어로 내는 기본 프리셋에 한글 전용 줄. 프롬프트의 `{{voice}}`·`{{vocab}}` 자리 지원.
+- 한국어 문체 3종: 기타 지침을 문체 지침으로 전달, 페르소나 이름 전달.
+- 기타 지침 보관함(저장·불러오기=복사·덮어쓰기 확인·삭제)과 예시(지문 문체).
+- 번역 고치기(문단별 손수정)와 "영어 원문도 같이 고치기": 영어 문단 재작성과 번역 저장을 `updateMessage` 한 번으로. 번역 기록에 `edited` 표시.
+- 문단 번역: 모델이 `"원문" (한국어)`로 이미 쓴 대사 문단은 요청 없이 유지.
+- 놓친 최신 답변 자동 번역(1.7.2): 채팅을 열거나 화면에 돌아올 때. 사용자가 중지한 답변은 제외.
+- 기억 서재 연동 LV-TX v1(번역 쪽): `metadata.st_translator.pub`, 채팅 메타데이터 `st_translator.glossary`, rpcPool `st_translator.contract` 핸드셰이크. 새 권한 `chats`.
+- `chat-lean-messages-v1` 호스트: 작업 시작 시 채팅 끝 12개만 읽고 번역 기록은 `ownMetadata`로 이 확장 칸만 갱신. 없는 호스트는 0.3.6과 같음.
+- 이번에 옮기지 않음: 말투·단어 자동 수집(권한 필요), 대조 창의 문단별 재번역, 설정 백업.
+- 테스트 286개, 타입 검사, 빌드 통과. 실제 Lumiverse(7880) QA는 리뷰어 몫입니다. 자세한 내용: [REPORT-tt-1.8.0.md](REPORT-tt-1.8.0.md).
+
 ## 0.3.6 — 2026-11-11
 
 - 채팅별 메시지 스냅샷과 진행 중 읽기 공유로 번역 작업의 전체 채팅 읽기를 최대 1회로 제한했습니다. 진행 저장·표시 처리·숨기기·번역 삭제는 캐시를 재사용합니다.

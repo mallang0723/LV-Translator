@@ -177,6 +177,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let store: Store | null = null;
   let presets: PresetSummary[] = [];
   let connections: ConnectionSummary[] = [];
+  let link: 'none' | 'ok' | 'incompatible' = 'none';
   let chatId: string | null = null;
   const views = new Map<string, MessageView>();
   const bars = new Map<string, HTMLElement>();
@@ -939,6 +940,7 @@ export function setup(ctx: SpindleFrontendContext) {
           status = '연결을 저장했습니다.';
         }, false),
         connectionNote,
+        link === 'none' ? null : el('div', { class: `stt-note${link === 'incompatible' ? ' stt-warn' : ''}` }, [link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.']),
         el('div', { class: 'stt-row' }, [text('모델 언어 (내 메시지를 이 언어로)', 'modelLanguage'), text('내 언어 (응답을 이 언어로)', 'myLanguage')]),
         check('AI 응답 자동 번역', 'autoTranslate'),
         check('번역이 끊기면 자동으로 이어서 번역', 'autoContinue'),
@@ -1017,6 +1019,7 @@ export function setup(ctx: SpindleFrontendContext) {
         store = msg.store;
         presets = msg.presets;
         connections = msg.connections;
+        link = msg.link ?? 'none';
         if (!viewSaveTimer) {
           localView = { ...store.view };
           applyFontStyle();
