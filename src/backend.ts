@@ -197,9 +197,34 @@ function snapshotFor(chatId: string): ChatSnapshot {
   return snapshot;
 }
 
+/** Merge two copies of our metadata entry: per record the newer `updatedAt` wins, so an older copy
+ * (a late event from an earlier progress write) never replaces a newer one. `pub` follows the kept side. */
+function mergeTranslations(current: MessageTranslations | null, incoming: MessageTranslations): MessageTranslations {
+  if (!current) return incoming;
+  const entries: MessageTranslations['entries'] = { ...incoming.entries };
+  let keptCurrent = false;
+  for (const [key, mine] of Object.entries(current.entries)) {
+    const theirs = incoming.entries[key];
+    if (!theirs) continue; // absent in the incoming copy: removed on purpose
+    const a = mine.updatedAt ?? 0;
+    const b = theirs.updatedAt ?? 0;
+    if (a > b || (a === b && theirs.status === 'partial' && mine.status !== 'partial')) {
+      entries[key] = mine;
+      keptCurrent = true;
+    }
+  }
+  if (!keptCurrent) return incoming;
+  return { ...incoming, entries, hidden: current.hidden, pub: current.pub };
+}
+
 function cacheMessage(snapshot: ChatSnapshot, message: ChatMessage): void {
   const current = snapshot.messages.get(message.id);
-  if (current) Object.assign(current, message);
+  if (current) {
+    const mine = readTranslations(current);
+    const theirs = readTranslations(message);
+    if (mine && theirs) message = { ...message, metadata: { ...message.metadata, [METADATA_KEY]: mergeTranslations(mine, theirs) } };
+    Object.assign(current, message);
+  }
   else snapshot.messages.set(message.id, message);
   if (snapshot.reading) snapshot.changes.set(message.id, snapshot.messages.get(message.id)!);
 }
@@ -294,8 +319,9 @@ async function writeTranslations(uid: Uid, chatId: string, messageId: string, ch
     if (Array.isArray(message.swipes)) message.swipes[message.swipe_id ?? 0] = options.content;
   }
   if (!snapshot.messages.has(messageId)) return null;
-  // A newer event may already have updated this row while the write awaited.
+  // A newer event may already have updated this row while the write awaited: merge ours in per entry.
   if (message.metadata === previousMetadata) message.metadata = metadata;
+  else message.metadata = { ...(message.metadata ?? {}), [METADATA_KEY]: mergeTranslations(readTranslations(message), mt) };
   if (snapshot.reading) snapshot.changes.set(messageId, message);
   return message;
 }
@@ -435,6 +461,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
   jobs.set(key, { controller, finished });
   let message: ChatMessage | undefined;
   let source: string | undefined;
+  let finalRecord: TranslationRecord | undefined;
   let snapshot: ChatSnapshot | undefined;
   try {
     const store = await loadStore(uid);
@@ -517,6 +544,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
       if (!options.automatic) spindle.toast.info('번역이 중간에 끊겼습니다. "이어서 번역"을 누르면 이어서 번역합니다.', { userId: uid });
     }
     if (saved) message = saved;
+    finalRecord = record;
   } catch (e) {
     const text = errorText(e);
     warn('translation-failed', { error: text });
@@ -528,7 +556,10 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: 'error' as const, updatedAt: 0 };
         mt.entries[hash] = { ...base, status: 'error', error: text, updatedAt: Date.now() };
       }, snapshot).catch(() => null);
-      if (updated) message = updated;
+      if (updated) {
+        message = updated;
+        finalRecord = readTranslations(updated)?.entries[hash];
+      }
     }
     spindle.toast.error(`번역 실패: ${text}`, { userId: uid });
   } finally {
@@ -537,7 +568,9 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
       // The view should show busy=false once this job is done.
       jobs.delete(key);
       message = snapshot?.messages.get(messageId);
-      if (message) await sendView(uid, chatId, message).catch((e) => warn('view-update-failed', { error: errorText(e) }));
+      // The bar must reflect the job that just finished, not whatever a late progress event left in the row.
+      const override = message && finalRecord && source !== undefined && message.content === source ? finalRecord : undefined;
+      if (message) await sendView(uid, chatId, message, override).catch((e) => warn('view-update-failed', { error: errorText(e) }));
     } finally {
       finish();
     }

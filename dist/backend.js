@@ -2738,11 +2738,35 @@ function snapshotFor(chatId) {
   }
   return snapshot;
 }
+function mergeTranslations(current, incoming) {
+  if (!current)
+    return incoming;
+  const entries = { ...incoming.entries };
+  let keptCurrent = false;
+  for (const [key, mine] of Object.entries(current.entries)) {
+    const theirs = incoming.entries[key];
+    if (!theirs)
+      continue;
+    const a = mine.updatedAt ?? 0;
+    const b = theirs.updatedAt ?? 0;
+    if (a > b || a === b && theirs.status === "partial" && mine.status !== "partial") {
+      entries[key] = mine;
+      keptCurrent = true;
+    }
+  }
+  if (!keptCurrent)
+    return incoming;
+  return { ...incoming, entries, hidden: current.hidden, pub: current.pub };
+}
 function cacheMessage(snapshot, message) {
   const current = snapshot.messages.get(message.id);
-  if (current)
+  if (current) {
+    const mine = readTranslations(current);
+    const theirs = readTranslations(message);
+    if (mine && theirs)
+      message = { ...message, metadata: { ...message.metadata, [METADATA_KEY]: mergeTranslations(mine, theirs) } };
     Object.assign(current, message);
-  else
+  } else
     snapshot.messages.set(message.id, message);
   if (snapshot.reading)
     snapshot.changes.set(message.id, snapshot.messages.get(message.id));
@@ -2844,6 +2868,8 @@ async function writeTranslations(uid, chatId, messageId, change, snapshot, optio
     return null;
   if (message.metadata === previousMetadata)
     message.metadata = metadata;
+  else
+    message.metadata = { ...message.metadata ?? {}, [METADATA_KEY]: mergeTranslations(readTranslations(message), mt) };
   if (snapshot.reading)
     snapshot.changes.set(messageId, message);
   return message;
@@ -2952,6 +2978,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
   jobs.set(key, { controller, finished });
   let message;
   let source;
+  let finalRecord;
   let snapshot;
   try {
     const store = await loadStore(uid);
@@ -3033,6 +3060,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
     }
     if (saved)
       message = saved;
+    finalRecord = record;
   } catch (e) {
     const text = errorText(e);
     warn("translation-failed", { error: text });
@@ -3044,16 +3072,19 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: "error", updatedAt: 0 };
         mt.entries[hash] = { ...base, status: "error", error: text, updatedAt: Date.now() };
       }, snapshot).catch(() => null);
-      if (updated)
+      if (updated) {
         message = updated;
+        finalRecord = readTranslations(updated)?.entries[hash];
+      }
     }
     spindle.toast.error(`\uBC88\uC5ED \uC2E4\uD328: ${text}`, { userId: uid });
   } finally {
     try {
       jobs.delete(key);
       message = snapshot?.messages.get(messageId);
+      const override = message && finalRecord && source !== undefined && message.content === source ? finalRecord : undefined;
       if (message)
-        await sendView(uid, chatId, message).catch((e) => warn("view-update-failed", { error: errorText(e) }));
+        await sendView(uid, chatId, message, override).catch((e) => warn("view-update-failed", { error: errorText(e) }));
     } finally {
       finish();
     }
