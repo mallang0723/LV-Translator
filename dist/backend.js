@@ -2333,6 +2333,95 @@ ${tgt}`}
 `);
 }
 
+// src/adapter/contract.ts
+var PEER_ID = "anon_memory_lv";
+var SELF_ID = "st_translator";
+var CONTRACT_NAME = "lv-tx";
+var CONTRACT_VERSION = 1;
+var PUB_PARAS_MAX = 400;
+var PROVIDES = ["pub-translation@1", "glossary@1"];
+function handshake(version) {
+  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...PROVIDES] };
+}
+function classifyPeer(value) {
+  if (!value || typeof value !== "object")
+    return "none";
+  const v = value;
+  if (v.name !== CONTRACT_NAME || typeof v.v !== "number")
+    return "incompatible";
+  return v.v === CONTRACT_VERSION ? "ok" : "incompatible";
+}
+function langCode(language) {
+  const l = String(language ?? "").trim();
+  if (/^(ko|kor|korean)$/i.test(l) || /\uD55C\uAD6D|\uC870\uC120/.test(l))
+    return "ko";
+  if (/^(en|eng|english)$/i.test(l) || /\uC601\uC5B4/.test(l))
+    return "en";
+  if (/^(ja|jpn|japanese)$/i.test(l) || /\uC77C\uBCF8|\u65E5\u672C/.test(l))
+    return "ja";
+  if (/^(zh|chinese)$/i.test(l) || /\uC911\uAD6D|\u4E2D\u6587/.test(l))
+    return "zh";
+  return l.toLowerCase();
+}
+function buildPub(content, record, settings, now) {
+  if (!record || record.status !== "done" || !record.parts.some((p) => p.trim()))
+    return null;
+  const text = recordToText(record, content);
+  if (!text.trim())
+    return null;
+  const pub = { v: 1, h: hashText(content), lang: langCode(settings.myLanguage), text, at: now };
+  if (record.unit === "paragraph") {
+    try {
+      const pairing = pairParagraphs(content, record, settings);
+      if (pairing.kind !== "whole") {
+        const edited = new Set(record.edited ?? []);
+        const entries = [];
+        pairing.pairs.forEach((pair, i) => {
+          if (pair.translation === null || !pair.translation.trim())
+            return;
+          entries.push([blockKey(pair.source), pair.translation, edited.has(i)]);
+        });
+        const kept = entries.slice(-PUB_PARAS_MAX);
+        if (kept.length) {
+          pub.paras = Object.fromEntries(kept.map(([key, translation]) => [key, translation]));
+          const marks = kept.filter(([, , wasEdited]) => wasEdited).map(([key]) => [key, 1]);
+          if (marks.length)
+            pub.edited = Object.fromEntries(marks);
+        }
+      }
+    } catch {}
+  }
+  return pub;
+}
+function projectPub(mt, content, key, settings, publish, now) {
+  const record = key ? mt.entries[key] : undefined;
+  const pub = publish ? buildPub(content, record, settings, now) : null;
+  if (pub) {
+    mt.pub = pub;
+    return true;
+  }
+  if (!publish && mt.pub && mt.pub.h === hashText(content))
+    return true;
+  delete mt.pub;
+  return false;
+}
+function glossaryText(raw) {
+  return parseGlossary(raw).map((p) => `${p.left} = ${p.right}`).join(`
+`);
+}
+var isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function planGlossary(meta, text, now) {
+  const own = isObject(meta[SELF_ID]) ? meta[SELF_ID] : {};
+  const published = isObject(own.glossary) ? own.glossary : null;
+  const hash = hashText(text);
+  if (!published && !text)
+    return null;
+  if (published?.hash === hash)
+    return null;
+  const entry = { text, hash, at: now };
+  return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };
+}
+
 // src/translate/edit.ts
 function editablePairs(content, record, settings) {
   if (record.status !== "done")
@@ -2580,7 +2669,52 @@ async function connections(uid) {
 }
 async function sendState(uid) {
   const store = await loadStore(uid);
-  send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid) }, uid);
+  send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
+}
+var SELF_VERSION = "0.4.0";
+var PEER_TTL_MS = 20000;
+var peer = { at: 0, state: "none" };
+async function peerState() {
+  if (Date.now() - peer.at < PEER_TTL_MS)
+    return peer.state;
+  let state = "none";
+  try {
+    state = classifyPeer(await spindle.rpcPool.read(`${PEER_ID}.contract`));
+  } catch {
+    state = "none";
+  }
+  peer = { at: Date.now(), state };
+  return state;
+}
+try {
+  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION));
+} catch (e) {
+  spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
+}
+var warnedGlossary = false;
+async function publishGlossary(uid, chatId) {
+  try {
+    if (!hostCaps(spindle).conditionalMetadata || await peerState() !== "ok")
+      return;
+    const store = await loadStore(uid);
+    const text = glossaryText(effectiveGuides(store, settingsFor(store, chatId)).glossary);
+    const chats = spindle.chats;
+    for (let attempt = 0;attempt < 2; attempt++) {
+      const chat = await chats.get(chatId, uid);
+      if (!chat)
+        return;
+      const plan = planGlossary(chat.metadata ?? {}, text, Date.now());
+      if (!plan)
+        return;
+      if (await chats.compareAndSetMetadata(chatId, plan))
+        return;
+    }
+  } catch (e) {
+    if (!warnedGlossary) {
+      warnedGlossary = true;
+      spindle.log.warn(`[translator] glossary not published: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 }
 function readTranslations(message) {
   const raw = message.metadata?.[METADATA_KEY];
@@ -2679,7 +2813,7 @@ async function refreshForJob(chatId, messageId) {
 function orderedMessages(snapshot) {
   return [...snapshot.messages.values()].sort((a, b) => (a.index_in_chat ?? 0) - (b.index_in_chat ?? 0));
 }
-async function writeTranslations(chatId, messageId, change, snapshot, options = {}) {
+async function writeTranslations(uid, chatId, messageId, change, snapshot, options = {}) {
   snapshot ??= await cachedChat(chatId);
   const message = snapshot.messages.get(messageId);
   if (!message)
@@ -2689,6 +2823,8 @@ async function writeTranslations(chatId, messageId, change, snapshot, options = 
   const keys = Object.keys(mt.entries).sort((a, b) => (mt.entries[b].updatedAt ?? 0) - (mt.entries[a].updatedAt ?? 0));
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE))
     delete mt.entries[k];
+  const contentNow = options.content ?? message.content ?? "";
+  projectPub(mt, contentNow, recordKeyFor(mt, contentNow), settingsFor(await loadStore(uid), chatId), await peerState() === "ok", Date.now());
   const metadata = { ...message.metadata ?? {}, [METADATA_KEY]: mt };
   const previousMetadata = message.metadata;
   const patch = hostCaps(spindle).leanMessages ? { ownMetadata: mt } : { metadata };
@@ -2709,6 +2845,7 @@ async function writeTranslations(chatId, messageId, change, snapshot, options = 
   return message;
 }
 var jobs = new Map;
+var reprojecting = new Set;
 var jobKey = (chatId, messageId) => `${chatId}:${messageId}`;
 function viewOf(chatId, message, settings, overrideRecord, position = 0) {
   const mt = readTranslations(message);
@@ -2864,7 +3001,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
         if (Date.now() - lastProgressSave < 1000)
           return;
         lastProgressSave = Date.now();
-        const updated = await writeTranslations(chatId, messageId, (mt) => {
+        const updated = await writeTranslations(uid, chatId, messageId, (mt) => {
           if (existingKey)
             delete mt.entries[existingKey];
           delete mt.entries[rawSourceHash(source)];
@@ -2876,7 +3013,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
         await sendView(uid, chatId, updated);
       }
     });
-    const saved = await writeTranslations(chatId, messageId, (mt) => {
+    const saved = await writeTranslations(uid, chatId, messageId, (mt) => {
       if (existingKey)
         delete mt.entries[existingKey];
       delete mt.entries[rawSourceHash(source)];
@@ -2898,7 +3035,7 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
     const partial = e instanceof TranslationError ? e.record : null;
     if (message && source !== undefined) {
       const hash = sourceHash(source);
-      const updated = await writeTranslations(chatId, messageId, (mt) => {
+      const updated = await writeTranslations(uid, chatId, messageId, (mt) => {
         const prev = mt.entries[hash];
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: "error", updatedAt: 0 };
         mt.entries[hash] = { ...base, status: "error", error: text, updatedAt: Date.now() };
@@ -3034,7 +3171,7 @@ async function saveEdit(uid, msg) {
       return result({ ok: false, error: "\uBB38\uB2E8 \uAD6C\uC870 \uB54C\uBB38\uC5D0 \uC774 \uBC88\uC5ED\uC744 \uC800\uC7A5\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC544\uBB34\uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
     if (snapshot.messages.get(messageId)?.content !== original)
       return result({ ok: false, error: "\uADF8 \uC0AC\uC774 \uBA54\uC2DC\uC9C0 \uB0B4\uC6A9\uC774 \uBC14\uB00C\uC5B4 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
-    const saved = await writeTranslations(chatId, messageId, (draft) => {
+    const saved = await writeTranslations(uid, chatId, messageId, (draft) => {
       delete draft.entries[oldKey];
       delete draft.entries[rawSourceHash(original)];
       draft.entries[sourceHash(content)] = next;
@@ -3104,6 +3241,30 @@ function catchUpFor(uid) {
   catchUps.set(k, instance);
   return instance;
 }
+async function refreshPub(uid, chatId, id, snapshot) {
+  const key = jobKey(chatId, id);
+  const row = snapshot.messages.get(id);
+  const mt = row ? readTranslations(row) : null;
+  if (!row || !mt || jobs.has(key) || reprojecting.has(key))
+    return;
+  const stale = mt.pub !== undefined && mt.pub.h !== hashText(row.content ?? "");
+  if (!stale && (mt.pub !== undefined || !Object.keys(mt.entries).length))
+    return;
+  reprojecting.add(key);
+  try {
+    if (!stale) {
+      const content = row.content ?? "";
+      const wanted = await peerState() === "ok" && buildPub(content, recordFor(mt, content) ?? undefined, settingsFor(await loadStore(uid), chatId), 0) !== null;
+      if (!wanted)
+        return;
+    }
+    await writeTranslations(uid, chatId, id, () => {}, snapshot);
+  } catch (e) {
+    spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`);
+  } finally {
+    reprojecting.delete(key);
+  }
+}
 spindle.registerMessageContentProcessor(async (ctx) => {
   if (ctx.origin !== "render" || !ctx.messageId || !ctx.content)
     return;
@@ -3158,7 +3319,7 @@ spindle.on("GENERATION_ENDED", (payload, userId) => {
   }).catch((e) => warnAutomatic("handler-failed", { ...context, error: errorText(e) }));
 });
 for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAGE_DELETED", "MESSAGE_SENT"]) {
-  spindle.on(event, (payload) => {
+  spindle.on(event, (payload, userId) => {
     if (!payload?.chatId)
       return;
     const snapshot = chatCache.get(payload.chatId);
@@ -3183,6 +3344,7 @@ for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAG
         extra,
         metadata: raw.metadata ?? spindle_metadata
       });
+      refreshPub(userId, payload.chatId, id, snapshot);
     } else {
       snapshot.loaded = false;
       snapshot.invalidations++;
@@ -3204,8 +3366,10 @@ async function handle(msg, uid) {
           h.chats.delete(msg.chatId);
       }
       hints.set(userKey(uid), h);
-      if (msg.open && msg.chatId)
+      if (msg.open && msg.chatId) {
         catchUpFor(uid).catchUpLatest(msg.chatId);
+        publishGlossary(uid, msg.chatId);
+      }
       return;
     }
     case "save_connection": {
@@ -3233,6 +3397,8 @@ async function handle(msg, uid) {
         store.defaults = settings;
       await saveStore(uid, store);
       await sendState(uid);
+      if (msg.chatId)
+        publishGlossary(uid, msg.chatId);
       return;
     }
     case "save_note": {
@@ -3331,7 +3497,7 @@ async function handle(msg, uid) {
       jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
       return;
     case "set_hidden": {
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
+      const updated = await writeTranslations(uid, msg.chatId, msg.messageId, (mt) => {
         mt.hidden = msg.hidden;
       });
       if (updated)
@@ -3343,7 +3509,7 @@ async function handle(msg, uid) {
       job?.controller.abort();
       await job?.finished;
       const key = typeof msg.sourceKey === "string" && msg.sourceKey ? msg.sourceKey : null;
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? "")));
+      const updated = await writeTranslations(uid, msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? "")));
       if (updated)
         await sendView(uid, msg.chatId, updated);
       return;

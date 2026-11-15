@@ -7,6 +7,7 @@ import { BUILTIN_IDS, presetSummaries, promptPresets } from './presets';
 import { CATCH_UP_TAIL, hostCaps, JOB_TAIL } from './adapter/host';
 import { syncSourceFromEdits, type UpstreamRecord } from './adapter/sync-source';
 import { createCatchUp } from './vendor/tt-1.8.0/catch-up';
+import { buildPub, classifyPeer, handshake, glossaryText, PEER_ID, type PeerState, planGlossary, projectPub } from './adapter/contract';
 import { hashText } from './vendor/tt-1.8.0/helpers';
 import { cleanEdit, editablePairs, recordFromMap } from './translate/edit';
 import { personaSectionFor, LIVE_PROMPT_PRESET_IDS } from './translate/prompt';
@@ -34,6 +35,7 @@ import {
   type ToFrontend,
   type TranslationRecord,
 } from './shared';
+import { effectiveGuides } from './bundles';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { renderMessage } from './display/render';
 import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, skipFresh } from './message-ui';
@@ -96,7 +98,63 @@ async function connections(uid: Uid): Promise<ConnectionSummary[]> {
 
 async function sendState(uid: Uid): Promise<void> {
   const store = await loadStore(uid);
-  send({ type: 'state', store, presets: presetSummaries(store.userPresets), connections: await connections(uid) }, uid);
+  send({ type: 'state', store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
+}
+
+// ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
+
+const SELF_VERSION = '0.4.0';
+const PEER_TTL_MS = 20_000;
+let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
+
+/** Whether the memory extension is installed and speaks our contract version. A missing peer is simply "none". */
+async function peerState(): Promise<PeerState> {
+  if (Date.now() - peer.at < PEER_TTL_MS) return peer.state;
+  let state: PeerState = 'none';
+  try {
+    state = classifyPeer(await spindle.rpcPool.read(`${PEER_ID}.contract`));
+  } catch {
+    state = 'none';
+  }
+  peer = { at: Date.now(), state };
+  return state;
+}
+
+try {
+  // Every real host has the pool; the guard only keeps older test doubles quiet.
+  spindle.rpcPool?.sync('contract', handshake(SELF_VERSION));
+} catch (e) {
+  spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+let warnedGlossary = false;
+
+/**
+ * Publishes the chat's glossary in chat metadata for the memory extension. Needs the peer, the host's
+ * conditional metadata update and the `chats` permission; every missing piece just means "not published".
+ */
+async function publishGlossary(uid: Uid, chatId: string): Promise<void> {
+  try {
+    if (!hostCaps(spindle).conditionalMetadata || (await peerState()) !== 'ok') return;
+    const store = await loadStore(uid);
+    const text = glossaryText(effectiveGuides(store, settingsFor(store, chatId)).glossary);
+    const chats = spindle.chats as unknown as {
+      get(id: string, userId?: string): Promise<{ metadata?: Record<string, unknown> } | null>;
+      compareAndSetMetadata(id: string, input: { expected_metadata: Record<string, unknown>; metadata: Record<string, unknown> }): Promise<unknown | null>;
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const chat = await chats.get(chatId, uid);
+      if (!chat) return;
+      const plan = planGlossary(chat.metadata ?? {}, text, Date.now());
+      if (!plan) return;
+      if (await chats.compareAndSetMetadata(chatId, plan)) return;
+    }
+  } catch (e) {
+    if (!warnedGlossary) {
+      warnedGlossary = true;
+      spindle.log.warn(`[translator] glossary not published: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 }
 
 // ---- translation records ----
@@ -203,7 +261,7 @@ function orderedMessages(snapshot: ChatSnapshot): ChatMessage[] {
 }
 
 /** Read-modify-write of our key only; other extensions' metadata is kept. */
-async function writeTranslations(chatId: string, messageId: string, change: (mt: MessageTranslations, message: ChatMessage) => void, snapshot?: ChatSnapshot, options: { content?: string } = {}): Promise<ChatMessage | null> {
+async function writeTranslations(uid: Uid, chatId: string, messageId: string, change: (mt: MessageTranslations, message: ChatMessage) => void, snapshot?: ChatSnapshot, options: { content?: string } = {}): Promise<ChatMessage | null> {
   snapshot ??= await cachedChat(chatId);
   const message = snapshot.messages.get(messageId);
   if (!message) return null;
@@ -211,6 +269,10 @@ async function writeTranslations(chatId: string, messageId: string, change: (mt:
   change(mt, message);
   const keys = Object.keys(mt.entries).sort((a, b) => (mt.entries[b]!.updatedAt ?? 0) - (mt.entries[a]!.updatedAt ?? 0));
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE)) delete mt.entries[k];
+  // Public projection for the memory extension, from the content as it will be stored: the visible swipe,
+  // not whichever swipe a job started on.
+  const contentNow = options.content ?? message.content ?? '';
+  projectPub(mt, contentNow, recordKeyFor(mt, contentNow), settingsFor(await loadStore(uid), chatId), (await peerState()) === 'ok', Date.now());
   const metadata = { ...(message.metadata ?? {}), [METADATA_KEY]: mt };
   const previousMetadata = message.metadata;
   // With lean writes only our own key is merged on the host, atomically; otherwise the whole bag is rewritten.
@@ -232,6 +294,8 @@ async function writeTranslations(chatId: string, messageId: string, change: (mt:
 // ---- views ----
 
 const jobs = new Map<string, { controller: AbortController; finished: Promise<void> }>();
+/** Messages whose `pub` is being refreshed after a swipe or edit (our own write must not start another). */
+const reprojecting = new Set<string>();
 const jobKey = (chatId: string, messageId: string) => `${chatId}:${messageId}`;
 
 function viewOf(chatId: string, message: ChatMessage, settings: ChatSettings, overrideRecord?: TranslationRecord | null, position = 0): MessageView {
@@ -421,7 +485,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         onProgress: async (progress) => {
           if (Date.now() - lastProgressSave < 1_000) return;
           lastProgressSave = Date.now();
-          const updated = await writeTranslations(chatId, messageId, (mt) => {
+          const updated = await writeTranslations(uid, chatId, messageId, (mt) => {
             if (existingKey) delete mt.entries[existingKey];
             delete mt.entries[rawSourceHash(source!)];
             mt.entries[hash] = progress;
@@ -432,7 +496,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
         },
       },
     );
-    const saved = await writeTranslations(chatId, messageId, (mt) => {
+    const saved = await writeTranslations(uid, chatId, messageId, (mt) => {
       if (existingKey) delete mt.entries[existingKey];
       delete mt.entries[rawSourceHash(source!)];
       mt.entries[hash] = record;
@@ -450,7 +514,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     const partial = e instanceof TranslationError ? e.record : null;
     if (message && source !== undefined) {
       const hash = sourceHash(source);
-      const updated = await writeTranslations(chatId, messageId, (mt) => {
+      const updated = await writeTranslations(uid, chatId, messageId, (mt) => {
         const prev = mt.entries[hash];
         const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: 'error' as const, updatedAt: 0 };
         mt.entries[hash] = { ...base, status: 'error', error: text, updatedAt: Date.now() };
@@ -583,7 +647,7 @@ async function saveEdit(uid: Uid, msg: Extract<ToBackend, { type: 'edit_save' }>
     const next = recordFromMap(content, state.map, Object.keys(state.edited));
     if (next.status !== 'done') return result({ ok: false, error: '문단 구조 때문에 이 번역을 저장할 수 없습니다. 아무것도 바꾸지 않았습니다.' });
     if (snapshot.messages.get(messageId)?.content !== original) return result({ ok: false, error: '그 사이 메시지 내용이 바뀌어 저장하지 않았습니다.' });
-    const saved = await writeTranslations(chatId, messageId, (draft) => {
+    const saved = await writeTranslations(uid, chatId, messageId, (draft) => {
       delete draft.entries[oldKey!];
       delete draft.entries[rawSourceHash(original)];
       draft.entries[sourceHash(content)] = next;
@@ -652,6 +716,31 @@ function catchUpFor(uid: Uid) {
   return instance;
 }
 
+
+/** Brings `pub` in line with the message's current content after a swipe or an edit, when that changes anything. */
+async function refreshPub(uid: Uid, chatId: string, id: string, snapshot: ChatSnapshot): Promise<void> {
+  const key = jobKey(chatId, id);
+  const row = snapshot.messages.get(id);
+  const mt = row ? readTranslations(row) : null;
+  if (!row || !mt || jobs.has(key) || reprojecting.has(key)) return;
+  const stale = mt.pub !== undefined && mt.pub.h !== hashText(row.content ?? '');
+  if (!stale && (mt.pub !== undefined || !Object.keys(mt.entries).length)) return;
+  reprojecting.add(key);
+  try {
+    if (!stale) {
+      // No pub yet: only worth a write when one can be built, or the same event would repeat forever.
+      const content = row.content ?? '';
+      const wanted = (await peerState()) === 'ok' && buildPub(content, recordFor(mt, content) ?? undefined, settingsFor(await loadStore(uid), chatId), 0) !== null;
+      if (!wanted) return;
+    }
+    await writeTranslations(uid, chatId, id, () => {}, snapshot);
+  } catch (e) {
+    spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`);
+  } finally {
+    reprojecting.delete(key);
+  }
+}
+
 // ---- display transform ----
 
 spindle.registerMessageContentProcessor(async (ctx) => {
@@ -708,7 +797,7 @@ spindle.on('GENERATION_ENDED', (payload, userId) => {
 });
 
 for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SENT'] as const) {
-  spindle.on(event as never, ((payload: { chatId?: string; messageId?: string; message?: ChatMessage & { is_user?: boolean } }) => {
+  spindle.on(event as never, ((payload: { chatId?: string; messageId?: string; message?: ChatMessage & { is_user?: boolean } }, userId?: string) => {
     if (!payload?.chatId) return;
     const snapshot = chatCache.get(payload.chatId);
     if (!snapshot) return;
@@ -733,6 +822,9 @@ for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAG
         extra,
         metadata: raw.metadata ?? (spindle_metadata as Record<string, unknown> | undefined),
       });
+      // A swipe change or an edit can leave `pub` describing other content (replace or drop it), or reveal a
+      // translation that has none yet. Our own write ends the chain: its `pub.h` already matches the content.
+      void refreshPub(userId, payload.chatId, id, snapshot);
     } else {
       // Older hosts may send only a chat id. The next consumer refreshes once.
       snapshot.loaded = false;
@@ -756,7 +848,10 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
         else h.chats.delete(msg.chatId);
       }
       hints.set(userKey(uid), h);
-      if (msg.open && msg.chatId) catchUpFor(uid).catchUpLatest(msg.chatId);
+      if (msg.open && msg.chatId) {
+        catchUpFor(uid).catchUpLatest(msg.chatId);
+        void publishGlossary(uid, msg.chatId);
+      }
       return;
     }
     case 'save_connection': {
@@ -782,6 +877,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       if (msg.asDefault || !msg.chatId) store.defaults = settings;
       await saveStore(uid, store);
       await sendState(uid);
+      if (msg.chatId) void publishGlossary(uid, msg.chatId);
       // The frontend invalidates display settings; message data is unchanged.
       return;
     }
@@ -870,7 +966,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
       return;
     case 'set_hidden': {
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt) => {
+      const updated = await writeTranslations(uid, msg.chatId, msg.messageId, (mt) => {
         mt.hidden = msg.hidden;
       });
       if (updated) await sendView(uid, msg.chatId, updated);
@@ -882,7 +978,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       await job?.finished;
       // Only the translation of the swipe that was showing; the other swipes keep theirs.
       const key = typeof msg.sourceKey === 'string' && msg.sourceKey ? msg.sourceKey : null;
-      const updated = await writeTranslations(msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? '') ?? sourceHash(message.content ?? '')));
+      const updated = await writeTranslations(uid, msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? '') ?? sourceHash(message.content ?? '')));
       if (updated) await sendView(uid, msg.chatId, updated);
       return;
     }

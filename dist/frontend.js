@@ -1587,6 +1587,7 @@ function setup(ctx) {
   let store = null;
   let presets = [];
   let connections = [];
+  let link = "none";
   let chatId = null;
   const views = new Map;
   const bars = new Map;
@@ -2310,6 +2311,7 @@ function setup(ctx) {
         status = "연결을 저장했습니다.";
       }, false),
       connectionNote,
+      link === "none" ? null : el("div", { class: `stt-note${link === "incompatible" ? " stt-warn" : ""}` }, [link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요."]),
       el("div", { class: "stt-row" }, [text("모델 언어 (내 메시지를 이 언어로)", "modelLanguage"), text("내 언어 (응답을 이 언어로)", "myLanguage")]),
       check("AI 응답 자동 번역", "autoTranslate"),
       check("번역이 끊기면 자동으로 이어서 번역", "autoContinue"),
@@ -2378,6 +2380,7 @@ function setup(ctx) {
         store = msg.store;
         presets = msg.presets;
         connections = msg.connections;
+        link = msg.link ?? "none";
         if (!viewSaveTimer) {
           localView = { ...store.view };
           applyFontStyle();
