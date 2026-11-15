@@ -140,17 +140,18 @@ describe('bundle prompts and translation engine', () => {
 
   test('incoming prompt includes combined glossary, context and voice', () => {
     const req = request('incoming');
-    expect(req.user).toContain('"기사" → "knight"');
-    expect(req.user).toContain('"마법사" → "mage"');
-    expect(req.user).toContain('"왕" → "king"');
-    expect(req.user).not.toContain('wizard');
+    // The default prompt carries {{vocab}}, so 1.8.0 puts the glossary into the system prompt.
+    expect(req.system).toContain('"기사" → "knight"');
+    expect(req.system).toContain('"마법사" → "mage"');
+    expect(req.system).toContain('"왕" → "king"');
+    expect(req.system).not.toContain('wizard');
     expect(req.system).toContain('Bundle setting\n\nRoom setting');
     expect(req.system).toContain('Bundle voice\n\nRoom voice');
   });
 
   test('outgoing includes glossary and context, but never either voice', () => {
     const req = request('outgoing');
-    expect(req.user).toContain('"기사" → "knight"');
+    expect(req.system).toContain('"기사" → "knight"');
     expect(req.system).toContain('Bundle setting\n\nRoom setting');
     expect(req.system).not.toContain('Bundle voice');
     expect(req.system).not.toContain('Room voice');
@@ -159,7 +160,7 @@ describe('bundle prompts and translation engine', () => {
   test('room toggles gate both shared and room text', () => {
     const req = request('incoming', { freeContextEnabled: false, incomingVoiceEnabled: false });
     for (const text of ['Bundle setting', 'Room setting', 'Bundle voice', 'Room voice']) expect(req.system).not.toContain(text);
-    expect(req.user).toContain('knight');
+    expect(req.system).toContain('knight');
   });
 
   test('combined guides obey the existing prompt length limit', () => {

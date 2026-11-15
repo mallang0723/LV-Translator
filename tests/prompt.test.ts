@@ -1,15 +1,21 @@
 import { describe, expect, test } from 'bun:test';
-import cases from './fixtures/upstream-requests.json';
+import cases from './fixtures/upstream-requests-1.8.0.json';
 import { promptPresets } from '../src/presets';
-import { BASE_PROMPT } from '../src/presets/catalog';
+import { BASE_PROMPT, HANGUL_ONLY_RULE } from '../src/presets/catalog';
 import { DEFAULT_SETTINGS, normalizeSettings } from '../src/shared';
 import { buildTranslationRequest, type ContextMessage, type Direction, SYSTEM_PROMPT_MAX, TRANSLATION_TEXT_MAX, TranslationLimitError } from '../src/translate/prompt';
 import { MARKER_INSTRUCTION } from '../src/translate/protect';
 
-// Fixture: final AI requests recorded from Marinara-Translation-Tools 1.5.4 running in a vm
-// (with Marinara Engine's {{targetLanguage}} resolution and "Translate the following text to" wrapper).
-describe('translation requests match Translation Tools 1.5.4', () => {
-  (cases as Array<{ direction: Direction; text: string; settings: Record<string, unknown>; previous: ContextMessage[]; expected: { system: string; user: string } }>).forEach((c, i) => {
+// Fixture: final AI requests recorded from Marinara-Translation-Tools 1.5.4 running in a vm (with Marinara
+// Engine's {{targetLanguage}} resolution and "Translate the following text to" wrapper). For 1.8.0 the cases
+// that change carry both the 1.5.4 text (expected154) and the 1.8.0 text (expected). Every change must be
+// content-preserving: only the placement of the glossary and character voice ({{vocab}}/{{voice}} in the
+// presets) and the Hangul-only line differ.
+type Case = { direction: Direction; text: string; settings: Record<string, unknown>; previous: ContextMessage[]; expected: { system: string; user: string }; expected154?: { system: string; user: string } };
+const lineBag = (text: string) => text.split('\n').map((l) => l.trim()).filter((l) => l && l !== '{{voice}}' && l !== '{{vocab}}').sort();
+
+describe('translation requests follow Translation Tools 1.8.0', () => {
+  (cases as Case[]).forEach((c, i) => {
     test(`case ${i + 1} (${c.direction})`, () => {
       const req = buildTranslationRequest({
         direction: c.direction,
@@ -19,18 +25,25 @@ describe('translation requests match Translation Tools 1.5.4', () => {
         previous: c.previous,
         hasMarkers: false,
       });
-      const s = normalizeSettings(c.settings);
-      // Known 1.5.4 bug, deliberately not copied: with "채팅 설정 유지", an empty chat prompt and the
-      // character voice on, 1.5.4 sends the voice section without any translation instruction.
-      // We keep Marinara's default prompt in front of it.
-      const upstreamDropsBase =
-        c.direction === 'incoming' && s.incomingPresetId === 'builtin-inherit' && !s.incomingPrompt.trim() &&
-        s.incomingVoiceEnabled && s.incomingVoicePrompt.trim() !== '';
-      const expectedSystem = upstreamDropsBase
-        ? `${BASE_PROMPT.replaceAll('{{targetLanguage}}', s.myLanguage)}\n\n${c.expected.system}`
-        : c.expected.system;
-      expect(req.system).toBe(expectedSystem);
+      expect(req.system).toBe(c.expected.system);
       expect(req.user).toBe(c.expected.user);
+    });
+
+    if (!c.expected154) return;
+    test(`case ${i + 1} changed only by macro placement or the Hangul-only line`, () => {
+      const s = normalizeSettings(c.settings);
+      // 1.5.4 bug that 1.8.0 fixes ({{voice}} sits in the base prompt): with "채팅 설정 유지", an empty chat
+      // prompt and the character voice on, 1.5.4 sent the voice section without any translation instruction.
+      const dropsBase =
+        c.direction === 'incoming' && s.incomingPresetId === 'builtin-inherit' && !s.incomingPrompt.trim() && s.incomingVoiceEnabled && s.incomingVoicePrompt.trim() !== '';
+      const old154 = dropsBase ? `${BASE_PROMPT.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').replaceAll('{{targetLanguage}}', s.myLanguage)}\n\n${c.expected154!.system}` : c.expected154!.system;
+      const hangul = HANGUL_ONLY_RULE.trim();
+      const removeHangul = (t: string) => t.split('\n').filter((l) => l.trim() !== hangul).join('\n');
+      // The glossary rule loses its closing sentence when the prompt places the glossary itself.
+      const sentence = ' Translate only [Text to Translate].';
+      const newAll = removeHangul(`${c.expected.system}\n${c.expected.user}`).replaceAll(sentence, '').replace('[Text to Translate]\n', '').replace('[End Text]', '');
+      const oldAll = `${old154}\n${c.expected154!.user}`.replaceAll(sentence, '').replace('[Text to Translate]\n', '').replace('[End Text]', '');
+      expect(lineBag(newAll)).toEqual(lineBag(oldAll));
     });
   });
 });

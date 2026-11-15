@@ -1,17 +1,21 @@
-// Builds the translation request exactly the way Marinara Engine + Translation Tools 1.5.4 do:
-//   system = preset prompt, glossary rule, free context, character voice (incoming only),
-//            previous-context rule — with {{targetLanguage}} resolved; at most 200,000 characters
-//   user   = "Translate the following text to <language>:\n\n" + glossary block + previous
-//            context block + [Text to Translate] ... [End Text]; the reference text at most 50,000
-// Ported from Marinara-Translation-Tools 1.5.4 extension.js (MIT, (c) 2026 minikkuen). The user message
-// wording follows Marinara Engine (AGPL-3.0); see THIRD_PARTY_NOTICES.md.
+// Builds the translation request the way Translation Tools 1.8.0 does (and Marinara Engine's
+// translate endpoint wraps it):
+//   system = preset prompt with {{voice}} / {{vocab}} filled, glossary rule, 기타 지침 (a style
+//            instruction for the live presets), character voice, persona, previous-context rule,
+//            with {{targetLanguage}} resolved; at most 200,000 characters
+//   user   = "Translate the following text to <language>:\n\n" + glossary block (unless the prompt
+//            places the glossary itself with {{vocab}}) + previous context block + [Text to Translate]
+//            ... [End Text]; the reference text at most 50,000
+// The assembly itself is upstream code (src/vendor/tt-1.8.0/assembly.ts, generated verbatim from
+// tlsiddl/marinara-translation-tools 807d6a3). The user message wording follows Marinara Engine
+// (AGPL-3.0); see THIRD_PARTY_NOTICES.md.
 
 import { normalizeIllustrations } from '../illustrations';
 
 import { BASE_PROMPT } from '../presets/catalog';
 import { effectiveGuides, type GuideLibrary } from '../bundles';
-import { MARINARA_TRANSLATION_REFERENCE_PROMPTS, MARINARA_TRANSLATION_REFERENCE_RENDERERS } from '../presets/upstream/reference';
 import { type ChatSettings, INHERIT_PRESET_ID } from '../shared';
+import { createAssembly } from '../vendor/tt-1.8.0/assembly';
 import { MARKER_INSTRUCTION } from './protect';
 import { parseGlossary } from './glossary';
 export { parseGlossary } from './glossary';
@@ -49,30 +53,11 @@ export interface TranslationRequest {
   hasContext: boolean;
 }
 
-export function glossarySection(raw: string, sourceText: string, targetLanguage: string): string {
-  const pairs = parseGlossary(raw);
-  if (!pairs.length) return '';
-  const exact: string[] = [];
-  const bidirectional: string[] = [];
-  for (const pair of pairs) {
-    const hasLeft = sourceText.includes(pair.left);
-    const hasRight = sourceText.includes(pair.right);
-    if (hasLeft && !hasRight) exact.push(`"${pair.left}" → "${pair.right}"`);
-    else if (hasRight && !hasLeft) exact.push(`"${pair.right}" → "${pair.left}"`);
-    else bidirectional.push(`"${pair.left}" ↔ "${pair.right}"`);
-  }
-  return MARINARA_TRANSLATION_REFERENCE_RENDERERS.glossary(targetLanguage, exact, bidirectional);
-}
+const pure = createAssembly({ currentScope: () => ({}), storedConfig: { presets: [] }, paragraph: {} });
 
-export function escapeContextValue(value: string): string {
-  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-}
-
-function freeContextSection(raw: string): string {
-  const context = raw.trim();
-  if (!context) return '';
-  return MARINARA_TRANSLATION_REFERENCE_RENDERERS.freeContext(escapeContextValue(context));
-}
+export const glossarySection = pure.glossarySection as (raw: string, sourceText: string, targetLanguage: string) => string;
+export const escapeContextValue = pure.escapeContextValue as (value: string) => string;
+export const LIVE_PROMPT_PRESET_IDS = pure.LIVE_PROMPT_PRESET_IDS as ReadonlySet<string>;
 
 /** The base prompt for one direction: the preset's text, or the chat's own prompt for "채팅 설정 유지". */
 export function directionPrompt(settings: ChatSettings, direction: Direction, presets: PromptPreset[]): string {
@@ -103,15 +88,50 @@ export interface BuildInput {
   previous: ContextMessage[];
   /** Whether the text contains ⟦n⟧ markers. */
   hasMarkers: boolean;
+  /** The "# User Persona" section (upstream personaSection), resolved by the caller; '' = none. */
+  persona?: string;
+}
+
+/** Upstream's "scope": the chat settings with the shared guide bundle already applied. */
+function scopeOf(settings: ChatSettings, direction: Direction, guides: ReturnType<typeof effectiveGuides>): ChatSettings {
+  return {
+    ...settings,
+    glossary: guides.glossary,
+    freeContext: guides.freeContext,
+    incomingVoicePrompt: guides.incomingVoicePrompt,
+    // Upstream checks the incoming preset id for every request; an outgoing request answers to its own preset.
+    incomingPresetId: direction === 'incoming' ? settings.incomingPresetId : settings.outgoingPresetId,
+  };
+}
+
+/** The upstream prompt assembly bound to one request's settings and preset list. */
+export function assemblyFor(settings: ChatSettings, direction: Direction, presets: PromptPreset[], guides: ReturnType<typeof effectiveGuides>, persona?: { getChat(id: string): Promise<{ personaId?: string }>; getPersona(id: string): Promise<{ name?: string } | null> }) {
+  const scope = scopeOf(settings, direction, guides);
+  return {
+    scope,
+    ...createAssembly({ currentScope: () => scope, storedConfig: { presets }, paragraph: persona ?? { getChat: async () => ({}), getPersona: async () => null } }),
+  };
+}
+
+/** The "# User Persona" section for a persona name (upstream wording), for the live presets only. */
+export async function personaSectionFor(settings: ChatSettings, presets: PromptPreset[], name: string): Promise<string> {
+  const guides = effectiveGuides({ userBundles: [] }, settings);
+  const a = assemblyFor(settings, 'incoming', presets, guides, { getChat: async () => ({ personaId: 'persona' }), getPersona: async () => ({ name }) });
+  return a.personaSection(a.scope, 'chat');
 }
 
 export function buildTranslationRequest(input: BuildInput): TranslationRequest {
   const { direction, text, settings } = input;
   const guides = effectiveGuides(input.store ?? { userBundles: [] }, settings);
   const targetLanguage = direction === 'incoming' ? settings.myLanguage : settings.modelLanguage;
-  const glossary = glossarySection(guides.glossary, text, targetLanguage);
-  const glossaryPrefix = glossary ? `${glossary}\n\n` : '';
-  const referenceText = glossary ? `${glossaryPrefix}[Text to Translate]\n${text}\n[End Text]` : text;
+  const assembly = assemblyFor(settings, direction, input.presets, guides);
+  const incoming = direction === 'incoming';
+  const glossary = assembly.glossarySection(guides.glossary, text, targetLanguage);
+  // With {{vocab}} in the prompt the glossary goes into the system prompt instead of in front of the text.
+  const systemPrompt = directionPrompt(settings, direction, input.presets);
+  const usesVocab = assembly.VOCAB_MACRO_TEST.test((incoming && assembly.livePresetPrompt(assembly.scope)) || systemPrompt);
+  const glossaryPrefix = glossary && !usesVocab ? `${glossary}\n\n` : '';
+  const referenceText = glossaryPrefix ? `${glossaryPrefix}[Text to Translate]\n${text}\n[End Text]` : text;
   if (referenceText.length > TRANSLATION_TEXT_MAX) throw new TranslationLimitError('text', referenceText.length, TRANSLATION_TEXT_MAX);
 
   let body = referenceText;
@@ -140,16 +160,10 @@ export function buildTranslationRequest(input: BuildInput): TranslationRequest {
     }
   }
 
-  const sections = [directionPrompt(settings, direction, input.presets)];
-  if (glossary) sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.glossary);
-  const freeContext = freeContextSection(settings.freeContextEnabled ? guides.freeContext : '');
-  if (freeContext) sections.push(freeContext);
-  if (direction === 'incoming' && settings.incomingVoiceEnabled && guides.incomingVoicePrompt.trim()) {
-    sections.push(MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice(guides.incomingVoicePrompt.trim()));
-  }
-  if (hasContext) sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.previousContext);
-  if (input.hasMarkers) sections.push(MARKER_INSTRUCTION);
-  const system = sections.filter(Boolean).join('\n\n').replaceAll('{{targetLanguage}}', targetLanguage.trim());
+  // Upstream buildSystemPrompt: the one place that decides the order and the macro placement.
+  let system = assembly.buildSystemPrompt({ systemPrompt }, hasContext, assembly.scope, glossary, incoming, '', incoming ? input.persona ?? '' : '');
+  if (input.hasMarkers) system = [system, MARKER_INSTRUCTION].filter(Boolean).join('\n\n');
+  system = system.replaceAll('{{targetLanguage}}', targetLanguage.trim());
   if (system.length > SYSTEM_PROMPT_MAX) throw new TranslationLimitError('systemPrompt', system.length, SYSTEM_PROMPT_MAX);
 
   return { system, user: `Translate the following text to ${targetLanguage}:\n\n${body}`, hasContext };
