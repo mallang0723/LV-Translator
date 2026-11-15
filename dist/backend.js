@@ -894,81 +894,179 @@ function hostCaps(api) {
 }
 var JOB_TAIL = 12;
 
-// src/translate/glossary.ts
-function parseGlossary(raw) {
-  const pairs = [];
-  for (const line of raw.split(/\r?\n/u)) {
-    const separator = line.indexOf("=");
-    if (separator < 1)
-      continue;
-    const left = line.slice(0, separator).trim();
-    const right = line.slice(separator + 1).trim();
-    if (left && right)
-      pairs.push({ left, right });
+// src/vendor/tt-1.8.0/helpers.ts
+function hashText(str) {
+  let h = 2166136261;
+  const s = String(str ?? "");
+  for (let i = 0;i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  return pairs;
+  return (h >>> 0).toString(36);
+}
+function langScript(lang) {
+  const l = String(lang || "").toLowerCase();
+  if (/korean|\uD55C\uAD6D|\uC870\uC120/.test(l))
+    return /[\uAC00-\uD7A3]/g;
+  if (/japan|\u65E5\u672C|\uC77C\uBCF8/.test(l))
+    return /[\u3040-\u30FF]/g;
+  if (/chinese|\u4E2D\u6587|\uC911\uAD6D/.test(l))
+    return /[\u4E00-\u9FFF]/g;
+  if (/russian|\uB7EC\uC2DC\uC544|\u0440\u0443\u0441/.test(l))
+    return /[\u0400-\u04FF]/g;
+  if (/thai|\uD0DC\uAD6D/.test(l))
+    return /[\u0E00-\u0E7F]/g;
+  if (/arabic|\uC544\uB78D/.test(l))
+    return /[\u0600-\u06FF]/g;
+  return null;
+}
+function normalizeForKey(s) {
+  return String(s ?? "").replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB\uFF02]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[*_~`#>]/g, "").replace(/\s+/g, " ").trim();
+}
+function blockKey(block) {
+  return hashText(normalizeForKey(block));
+}
+function stripMarks(s) {
+  return String(s ?? "").replace(/<\/?x\d+>/g, "").replace(/\u27EA\d+\u27EB/g, "");
+}
+var PAIRED_QUOTE_RE = /("[^"\n]+"|\u201C[^\u201D\n]+\u201D|\u00AB[^\u00BB\n]+\u00BB)\s*\(([^()\n]+)\)/g;
+function isPairedDialogue(text, lang) {
+  const script = langScript(lang);
+  if (!script || !/korean|\uD55C\uAD6D|\uC870\uC120/i.test(String(lang)))
+    return false;
+  let paired = 0;
+  const rest = String(text).replace(/<[^<>]*>/g, "").replace(PAIRED_QUOTE_RE, (m, quote, gloss) => {
+    if (!/[\uAC00-\uD7A3]/.test(gloss))
+      return m;
+    paired++;
+    return "";
+  }).replace(/^[ \t]*[^\n|"\u201C\u00AB]{1,40}\|/gm, "");
+  return paired > 0 && !/\p{L}/u.test(rest);
 }
 
-// src/bundles.ts
-function effectiveGuides(store, settings) {
-  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
-  if (!bundle)
-    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
-  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
-  const glossary = [
-    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
-    ...parseGlossary(settings.glossary)
-  ].map((p) => `${p.left} = ${p.right}`).join(`
-`);
-  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
+// src/vendor/tt-1.8.0/sync-source.ts
+function createSyncSource(deps) {
+  const { currentMessage, messageCache, blockKey, stripMarks, llm, api, setCachedContent, getRecord, saveRecord } = deps;
+  const SYNC_SOURCE_SYSTEM = `You revise one English narration paragraph of a roleplay story so that it matches a Korean translation the user corrected by hand.
+Compare the previous Korean translation with the corrected one. Change the English only where the correction changed meaning, facts, names, numbers, who does what, or tone. Keep every other word, the sentence order, markdown (*, _, **), quotation marks and any tags exactly as in the original English. Write natural English in the same style and voice.
+Output only the revised English paragraph, with no notes, quotation marks around it, or code fences.`;
+  async function syncSourceToEdits(chatId, messageId, edits, oldTranslations) {
+    const msg = currentMessage(chatId, messageId) || messageCache.get(messageId);
+    if (!msg || typeof msg.content !== "string")
+      throw new Error("\uBA54\uC2DC\uC9C0\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+    const parts = msg.content.split(/(\n[ \t]*\n)/);
+    const rewritten = [];
+    for (const [key, corrected] of Object.entries(edits)) {
+      const index = parts.findIndex((part, i) => i % 2 === 0 && part.trim() && blockKey(part) === key);
+      if (index < 0)
+        continue;
+      const original = parts[index];
+      const lead = /^\s*/.exec(original)[0];
+      const trail = /\s*$/.exec(original)[0];
+      const user = `[Original English]
+${original.trim()}
 
-`);
-  return {
-    glossary,
-    freeContext: join(bundle.freeContext, settings.freeContext),
-    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
-  };
-}
-function newBundleId(cryptoApi = globalThis.crypto) {
-  if (typeof cryptoApi?.randomUUID === "function")
-    return `bundle-${cryptoApi.randomUUID()}`;
-  const bytes = new Uint8Array(16);
-  if (typeof cryptoApi?.getRandomValues === "function")
-    cryptoApi.getRandomValues(bytes);
-  else
-    for (let i = 0;i < bytes.length; i++)
-      bytes[i] = Math.floor(Math.random() * 256);
-  bytes[6] = bytes[6] & 15 | 64;
-  bytes[8] = bytes[8] & 63 | 128;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-function saveBundle(store, value) {
-  if (!value || typeof value.name !== "string" || !value.name.trim())
-    throw new Error("\uBB36\uC74C \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
-  const existing = store.userBundles.findIndex((b) => b.id === value.id);
-  let id = existing >= 0 ? store.userBundles[existing].id : newBundleId();
-  while (existing < 0 && store.userBundles.some((b) => b.id === id))
-    id = newBundleId();
-  const bundle = {
-    id,
-    name: value.name.trim(),
-    glossary: typeof value.glossary === "string" ? value.glossary : "",
-    freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
-    incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
-  };
-  if (existing >= 0)
-    store.userBundles[existing] = bundle;
-  else
-    store.userBundles.push(bundle);
-  return bundle;
-}
-function deleteBundle(store, id) {
-  store.userBundles = store.userBundles.filter((b) => b.id !== id);
-  for (const settings of [store.defaults, ...Object.values(store.chats)]) {
-    if (settings.bundleId === id)
-      settings.bundleId = "";
+[Previous Korean translation]
+${stripMarks(oldTranslations[key] ?? "") || "(none)"}
+
+[Corrected Korean translation]
+${corrected}`;
+      let revised = (await llm(SYNC_SOURCE_SYSTEM, user, { chatId, prefill: "", temperature: 0.3 })).trim();
+      revised = revised.replace(/^```[a-z]*\n?|\n?```$/g, "").trim();
+      if (!revised || revised === original.trim())
+        continue;
+      parts[index] = `${lead}${revised}${trail}`;
+      rewritten.push({ oldKey: key, newKey: blockKey(revised), corrected });
+    }
+    if (!rewritten.length)
+      return 0;
+    const content = parts.join("");
+    await api(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "PATCH", body: { content } });
+    messageCache.set(messageId, { ...msg, content });
+    setCachedContent(chatId, messageId, content);
+    const base = getRecord(messageId) || { v: 1, map: {}, edited: {}, view: "", at: 0 };
+    const rec = { ...base, map: { ...base.map }, edited: { ...base.edited } };
+    for (const { oldKey, newKey, corrected } of rewritten) {
+      delete rec.map[oldKey];
+      delete rec.edited[oldKey];
+      rec.map[newKey] = corrected;
+      rec.edited[newKey] = 1;
+    }
+    await saveRecord(chatId, messageId, rec);
+    return rewritten.length;
   }
+  return { SYNC_SOURCE_SYSTEM, syncSourceToEdits };
+}
+
+// src/adapter/sync-source.ts
+async function syncSourceFromEdits(input) {
+  let content = null;
+  let record = input.record;
+  const { syncSourceToEdits } = createSyncSource({
+    currentMessage: () => ({ id: "message", content: input.content }),
+    messageCache: new Map,
+    blockKey,
+    stripMarks,
+    llm: (system, user) => input.llm(system, user),
+    api: async (_path, options) => {
+      content = options.body?.content ?? null;
+      return {};
+    },
+    setCachedContent: () => {},
+    getRecord: () => record,
+    saveRecord: async (_chatId, _messageId, next) => {
+      record = next;
+    }
+  });
+  const count = await syncSourceToEdits("chat", "message", input.edits, input.oldTranslations);
+  return { count, content, record };
+}
+
+// src/vendor/tt-1.8.0/catch-up.ts
+function createCatchUp(deps) {
+  const { getChat, handlesRow, api, listMessages, rememberMessage, getRecord, hashText, translateMessage, generationActive, marinara, PT_KEY } = deps;
+  let disposed = false;
+  const CATCH_UP_WINDOW_MS = 30 * 60 * 1000;
+  const caughtUp = new Set;
+  let catchUpTimer = 0;
+  function catchUpLatest(chatId) {
+    if (!chatId || disposed)
+      return;
+    clearTimeout(catchUpTimer);
+    catchUpTimer = setTimeout(async () => {
+      if (disposed || generationActive.has(chatId))
+        return;
+      try {
+        const chat = await getChat(chatId, true);
+        if (!handlesRow(chat) || chat.metadata.autoTranslate !== true)
+          return;
+        const status = await api(`/generate/status/${encodeURIComponent(chatId)}`).catch(() => null);
+        if (status?.active)
+          return;
+        const list = await listMessages(chatId, 4);
+        list.forEach(rememberMessage);
+        const latest = [...list].reverse().find((m) => m.role === "assistant");
+        if (!latest || !latest.content.trim() || latest.extra?.hiddenFromUser === true)
+          return;
+        if (getRecord(latest.id) || latest.extra?.[PT_KEY])
+          return;
+        const age = Date.now() - Date.parse(latest.createdAt);
+        if (!(age >= 0 && age < CATCH_UP_WINDOW_MS))
+          return;
+        const attempt = `${latest.id}:${hashText(latest.content)}`;
+        if (caughtUp.has(attempt))
+          return;
+        caughtUp.add(attempt);
+        await translateMessage(chatId, latest.id, { quiet: true }).catch(() => {});
+      } catch (e) {
+        marinara.log.warn("\uB193\uCE5C \uC790\uB3D9 \uBC88\uC5ED \uBCF4\uCDA9 \uC2E4\uD328", e);
+      }
+    }, 1500);
+  }
+  return { catchUpLatest, caughtUp, CATCH_UP_WINDOW_MS, dispose: () => {
+    disposed = true;
+    clearTimeout(catchUpTimer);
+  } };
 }
 
 // src/illustrations.ts
@@ -1052,6 +1150,179 @@ function restoreCurrentIllustrations(translated, content) {
   return rest ? `${text}
 
 ${rest}` : text;
+}
+
+// src/translate/chunk.ts
+var TRANSLATION_CHUNK_CHARS = 3200;
+var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
+function findCut(text, from, limit) {
+  const end = from + limit;
+  const span = text.slice(from, end + 1);
+  let best = -1;
+  for (const m of span.matchAll(SENTENCE_BREAK)) {
+    const at = m.index + m[0].length;
+    if (at <= limit)
+      best = Math.max(best, at);
+  }
+  const newline = span.lastIndexOf(`
+`, limit);
+  if (newline > 0)
+    best = Math.max(best, newline);
+  if (best <= 0) {
+    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
+      if (/\s/.test(span[i])) {
+        best = i;
+        break;
+      }
+    }
+  }
+  let cut = best > 0 ? from + best : end;
+  const open = text.lastIndexOf("\u27E6", cut - 1);
+  if (open >= from) {
+    const close = text.indexOf("\u27E7", open);
+    if (close >= cut)
+      cut = open > from ? open : close + 1;
+  }
+  return cut;
+}
+function cutParagraph(paragraph, limit) {
+  const pieces = [];
+  let from = 0;
+  while (paragraph.length - from > limit) {
+    const cut = findCut(paragraph, from, limit);
+    pieces.push(paragraph.slice(from, cut));
+    from = cut;
+    while (from < paragraph.length && /\s/.test(paragraph[from]))
+      from++;
+  }
+  pieces.push(paragraph.slice(from));
+  return pieces;
+}
+function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
+  const max = Math.max(1, Math.floor(limit));
+  const pieces = String(text).replace(/\r\n?/g, `
+`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
+  const parts = [];
+  for (const raw of pieces) {
+    const piece = raw.trim();
+    if (!piece)
+      continue;
+    const last = parts.length - 1;
+    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
+      parts[last] += `
+
+${piece}`;
+    else
+      parts.push(piece);
+  }
+  return parts;
+}
+var SENTENCE_END = /[.!?\u3002\uFF01\uFF1F\u2026"\u201D\u2019'\u300D\u300F)\]]$/;
+function joinContinuation(partial, continuation) {
+  let cont = continuation.replace(/^\s*\n/, `
+`);
+  if (!cont.trim())
+    return partial;
+  const tail = partial.slice(-200);
+  for (let k = Math.min(tail.length, cont.length);k >= 8; k--) {
+    if (tail.endsWith(cont.slice(0, k))) {
+      cont = cont.slice(k);
+      break;
+    }
+  }
+  if (!cont.trim())
+    return partial;
+  if (/\s$/.test(partial) || /^\s/.test(cont))
+    return partial + cont;
+  return SENTENCE_END.test(partial) ? `${partial} ${cont}` : partial + cont;
+}
+function isTruncatedFinish(reason) {
+  if (typeof reason !== "string")
+    return false;
+  const r = reason.toLowerCase();
+  return r === "length" || r.includes("max_tokens") || r.includes("max_output") || r === "max_tokens";
+}
+
+// src/translate/clean-reply.ts
+function cleanReply(text) {
+  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
+}
+
+// src/translate/glossary.ts
+function parseGlossary(raw) {
+  const pairs = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator < 1)
+      continue;
+    const left = line.slice(0, separator).trim();
+    const right = line.slice(separator + 1).trim();
+    if (left && right)
+      pairs.push({ left, right });
+  }
+  return pairs;
+}
+
+// src/bundles.ts
+function effectiveGuides(store, settings) {
+  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
+  if (!bundle)
+    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
+  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
+  const glossary = [
+    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
+    ...parseGlossary(settings.glossary)
+  ].map((p) => `${p.left} = ${p.right}`).join(`
+`);
+  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
+
+`);
+  return {
+    glossary,
+    freeContext: join(bundle.freeContext, settings.freeContext),
+    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
+  };
+}
+function newBundleId(cryptoApi = globalThis.crypto) {
+  if (typeof cryptoApi?.randomUUID === "function")
+    return `bundle-${cryptoApi.randomUUID()}`;
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoApi?.getRandomValues === "function")
+    cryptoApi.getRandomValues(bytes);
+  else
+    for (let i = 0;i < bytes.length; i++)
+      bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function saveBundle(store, value) {
+  if (!value || typeof value.name !== "string" || !value.name.trim())
+    throw new Error("\uBB36\uC74C \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
+  const existing = store.userBundles.findIndex((b) => b.id === value.id);
+  let id = existing >= 0 ? store.userBundles[existing].id : newBundleId();
+  while (existing < 0 && store.userBundles.some((b) => b.id === id))
+    id = newBundleId();
+  const bundle = {
+    id,
+    name: value.name.trim(),
+    glossary: typeof value.glossary === "string" ? value.glossary : "",
+    freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
+    incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
+  };
+  if (existing >= 0)
+    store.userBundles[existing] = bundle;
+  else
+    store.userBundles.push(bundle);
+  return bundle;
+}
+function deleteBundle(store, id) {
+  store.userBundles = store.userBundles.filter((b) => b.id !== id);
+  for (const settings of [store.defaults, ...Object.values(store.chats)]) {
+    if (settings.bundleId === id)
+      settings.bundleId = "";
+  }
 }
 
 // src/translate/protect.ts
@@ -1206,326 +1477,6 @@ function checkMarkers(sourceText, translated) {
 }
 function restore(text, pieces) {
   return text.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m);
-}
-
-// src/shared.ts
-var VIEW_WINDOW = 30;
-var DISPLAY_MODES = ["below", "above", "only", "collapsed", "collapsed-source", "paragraph"];
-var FONT_MIN = 12;
-var FONT_MAX = 32;
-var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
-function fontSize(value, fallback) {
-  const n = Number(value);
-  return value === null || value === "" || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
-}
-function normalizeView(value) {
-  const v = value && typeof value === "object" ? value : {};
-  return {
-    paragraphView: v.paragraphView === "tap" ? "tap" : "interleave",
-    paragraphOrder: v.paragraphOrder === "translation-first" ? "translation-first" : "source-first",
-    sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
-    translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize)
-  };
-}
-var CONTEXT_MESSAGE_COUNT_MIN = 1;
-var CONTEXT_MESSAGE_COUNT_MAX = 10;
-var LONG_SPLIT_DEFAULT = 7000;
-var INHERIT_PRESET_ID = "builtin-inherit";
-var DEFAULT_SETTINGS = {
-  connectionId: "",
-  modelLanguage: "English",
-  myLanguage: "Korean",
-  outgoingPresetId: INHERIT_PRESET_ID,
-  incomingPresetId: INHERIT_PRESET_ID,
-  outgoingPrompt: "",
-  incomingPrompt: "",
-  translateMyMessages: false,
-  showDraftButton: false,
-  autoTranslate: false,
-  displayMode: "below",
-  translationUnit: "whole",
-  autoContinue: true,
-  longSplitChars: LONG_SPLIT_DEFAULT,
-  protectHtml: true,
-  protectCode: true,
-  excludeRules: "",
-  excludeTags: "",
-  bundleId: "",
-  glossary: "",
-  freeContextEnabled: false,
-  freeContext: "",
-  incomingVoiceEnabled: false,
-  incomingVoicePrompt: "",
-  contextEnabled: false,
-  contextIncludeOriginal: true,
-  contextIncludeTranslation: true,
-  contextIncludeUserInput: false,
-  contextMessageCount: 3
-};
-var str = (v, fallback) => typeof v === "string" ? v : fallback;
-var bool = (v, fallback) => typeof v === "boolean" ? v : fallback;
-function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
-  const s = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const count = Number.parseInt(String(s.contextMessageCount ?? ""), 10);
-  const split = Number.parseInt(String(s.longSplitChars ?? ""), 10);
-  const mode = s.displayMode;
-  return {
-    connectionId: str(s.connectionId, base.connectionId).trim(),
-    modelLanguage: str(s.modelLanguage, base.modelLanguage).trim() || base.modelLanguage || DEFAULT_SETTINGS.modelLanguage,
-    myLanguage: str(s.myLanguage, base.myLanguage).trim() || base.myLanguage || DEFAULT_SETTINGS.myLanguage,
-    outgoingPresetId: str(s.outgoingPresetId, base.outgoingPresetId) || INHERIT_PRESET_ID,
-    incomingPresetId: str(s.incomingPresetId, base.incomingPresetId) || INHERIT_PRESET_ID,
-    outgoingPrompt: str(s.outgoingPrompt, base.outgoingPrompt),
-    incomingPrompt: str(s.incomingPrompt, base.incomingPrompt),
-    translateMyMessages: bool(s.translateMyMessages, base.translateMyMessages),
-    showDraftButton: bool(s.showDraftButton, base.showDraftButton),
-    autoTranslate: bool(s.autoTranslate, base.autoTranslate),
-    displayMode: DISPLAY_MODES.includes(mode) ? mode : base.displayMode,
-    translationUnit: s.translationUnit === "paragraph" ? "paragraph" : s.translationUnit === "whole" ? "whole" : base.translationUnit,
-    autoContinue: bool(s.autoContinue, base.autoContinue),
-    longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200000, split)) : base.longSplitChars,
-    protectHtml: bool(s.protectHtml, base.protectHtml),
-    protectCode: bool(s.protectCode, base.protectCode),
-    excludeRules: str(s.excludeRules, base.excludeRules),
-    excludeTags: lenientTags(str(s.excludeTags, base.excludeTags)).join(", "),
-    bundleId: typeof s.bundleId === "string" && bundles.some((b) => b.id === s.bundleId) ? s.bundleId : "",
-    glossary: str(s.glossary, base.glossary),
-    freeContextEnabled: bool(s.freeContextEnabled, base.freeContextEnabled),
-    freeContext: str(s.freeContext, base.freeContext),
-    incomingVoiceEnabled: bool(s.incomingVoiceEnabled, base.incomingVoiceEnabled),
-    incomingVoicePrompt: str(s.incomingVoicePrompt, base.incomingVoicePrompt),
-    contextEnabled: bool(s.contextEnabled, base.contextEnabled),
-    contextIncludeOriginal: bool(s.contextIncludeOriginal, base.contextIncludeOriginal),
-    contextIncludeTranslation: bool(s.contextIncludeTranslation, base.contextIncludeTranslation),
-    contextIncludeUserInput: bool(s.contextIncludeUserInput, base.contextIncludeUserInput),
-    contextMessageCount: Number.isFinite(count) ? Math.min(CONTEXT_MESSAGE_COUNT_MAX, Math.max(CONTEXT_MESSAGE_COUNT_MIN, count)) : base.contextMessageCount
-  };
-}
-function normalizeStore(value) {
-  const raw = value && typeof value === "object" ? value : {};
-  const userBundles = [];
-  const bundleIds = new Set;
-  for (const b of Array.isArray(raw.userBundles) ? raw.userBundles : []) {
-    if (!b || typeof b !== "object")
-      continue;
-    const id = str(b.id, "").trim();
-    const name = str(b.name, "").trim();
-    if (!id || !name || bundleIds.has(id))
-      continue;
-    bundleIds.add(id);
-    userBundles.push({ id, name, glossary: str(b.glossary, ""), freeContext: str(b.freeContext, ""), incomingVoicePrompt: str(b.incomingVoicePrompt, "") });
-  }
-  const defaults = normalizeSettings(raw.defaults, DEFAULT_SETTINGS, userBundles);
-  const chats = {};
-  if (raw.chats && typeof raw.chats === "object") {
-    for (const [chatId, s] of Object.entries(raw.chats))
-      if (chatId)
-        chats[chatId] = normalizeSettings(s, defaults, userBundles);
-  }
-  const userPresets = [];
-  const seen = new Set;
-  for (const p of Array.isArray(raw.userPresets) ? raw.userPresets : []) {
-    if (!p || typeof p !== "object")
-      continue;
-    const id = str(p.id, "").trim();
-    const name = str(p.name, "").trim();
-    const prompt = str(p.prompt, "");
-    if (!id || !name || !prompt.trim() || seen.has(id) || !id.startsWith("custom-"))
-      continue;
-    seen.add(id);
-    userPresets.push({ id, name, prompt });
-  }
-  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, defaults, chats };
-}
-function settingsFor(store, chatId) {
-  return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
-}
-function effectiveConnectionId(store, chatId) {
-  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
-}
-function sourceHash(text) {
-  return rawSourceHash(normalizeIllustrations(text));
-}
-function rawSourceHash(text) {
-  let hash = 2166136261;
-  for (let i = 0;i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `${(hash >>> 0).toString(16)}-${text.length.toString(36)}`;
-}
-var METADATA_KEY = "st_translator";
-function recordHasMore(r) {
-  return r.truncatedPart >= 0 || r.parts.length < r.total;
-}
-
-// src/connection.ts
-var NO_CONNECTION_MESSAGE = "\uC0AC\uC6A9\uD560 \uC218 \uC788\uB294 AI \uC5F0\uACB0\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. Lumiverse \uC124\uC815\uC758 \uC5F0\uACB0(Connections)\uC5D0\uC11C \uC5F0\uACB0\uC744 \uD558\uB098 \uB9CC\uB4E4\uACE0 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
-var CONNECTION_HINT = "AI \uC5F0\uACB0\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uC5F0\uACB0\uC744 \uACE8\uB790\uB294\uC9C0, \uADF8\uB9AC\uACE0 \uC800\uC7A5\uD588\uB294\uC9C0 \uD655\uC778\uD574 \uC8FC\uC138\uC694(\uC800\uC7A5\uD558\uC9C0 \uC54A\uC73C\uBA74 \uC801\uC6A9\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4). Lumiverse\uC5D0 \uAE30\uBCF8 \uC5F0\uACB0\uC774 \uC788\uB294\uC9C0\uB3C4 \uD655\uC778\uD574 \uBCF4\uC138\uC694.";
-
-class NoConnectionError extends Error {
-  constructor() {
-    super(NO_CONNECTION_MESSAGE);
-    this.name = "NoConnectionError";
-  }
-}
-function pickConnection(list, chosen, hint = {}) {
-  const has = (id) => id ? list.some((c) => c.id === id) : false;
-  const staleId = chosen && !has(chosen) ? chosen : undefined;
-  const found = (id, source) => staleId ? { id, source, staleId } : { id, source };
-  if (chosen && has(chosen))
-    return { id: chosen, source: "chosen" };
-  if (has(hint.chatId))
-    return found(hint.chatId, "chat");
-  if (has(hint.activeId))
-    return found(hint.activeId, "active");
-  const def = list.find((c) => c.is_default);
-  if (def)
-    return found(def.id, "default");
-  const first = list[0];
-  return first ? found(first.id, "first") : null;
-}
-async function resolveConnection(host, uid, chosen, hint = {}) {
-  let list;
-  try {
-    list = await host.connections.list(uid);
-  } catch {
-    return { id: chosen || hint.chatId || hint.activeId || undefined, source: "host" };
-  }
-  const picked = pickConnection(list, chosen, hint);
-  if (!picked)
-    throw new NoConnectionError;
-  return picked;
-}
-var SOURCE_LABELS = {
-  chosen: "\uC124\uC815\uC5D0\uC11C \uACE0\uB978 \uC5F0\uACB0",
-  chat: "\uC774 \uCC44\uD305\uC5D0 \uC9C0\uC815\uB41C \uC5F0\uACB0",
-  active: "\uC9C0\uAE08 \uC4F0\uB294(\uD65C\uC131) \uC5F0\uACB0",
-  default: "\uAE30\uBCF8 \uC5F0\uACB0",
-  first: "\uCCAB \uBC88\uC9F8 \uC5F0\uACB0",
-  host: "Lumiverse\uAC00 \uC815\uD558\uB294 \uC5F0\uACB0"
-};
-function friendlyError(message) {
-  if (/No connection profile found/i.test(message))
-    return CONNECTION_HINT;
-  if (/userId is required/i.test(message))
-    return "\uC774 \uD655\uC7A5\uC740 \uC0AC\uC6A9\uC790 \uC815\uBCF4\uB97C \uBC1B\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD398\uC774\uC9C0\uB97C \uC0C8\uB85C\uACE0\uCE68\uD55C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
-  return message;
-}
-async function quietComplete(host, args) {
-  const conn = await resolveConnection(host, args.uid, args.chosen, args.hint);
-  if (conn.staleId)
-    args.onStale?.(conn.staleId, conn);
-  const result = await host.generate.quiet({
-    type: "quiet",
-    messages: [
-      { role: "system", content: args.system },
-      { role: "user", content: args.user }
-    ],
-    ...conn.id ? { connection_id: conn.id } : {},
-    parameters: { temperature: 0.3 },
-    userId: args.uid,
-    signal: args.signal
-  });
-  if (typeof result === "string")
-    return { text: result };
-  return { text: typeof result?.content === "string" ? result.content : "", finishReason: result?.finish_reason };
-}
-
-// src/translate/chunk.ts
-var TRANSLATION_CHUNK_CHARS = 3200;
-var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
-function findCut(text, from, limit) {
-  const end = from + limit;
-  const span = text.slice(from, end + 1);
-  let best = -1;
-  for (const m of span.matchAll(SENTENCE_BREAK)) {
-    const at = m.index + m[0].length;
-    if (at <= limit)
-      best = Math.max(best, at);
-  }
-  const newline = span.lastIndexOf(`
-`, limit);
-  if (newline > 0)
-    best = Math.max(best, newline);
-  if (best <= 0) {
-    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
-      if (/\s/.test(span[i])) {
-        best = i;
-        break;
-      }
-    }
-  }
-  let cut = best > 0 ? from + best : end;
-  const open = text.lastIndexOf("\u27E6", cut - 1);
-  if (open >= from) {
-    const close = text.indexOf("\u27E7", open);
-    if (close >= cut)
-      cut = open > from ? open : close + 1;
-  }
-  return cut;
-}
-function cutParagraph(paragraph, limit) {
-  const pieces = [];
-  let from = 0;
-  while (paragraph.length - from > limit) {
-    const cut = findCut(paragraph, from, limit);
-    pieces.push(paragraph.slice(from, cut));
-    from = cut;
-    while (from < paragraph.length && /\s/.test(paragraph[from]))
-      from++;
-  }
-  pieces.push(paragraph.slice(from));
-  return pieces;
-}
-function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
-  const max = Math.max(1, Math.floor(limit));
-  const pieces = String(text).replace(/\r\n?/g, `
-`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
-  const parts = [];
-  for (const raw of pieces) {
-    const piece = raw.trim();
-    if (!piece)
-      continue;
-    const last = parts.length - 1;
-    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
-      parts[last] += `
-
-${piece}`;
-    else
-      parts.push(piece);
-  }
-  return parts;
-}
-var SENTENCE_END = /[.!?\u3002\uFF01\uFF1F\u2026"\u201D\u2019'\u300D\u300F)\]]$/;
-function joinContinuation(partial, continuation) {
-  let cont = continuation.replace(/^\s*\n/, `
-`);
-  if (!cont.trim())
-    return partial;
-  const tail = partial.slice(-200);
-  for (let k = Math.min(tail.length, cont.length);k >= 8; k--) {
-    if (tail.endsWith(cont.slice(0, k))) {
-      cont = cont.slice(k);
-      break;
-    }
-  }
-  if (!cont.trim())
-    return partial;
-  if (/\s$/.test(partial) || /^\s/.test(cont))
-    return partial + cont;
-  return SENTENCE_END.test(partial) ? `${partial} ${cont}` : partial + cont;
-}
-function isTruncatedFinish(reason) {
-  if (typeof reason !== "string")
-    return false;
-  const r = reason.toLowerCase();
-  return r === "length" || r.includes("max_tokens") || r.includes("max_output") || r === "max_tokens";
-}
-
-// src/translate/clean-reply.ts
-function cleanReply(text) {
-  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
 }
 
 // src/vendor/tt-1.8.0/assembly.ts
@@ -1732,6 +1683,160 @@ ${glossary}` : "");
   };
 }
 
+// src/shared.ts
+var VIEW_WINDOW = 30;
+var notesTools = createAssembly({ currentScope: () => ({}), storedConfig: { presets: [] }, paragraph: {} });
+var NOTE_LIMITS = { count: notesTools.NOTES_MAX, name: notesTools.NOTE_NAME_MAX, text: FREE_CONTEXT_MAX };
+var newNoteId = () => notesTools.newNoteId();
+var DISPLAY_MODES = ["below", "above", "only", "collapsed", "collapsed-source", "paragraph"];
+var FONT_MIN = 12;
+var FONT_MAX = 32;
+var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
+function fontSize(value, fallback) {
+  const n = Number(value);
+  return value === null || value === "" || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
+}
+function normalizeView(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return {
+    paragraphView: v.paragraphView === "tap" ? "tap" : "interleave",
+    paragraphOrder: v.paragraphOrder === "translation-first" ? "translation-first" : "source-first",
+    sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
+    translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize)
+  };
+}
+var CONTEXT_MESSAGE_COUNT_MIN = 1;
+var CONTEXT_MESSAGE_COUNT_MAX = 10;
+var LONG_SPLIT_DEFAULT = 7000;
+var INHERIT_PRESET_ID = "builtin-inherit";
+var DEFAULT_SETTINGS = {
+  connectionId: "",
+  modelLanguage: "English",
+  myLanguage: "Korean",
+  outgoingPresetId: INHERIT_PRESET_ID,
+  incomingPresetId: INHERIT_PRESET_ID,
+  outgoingPrompt: "",
+  incomingPrompt: "",
+  translateMyMessages: false,
+  showDraftButton: false,
+  autoTranslate: false,
+  displayMode: "below",
+  translationUnit: "whole",
+  autoContinue: true,
+  longSplitChars: LONG_SPLIT_DEFAULT,
+  protectHtml: true,
+  protectCode: true,
+  excludeRules: "",
+  excludeTags: "",
+  bundleId: "",
+  glossary: "",
+  freeContextEnabled: false,
+  freeContext: "",
+  incomingVoiceEnabled: false,
+  incomingVoicePrompt: "",
+  contextEnabled: false,
+  contextIncludeOriginal: true,
+  contextIncludeTranslation: true,
+  contextIncludeUserInput: false,
+  contextMessageCount: 3
+};
+var str = (v, fallback) => typeof v === "string" ? v : fallback;
+var bool = (v, fallback) => typeof v === "boolean" ? v : fallback;
+function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
+  const s = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const count = Number.parseInt(String(s.contextMessageCount ?? ""), 10);
+  const split = Number.parseInt(String(s.longSplitChars ?? ""), 10);
+  const mode = s.displayMode;
+  return {
+    connectionId: str(s.connectionId, base.connectionId).trim(),
+    modelLanguage: str(s.modelLanguage, base.modelLanguage).trim() || base.modelLanguage || DEFAULT_SETTINGS.modelLanguage,
+    myLanguage: str(s.myLanguage, base.myLanguage).trim() || base.myLanguage || DEFAULT_SETTINGS.myLanguage,
+    outgoingPresetId: str(s.outgoingPresetId, base.outgoingPresetId) || INHERIT_PRESET_ID,
+    incomingPresetId: str(s.incomingPresetId, base.incomingPresetId) || INHERIT_PRESET_ID,
+    outgoingPrompt: str(s.outgoingPrompt, base.outgoingPrompt),
+    incomingPrompt: str(s.incomingPrompt, base.incomingPrompt),
+    translateMyMessages: bool(s.translateMyMessages, base.translateMyMessages),
+    showDraftButton: bool(s.showDraftButton, base.showDraftButton),
+    autoTranslate: bool(s.autoTranslate, base.autoTranslate),
+    displayMode: DISPLAY_MODES.includes(mode) ? mode : base.displayMode,
+    translationUnit: s.translationUnit === "paragraph" ? "paragraph" : s.translationUnit === "whole" ? "whole" : base.translationUnit,
+    autoContinue: bool(s.autoContinue, base.autoContinue),
+    longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200000, split)) : base.longSplitChars,
+    protectHtml: bool(s.protectHtml, base.protectHtml),
+    protectCode: bool(s.protectCode, base.protectCode),
+    excludeRules: str(s.excludeRules, base.excludeRules),
+    excludeTags: lenientTags(str(s.excludeTags, base.excludeTags)).join(", "),
+    bundleId: typeof s.bundleId === "string" && bundles.some((b) => b.id === s.bundleId) ? s.bundleId : "",
+    glossary: str(s.glossary, base.glossary),
+    freeContextEnabled: bool(s.freeContextEnabled, base.freeContextEnabled),
+    freeContext: str(s.freeContext, base.freeContext),
+    incomingVoiceEnabled: bool(s.incomingVoiceEnabled, base.incomingVoiceEnabled),
+    incomingVoicePrompt: str(s.incomingVoicePrompt, base.incomingVoicePrompt),
+    contextEnabled: bool(s.contextEnabled, base.contextEnabled),
+    contextIncludeOriginal: bool(s.contextIncludeOriginal, base.contextIncludeOriginal),
+    contextIncludeTranslation: bool(s.contextIncludeTranslation, base.contextIncludeTranslation),
+    contextIncludeUserInput: bool(s.contextIncludeUserInput, base.contextIncludeUserInput),
+    contextMessageCount: Number.isFinite(count) ? Math.min(CONTEXT_MESSAGE_COUNT_MAX, Math.max(CONTEXT_MESSAGE_COUNT_MIN, count)) : base.contextMessageCount
+  };
+}
+function normalizeStore(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const userBundles = [];
+  const bundleIds = new Set;
+  for (const b of Array.isArray(raw.userBundles) ? raw.userBundles : []) {
+    if (!b || typeof b !== "object")
+      continue;
+    const id = str(b.id, "").trim();
+    const name = str(b.name, "").trim();
+    if (!id || !name || bundleIds.has(id))
+      continue;
+    bundleIds.add(id);
+    userBundles.push({ id, name, glossary: str(b.glossary, ""), freeContext: str(b.freeContext, ""), incomingVoicePrompt: str(b.incomingVoicePrompt, "") });
+  }
+  const defaults = normalizeSettings(raw.defaults, DEFAULT_SETTINGS, userBundles);
+  const chats = {};
+  if (raw.chats && typeof raw.chats === "object") {
+    for (const [chatId, s] of Object.entries(raw.chats))
+      if (chatId)
+        chats[chatId] = normalizeSettings(s, defaults, userBundles);
+  }
+  const userPresets = [];
+  const seen = new Set;
+  for (const p of Array.isArray(raw.userPresets) ? raw.userPresets : []) {
+    if (!p || typeof p !== "object")
+      continue;
+    const id = str(p.id, "").trim();
+    const name = str(p.name, "").trim();
+    const prompt = str(p.prompt, "");
+    if (!id || !name || !prompt.trim() || seen.has(id) || !id.startsWith("custom-"))
+      continue;
+    seen.add(id);
+    userPresets.push({ id, name, prompt });
+  }
+  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, notes: notesTools.normalizeNotes(raw.notes), defaults, chats };
+}
+function settingsFor(store, chatId) {
+  return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
+}
+function effectiveConnectionId(store, chatId) {
+  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
+}
+function sourceHash(text) {
+  return rawSourceHash(normalizeIllustrations(text));
+}
+function rawSourceHash(text) {
+  let hash = 2166136261;
+  for (let i = 0;i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(16)}-${text.length.toString(36)}`;
+}
+var METADATA_KEY = "st_translator";
+function recordHasMore(r) {
+  return r.truncatedPart >= 0 || r.parts.length < r.total;
+}
+
 // src/translate/prompt.ts
 var SYSTEM_PROMPT_MAX = 200000;
 var TRANSLATION_TEXT_MAX = 50000;
@@ -1789,6 +1894,11 @@ function assemblyFor(settings, direction, presets, guides, persona) {
     scope,
     ...createAssembly({ currentScope: () => scope, storedConfig: { presets }, paragraph: persona ?? { getChat: async () => ({}), getPersona: async () => null } })
   };
+}
+async function personaSectionFor(settings, presets, name) {
+  const guides = effectiveGuides({ userBundles: [] }, settings);
+  const a = assemblyFor(settings, "incoming", presets, guides, { getChat: async () => ({ personaId: "persona" }), getPersona: async () => ({ name }) });
+  return a.personaSection(a.scope, "chat");
 }
 function buildTranslationRequest(input) {
   const { direction, text, settings } = input;
@@ -1957,6 +2067,9 @@ function partSources(protectedText, settings) {
 function resumable(record, pieces, total, settings) {
   return !!record && sameArray(record.pieces, pieces) && record.total === total && (record.unit ?? "whole") === settings.translationUnit;
 }
+function skipsRequest(part, settings, targetLanguage) {
+  return hasNoText(part) || settings.translationUnit === "paragraph" && isPairedDialogue(part, targetLanguage);
+}
 function sameArray(a, b) {
   return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]));
 }
@@ -1982,7 +2095,8 @@ async function translate(job, deps) {
     store: job.store,
     presets: job.presets,
     previous: job.previous,
-    hasMarkers: /\u27E6\d+\u27E7/.test(part)
+    hasMarkers: /\u27E6\d+\u27E7/.test(part),
+    persona: job.persona
   });
   const save = async () => {
     record.updatedAt = Date.now();
@@ -2029,7 +2143,7 @@ async function translate(job, deps) {
     return out.join("");
   };
   const translatePart = async (i) => {
-    if (hasNoText(sources[i])) {
+    if (skipsRequest(sources[i], settings, targetLanguage)) {
       record.parts[i] = sources[i];
       await save();
       return true;
@@ -2217,6 +2331,132 @@ ${tgt}`}
   out.push("</div>");
   return out.join(`
 `);
+}
+
+// src/translate/edit.ts
+function editablePairs(content, record, settings) {
+  if (record.status !== "done")
+    return null;
+  const pairing = pairParagraphs(content, record, settings);
+  if (pairing.kind === "whole")
+    return null;
+  const edited = new Set(record.edited ?? []);
+  const pairs = [];
+  for (const [index, pair] of pairing.pairs.entries()) {
+    if (pair.translation === null || !pair.translation.trim())
+      return null;
+    pairs.push({ index, source: pair.source, translation: pair.translation, edited: edited.has(index), key: blockKey(pair.source) });
+  }
+  return pairs.length ? pairs : null;
+}
+function cleanEdit(text) {
+  return String(text).replace(/\r\n?/g, `
+`).replace(/\n[ \t]*\n+/g, `
+`).trim();
+}
+function recordFromMap(content, map, editedKeys) {
+  const sources = splitParagraphs(content);
+  const edited = new Set(editedKeys);
+  const parts = [];
+  const marked = [];
+  let missing = 0;
+  sources.forEach((source, i) => {
+    const key = blockKey(source);
+    const text = map[key];
+    if (text !== undefined && text.trim())
+      parts.push(text);
+    else if (hasNoText(source))
+      parts.push(source);
+    else {
+      parts.push("");
+      missing++;
+    }
+    if (edited.has(key))
+      marked.push(i);
+  });
+  return {
+    parts,
+    pieces: [],
+    unit: "paragraph",
+    total: sources.length,
+    ...marked.length ? { edited: marked } : {},
+    truncatedPart: -1,
+    status: missing ? "partial" : "done",
+    updatedAt: Date.now()
+  };
+}
+
+// src/connection.ts
+var NO_CONNECTION_MESSAGE = "\uC0AC\uC6A9\uD560 \uC218 \uC788\uB294 AI \uC5F0\uACB0\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. Lumiverse \uC124\uC815\uC758 \uC5F0\uACB0(Connections)\uC5D0\uC11C \uC5F0\uACB0\uC744 \uD558\uB098 \uB9CC\uB4E4\uACE0 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
+var CONNECTION_HINT = "AI \uC5F0\uACB0\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uC5F0\uACB0\uC744 \uACE8\uB790\uB294\uC9C0, \uADF8\uB9AC\uACE0 \uC800\uC7A5\uD588\uB294\uC9C0 \uD655\uC778\uD574 \uC8FC\uC138\uC694(\uC800\uC7A5\uD558\uC9C0 \uC54A\uC73C\uBA74 \uC801\uC6A9\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4). Lumiverse\uC5D0 \uAE30\uBCF8 \uC5F0\uACB0\uC774 \uC788\uB294\uC9C0\uB3C4 \uD655\uC778\uD574 \uBCF4\uC138\uC694.";
+
+class NoConnectionError extends Error {
+  constructor() {
+    super(NO_CONNECTION_MESSAGE);
+    this.name = "NoConnectionError";
+  }
+}
+function pickConnection(list, chosen, hint = {}) {
+  const has = (id) => id ? list.some((c) => c.id === id) : false;
+  const staleId = chosen && !has(chosen) ? chosen : undefined;
+  const found = (id, source) => staleId ? { id, source, staleId } : { id, source };
+  if (chosen && has(chosen))
+    return { id: chosen, source: "chosen" };
+  if (has(hint.chatId))
+    return found(hint.chatId, "chat");
+  if (has(hint.activeId))
+    return found(hint.activeId, "active");
+  const def = list.find((c) => c.is_default);
+  if (def)
+    return found(def.id, "default");
+  const first = list[0];
+  return first ? found(first.id, "first") : null;
+}
+async function resolveConnection(host, uid, chosen, hint = {}) {
+  let list;
+  try {
+    list = await host.connections.list(uid);
+  } catch {
+    return { id: chosen || hint.chatId || hint.activeId || undefined, source: "host" };
+  }
+  const picked = pickConnection(list, chosen, hint);
+  if (!picked)
+    throw new NoConnectionError;
+  return picked;
+}
+var SOURCE_LABELS = {
+  chosen: "\uC124\uC815\uC5D0\uC11C \uACE0\uB978 \uC5F0\uACB0",
+  chat: "\uC774 \uCC44\uD305\uC5D0 \uC9C0\uC815\uB41C \uC5F0\uACB0",
+  active: "\uC9C0\uAE08 \uC4F0\uB294(\uD65C\uC131) \uC5F0\uACB0",
+  default: "\uAE30\uBCF8 \uC5F0\uACB0",
+  first: "\uCCAB \uBC88\uC9F8 \uC5F0\uACB0",
+  host: "Lumiverse\uAC00 \uC815\uD558\uB294 \uC5F0\uACB0"
+};
+function friendlyError(message) {
+  if (/No connection profile found/i.test(message))
+    return CONNECTION_HINT;
+  if (/userId is required/i.test(message))
+    return "\uC774 \uD655\uC7A5\uC740 \uC0AC\uC6A9\uC790 \uC815\uBCF4\uB97C \uBC1B\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD398\uC774\uC9C0\uB97C \uC0C8\uB85C\uACE0\uCE68\uD55C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
+  return message;
+}
+async function quietComplete(host, args) {
+  const conn = await resolveConnection(host, args.uid, args.chosen, args.hint);
+  if (conn.staleId)
+    args.onStale?.(conn.staleId, conn);
+  const result = await host.generate.quiet({
+    type: "quiet",
+    messages: [
+      { role: "system", content: args.system },
+      { role: "user", content: args.user }
+    ],
+    ...conn.id ? { connection_id: conn.id } : {},
+    parameters: { temperature: 0.3 },
+    userId: args.uid,
+    signal: args.signal
+  });
+  if (typeof result === "string")
+    return { text: result };
+  return { text: typeof result?.content === "string" ? result.content : "", finishReason: result?.finish_reason };
 }
 
 // src/display/render.ts
@@ -2439,7 +2679,7 @@ async function refreshForJob(chatId, messageId) {
 function orderedMessages(snapshot) {
   return [...snapshot.messages.values()].sort((a, b) => (a.index_in_chat ?? 0) - (b.index_in_chat ?? 0));
 }
-async function writeTranslations(chatId, messageId, change, snapshot) {
+async function writeTranslations(chatId, messageId, change, snapshot, options = {}) {
   snapshot ??= await cachedChat(chatId);
   const message = snapshot.messages.get(messageId);
   if (!message)
@@ -2451,10 +2691,15 @@ async function writeTranslations(chatId, messageId, change, snapshot) {
     delete mt.entries[k];
   const metadata = { ...message.metadata ?? {}, [METADATA_KEY]: mt };
   const previousMetadata = message.metadata;
-  if (hostCaps(spindle).leanMessages)
-    await spindle.chat.updateMessage(chatId, messageId, { ownMetadata: mt });
-  else
-    await spindle.chat.updateMessage(chatId, messageId, { metadata });
+  const patch = hostCaps(spindle).leanMessages ? { ownMetadata: mt } : { metadata };
+  if (options.content !== undefined)
+    patch.content = options.content;
+  await spindle.chat.updateMessage(chatId, messageId, patch);
+  if (options.content !== undefined) {
+    message.content = options.content;
+    if (Array.isArray(message.swipes))
+      message.swipes[message.swipe_id ?? 0] = options.content;
+  }
   if (!snapshot.messages.has(messageId))
     return null;
   if (message.metadata === previousMetadata)
@@ -2610,7 +2855,8 @@ async function translateMessage(uid, chatId, messageId, mode, options) {
       store,
       presets: promptPresets(store.userPresets),
       previous: contextBefore(messages, index),
-      resume: mode === "continue" ? existing : undefined
+      resume: mode === "continue" ? existing : undefined,
+      persona: await personaFor(settings, store, messages, index)
     }, {
       complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal),
       signal: controller.signal,
@@ -2690,6 +2936,174 @@ async function translateOutgoing(uid, chatId, text) {
     clearTimeout(timer);
   }
 }
+async function personaFor(settings, store, messages, index) {
+  if (!LIVE_PROMPT_PRESET_IDS.has(settings.incomingPresetId))
+    return "";
+  const named = (m) => m.role === "user" && typeof m.name === "string" && m.name.trim() !== "";
+  const user = messages.slice(0, Math.max(index, 0)).findLast(named) ?? messages.findLast(named);
+  if (!user)
+    return "";
+  return personaSectionFor(settings, promptPresets(store.userPresets), user.name.trim());
+}
+async function openEdit(uid, chatId, messageId) {
+  const fail = (error) => send({ type: "edit_data", chatId, messageId, ok: false, error }, uid);
+  const snapshot = await cachedChat(chatId);
+  const message = snapshot.messages.get(messageId);
+  const mt = message ? readTranslations(message) : null;
+  const key = message ? recordKeyFor(mt, message.content ?? "") : null;
+  const record = key ? mt?.entries[key] : undefined;
+  if (!message || !record)
+    return fail("\uC774 \uBA54\uC2DC\uC9C0\uC5D0\uB294 \uACE0\uCE60 \uBC88\uC5ED\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  if (jobs.has(jobKey(chatId, messageId)))
+    return fail("\uBC88\uC5ED \uC911\uC778 \uBA54\uC2DC\uC9C0\uB294 \uACE0\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  const pairs = editablePairs(message.content, record, settingsFor(await loadStore(uid), chatId));
+  if (!pairs)
+    return fail("\uBB38\uB2E8 \uB2E8\uC704\uB85C \uB05D\uAE4C\uC9C0 \uBC88\uC5ED\uB41C \uBA54\uC2DC\uC9C0\uB9CC \uACE0\uCE60 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uBB38\uB2E8 \uB2E8\uC704\uB85C \uB2E4\uC2DC \uBC88\uC5ED\uD574 \uC8FC\uC138\uC694.");
+  send({ type: "edit_data", chatId, messageId, ok: true, sourceKey: key, pairs: pairs.map((p) => ({ source: p.source, translation: p.translation, edited: p.edited })) }, uid);
+}
+async function saveEdit(uid, msg) {
+  const { chatId, messageId } = msg;
+  const result = (r) => send({ type: "edit_result", chatId, messageId, ...r }, uid);
+  const key = jobKey(chatId, messageId);
+  if (jobs.has(key))
+    return result({ ok: false, error: "\uBC88\uC5ED \uC911\uC778 \uBA54\uC2DC\uC9C0\uB294 \uACE0\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4." });
+  const controller = new AbortController;
+  let finish;
+  jobs.set(key, { controller, finished: new Promise((resolve) => {
+    finish = resolve;
+  }) });
+  let message;
+  try {
+    const store = await loadStore(uid);
+    const settings = settingsFor(store, chatId);
+    const snapshot = await cachedChat(chatId);
+    message = snapshot.messages.get(messageId);
+    const mt = message ? readTranslations(message) : null;
+    const oldKey = message ? recordKeyFor(mt, message.content ?? "") : null;
+    const record = oldKey ? mt?.entries[oldKey] : undefined;
+    if (!message || !record || oldKey !== msg.sourceKey)
+      return result({ ok: false, error: "\uADF8 \uC0AC\uC774 \uBA54\uC2DC\uC9C0\uAC00 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uCC3D\uC744 \uB2EB\uACE0 \uB2E4\uC2DC \uC5F4\uC5B4 \uC8FC\uC138\uC694." });
+    const original = message.content;
+    const pairs = editablePairs(original, record, settings);
+    if (!pairs)
+      return result({ ok: false, error: "\uBB38\uB2E8 \uB2E8\uC704\uB85C \uB05D\uAE4C\uC9C0 \uBC88\uC5ED\uB41C \uBA54\uC2DC\uC9C0\uB9CC \uACE0\uCE60 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
+    const oldTranslations = {};
+    for (const pair of pairs)
+      oldTranslations[pair.key] = pair.translation;
+    const edits = {};
+    for (const { index, text } of Array.isArray(msg.edits) ? msg.edits : []) {
+      const pair = Number.isInteger(index) ? pairs[index] : undefined;
+      const corrected = cleanEdit(typeof text === "string" ? text : "");
+      if (pair && corrected && corrected !== pair.translation.trim())
+        edits[pair.key] = corrected;
+    }
+    if (!Object.keys(edits).length)
+      return result({ ok: true, rewritten: 0, saved: false });
+    const edited = {};
+    for (const pair of pairs)
+      if (pair.edited)
+        edited[pair.key] = 1;
+    for (const k of Object.keys(edits))
+      edited[k] = 1;
+    let state = { v: 1, map: { ...oldTranslations, ...edits }, edited, view: "", at: Date.now() };
+    let newContent;
+    let rewritten = 0;
+    let sourceError = "";
+    if (msg.syncSource) {
+      try {
+        const complete = completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal);
+        const synced = await syncSourceFromEdits({
+          content: original,
+          record: state,
+          edits,
+          oldTranslations,
+          llm: async (system, user) => (await complete({ system, user, hasContext: false })).text
+        });
+        if (synced.count && synced.content !== null) {
+          newContent = synced.content;
+          state = synced.record;
+          rewritten = synced.count;
+        }
+      } catch (e) {
+        sourceError = errorText(e);
+      }
+    }
+    const content = newContent ?? original;
+    const next = recordFromMap(content, state.map, Object.keys(state.edited));
+    if (next.status !== "done")
+      return result({ ok: false, error: "\uBB38\uB2E8 \uAD6C\uC870 \uB54C\uBB38\uC5D0 \uC774 \uBC88\uC5ED\uC744 \uC800\uC7A5\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC544\uBB34\uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
+    if (snapshot.messages.get(messageId)?.content !== original)
+      return result({ ok: false, error: "\uADF8 \uC0AC\uC774 \uBA54\uC2DC\uC9C0 \uB0B4\uC6A9\uC774 \uBC14\uB00C\uC5B4 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
+    const saved = await writeTranslations(chatId, messageId, (draft) => {
+      delete draft.entries[oldKey];
+      delete draft.entries[rawSourceHash(original)];
+      draft.entries[sourceHash(content)] = next;
+      draft.hidden = false;
+    }, snapshot, newContent === undefined ? {} : { content: newContent });
+    if (!saved)
+      return result({ ok: false, error: "\uC800\uC7A5\uD558\uB294 \uC0AC\uC774 \uBA54\uC2DC\uC9C0\uAC00 \uC0AC\uB77C\uC84C\uC2B5\uB2C8\uB2E4." });
+    message = saved;
+    result({ ok: true, rewritten, saved: true, ...sourceError ? { error: `\uBC88\uC5ED\uC740 \uC800\uC7A5\uD588\uC9C0\uB9CC \uC601\uC5B4 \uC6D0\uBB38\uC740 \uACE0\uCE58\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${sourceError}` } : {} });
+  } catch (e) {
+    result({ ok: false, error: errorText(e) });
+  } finally {
+    jobs.delete(key);
+    message = chatCache.get(chatId)?.messages.get(messageId) ?? message;
+    if (message)
+      await sendView(uid, chatId, message).catch(() => {});
+    finish();
+  }
+}
+var generationActive = new Map;
+var stoppedReplies = new Map;
+var catchUps = new Map;
+function catchUpFor(uid) {
+  const k = userKey(uid);
+  let instance = catchUps.get(k);
+  if (instance)
+    return instance;
+  const rows = new Map;
+  const seconds = (value) => typeof value === "number" && Number.isFinite(value) ? value > 1000000000000 ? value / 1000 : value : 0;
+  instance = createCatchUp({
+    PT_KEY: "paraTranslate",
+    getChat: async (chatId) => ({ metadata: { autoTranslate: settingsFor(await loadStore(uid), chatId).autoTranslate === true } }),
+    handlesRow: () => true,
+    api: async () => ({ active: false }),
+    listMessages: async (chatId, n) => {
+      const snapshot = snapshotFor(chatId);
+      let list;
+      if (snapshot.loaded)
+        list = orderedMessages(snapshot).slice(-n);
+      else if (hostCaps(spindle).leanMessages)
+        list = await spindle.chat.getMessages(chatId, { tail: n, light: true });
+      else
+        list = orderedMessages(await cachedChat(chatId)).slice(-n);
+      rows.clear();
+      for (const m of list)
+        rows.set(m.id, m);
+      return list.map((m) => {
+        const stamp = Math.max(seconds(m.created_at), seconds(m.swipe_dates?.[m.swipe_id ?? 0]));
+        return { id: m.id, role: m.role, content: typeof m.content === "string" ? m.content : "", createdAt: stamp ? new Date(stamp * 1000).toISOString() : "", extra: { hiddenFromUser: m.extra?.hidden === true } };
+      });
+    },
+    rememberMessage: () => {},
+    getRecord: (id) => {
+      const m = rows.get(id);
+      return m && readTranslations(m) && Object.keys(readTranslations(m).entries).length ? true : null;
+    },
+    hashText,
+    translateMessage: async (chatId, id) => {
+      const content = rows.get(id)?.content ?? "";
+      if (stoppedReplies.get(chatId)?.has(hashText(content)))
+        return;
+      await translateMessage(uid, chatId, id, "fresh", { force: false, automatic: true });
+    },
+    generationActive,
+    marinara: { log: { warn: (text, error) => spindle.log.warn(`[translator] ${text} ${error instanceof Error ? error.message : ""}`.trim()) } }
+  });
+  catchUps.set(k, instance);
+  return instance;
+}
 spindle.registerMessageContentProcessor(async (ctx) => {
   if (ctx.origin !== "render" || !ctx.messageId || !ctx.content)
     return;
@@ -2707,7 +3121,23 @@ spindle.registerMessageContentProcessor(async (ctx) => {
     return;
   return { content: renderMessage(ctx.content, record, settings, store.view) };
 });
+spindle.on("GENERATION_STARTED", (payload) => {
+  if (payload?.chatId)
+    generationActive.set(payload.chatId, true);
+});
+spindle.on("GENERATION_STOPPED", (payload) => {
+  if (!payload?.chatId)
+    return;
+  generationActive.delete(payload.chatId);
+  if (typeof payload.content === "string" && payload.content.trim()) {
+    const set = stoppedReplies.get(payload.chatId) ?? new Set;
+    set.add(hashText(payload.content));
+    stoppedReplies.set(payload.chatId, set);
+  }
+});
 spindle.on("GENERATION_ENDED", (payload, userId) => {
+  if (payload?.chatId)
+    generationActive.delete(payload.chatId);
   const context = { chatId: payload?.chatId, messageId: payload?.messageId, generationId: payload?.generationId, generationType: payload?.generationType };
   if (payload?.generationType === "impersonate")
     return;
@@ -2774,6 +3204,8 @@ async function handle(msg, uid) {
           h.chats.delete(msg.chatId);
       }
       hints.set(userKey(uid), h);
+      if (msg.open && msg.chatId)
+        catchUpFor(uid).catchUpLatest(msg.chatId);
       return;
     }
     case "save_connection": {
@@ -2803,6 +3235,48 @@ async function handle(msg, uid) {
       await sendState(uid);
       return;
     }
+    case "save_note": {
+      const store = await loadStore(uid);
+      const name = String(msg.note?.name ?? "").trim();
+      const text = String(msg.note?.text ?? "").trim();
+      const fail = (error) => send({ type: "note_result", ok: false, error }, uid);
+      if (!name)
+        return fail("\uC800\uC7A5\uD560 \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
+      if (name.length > NOTE_LIMITS.name)
+        return fail(`\uC774\uB984\uC740 ${NOTE_LIMITS.name}\uC790\uAE4C\uC9C0 \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4.`);
+      if (!text)
+        return fail("\uC800\uC7A5\uD560 \uAE30\uD0C0 \uC9C0\uCE68\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
+      if (text.length > NOTE_LIMITS.text)
+        return fail(`\uC800\uC7A5\uD55C \uAE30\uD0C0 \uC9C0\uCE68\uC740 ${NOTE_LIMITS.text.toLocaleString("en-US")}\uC790\uAE4C\uC9C0\uC785\uB2C8\uB2E4. \uC9C0\uAE08 ${text.length.toLocaleString("en-US")}\uC790\uC785\uB2C8\uB2E4. \uB0B4\uC6A9\uC740 \uC798\uB77C\uB0B4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.`);
+      const existing = store.notes.find((n) => n.name === name);
+      if (existing && !msg.overwrite) {
+        send({ type: "note_result", ok: false, needsOverwrite: name }, uid);
+        return;
+      }
+      if (!existing && store.notes.length >= NOTE_LIMITS.count)
+        return fail(`\uC800\uC7A5\uD55C \uAE30\uD0C0 \uC9C0\uCE68\uC740 ${NOTE_LIMITS.count}\uAC1C\uAE4C\uC9C0\uC785\uB2C8\uB2E4. \uC548 \uC4F0\uB294 \uAC83\uC744 \uC9C0\uC6CC \uC8FC\uC138\uC694.`);
+      if (existing)
+        existing.text = text;
+      else
+        store.notes.push({ id: newNoteId(), name, text });
+      await saveStore(uid, store);
+      await sendState(uid);
+      send({ type: "note_result", ok: true }, uid);
+      return;
+    }
+    case "delete_note": {
+      const store = await loadStore(uid);
+      store.notes = store.notes.filter((n) => n.id !== msg.id);
+      await saveStore(uid, store);
+      await sendState(uid);
+      return;
+    }
+    case "edit_open":
+      await openEdit(uid, msg.chatId, msg.messageId);
+      return;
+    case "edit_save":
+      await saveEdit(uid, msg);
+      return;
     case "save_bundle": {
       const store = await loadStore(uid);
       saveBundle(store, msg.bundle);

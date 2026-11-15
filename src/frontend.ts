@@ -28,6 +28,7 @@ import {
 import { ExcludeRuleError, parseTags } from './translate/protect';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
+import { NARRATION_STYLE_EXAMPLE } from './vendor/tt-1.8.0/example-narration-style';
 import { showsToggle, targetLabel, wantsBar } from './message-ui';
 import { type DecoratorSpec, mountToolbars } from './toolbar';
 import { ViewRequests, visibleMessageIds } from './view-requests';
@@ -100,6 +101,11 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-sticky { position: sticky; bottom: 0; background: color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
+.stt-edit-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.stt-edit-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.25)); }
+.stt-edit-src { white-space: pre-wrap; font-size: 0.85em; opacity: 0.8; }
+.stt-modal .stt-edit-row textarea { min-height: 64px; }
+.stt-badge { font-size: 0.75em; opacity: 0.75; }
 .stt-panel, .stt-section, .stt-field, .stt-modal { min-width: 0; overflow-wrap: anywhere; }
 .stt-row > .stt-field { flex: 1 1 130px; }
 .stt-panel select { min-width: 0; max-width: 100%; }
@@ -194,7 +200,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   /** Ids only this side can see: the profile Lumiverse has active, and the one pinned to the chat. */
   let hint: ConnectionHint = {};
-  async function sendHint(forChat: string | null = chatId): Promise<void> {
+  async function sendHint(forChat: string | null = chatId, open = false): Promise<void> {
     const next: ConnectionHint = {};
     try {
       const id = ctx.connections?.getActive?.()?.activeProfileId;
@@ -210,7 +216,7 @@ export function setup(ctx: SpindleFrontendContext) {
       // not available on this host
     }
     hint = next;
-    toBackend({ type: 'hint', chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId });
+    toBackend({ type: 'hint', chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId, ...(open ? { open: true } : {}) });
   }
 
   async function translateText(text: string, forChat: string): Promise<string> {
@@ -337,6 +343,9 @@ export function setup(ctx: SpindleFrontendContext) {
     onCancel: (id) => {
       if (chatId) toBackend({ type: 'cancel', chatId, messageId: id });
     },
+    onEdit: (id) => {
+      if (chatId) toBackend({ type: 'edit_open', chatId, messageId: id });
+    },
     onDelete: (id) => {
       const forChat = chatId;
       const view = views.get(id);
@@ -413,13 +422,22 @@ export function setup(ctx: SpindleFrontendContext) {
     renderDraftButton();
     renderPanel();
     if (next) {
-      void sendHint(next);
+      void sendHint(next, true);
       const messageIds = ctx.dom.listMessageElements().slice(-VIEW_WINDOW).map(({ messageId }) => messageId);
       viewRequests.take(messageIds);
       toBackend({ type: 'chat', chatId: next, messageIds: messageIds.length ? messageIds : undefined });
       queueDecorate();
     }
   }
+
+  // Back on screen: a reply that finished while the page was away may still be untranslated.
+  let lastVisibleHint = 0;
+  const onVisible = () => {
+    if (document.visibilityState !== 'visible' || !chatId || Date.now() - lastVisibleHint < 10_000) return;
+    lastVisibleHint = Date.now();
+    void sendHint(chatId, true);
+  };
+  document.addEventListener('visibilitychange', onVisible);
 
   const routeTimer = setInterval(() => {
     const next = chatIdFromLocation();
@@ -699,6 +717,123 @@ export function setup(ctx: SpindleFrontendContext) {
     ]);
   }
 
+  // ---- 번역 고치기 ----
+
+  const SYNC_PREF = 'stt-sync-source';
+  const readSyncPref = (): boolean => {
+    try { return localStorage.getItem(SYNC_PREF) !== '0'; } catch { return true; }
+  };
+  const writeSyncPref = (on: boolean): void => {
+    try { localStorage.setItem(SYNC_PREF, on ? '1' : '0'); } catch { /* per-browser convenience only */ }
+  };
+  let editorDone: ((r: Extract<ToFrontend, { type: 'edit_result' }>) => void) | null = null;
+
+  function openEditor(forChat: string, messageId: string, sourceKey: string, pairs: Array<{ source: string; translation: string; edited: boolean }>): void {
+    const modal = ctx.ui.showModal({ title: '번역 고치기', width: Math.min(720, window.innerWidth - 32), maxHeight: 820, persistent: true });
+    const areas = pairs.map((pair) => el('textarea', { value: pair.translation, spellcheck: false, rows: 3 }));
+    const list = el('div', { class: 'stt-edit-list' }, pairs.map((pair, i) =>
+      el('div', { class: 'stt-edit-row' }, [
+        el('div', { class: 'stt-edit-src' }, [pair.source]),
+        areas[i]!,
+        pair.edited ? el('span', { class: 'stt-badge' }, ['직접 고침']) : null,
+      ])));
+    // Rewriting the English only makes sense when the translation goes into Korean (the upstream prompt).
+    const korean = /korean|한국|^ko\b/i.test(current().myLanguage);
+    const sync = el('input', { type: 'checkbox', checked: korean && readSyncPref() });
+    sync.disabled = !korean;
+    const saveButton = button('저장', () => {
+      const edits = areas.flatMap((area, index) => (area.value !== pairs[index]!.translation && area.value.trim() ? [{ index, text: area.value }] : []));
+      if (!edits.length) {
+        modal.dismiss();
+        return;
+      }
+      writeSyncPref(sync.checked);
+      saveButton.disabled = true;
+      saveButton.textContent = sync.checked ? '영어 원문 고치는 중…' : '저장 중…';
+      editorDone = (result) => {
+        if (result.messageId !== messageId) return;
+        editorDone = null;
+        if (!result.ok) {
+          saveButton.disabled = false;
+          saveButton.textContent = '저장';
+          notify('error', result.error || '저장하지 못했습니다.');
+          return;
+        }
+        modal.dismiss();
+        if (result.error) notify('warning', result.error);
+        else if (sync.checked) notify('info', result.rewritten ? `영어 원문 ${result.rewritten}문단을 고쳤습니다.` : '고칠 영어 문단을 찾지 못했습니다. 번역만 저장했습니다.');
+      };
+      toBackend({ type: 'edit_save', chatId: forChat, messageId, sourceKey, edits, syncSource: sync.checked });
+    }, 'stt-primary');
+    modal.root.replaceChildren(el('div', { class: 'stt-modal' }, [
+      el('div', { class: 'stt-note' }, ['원문 문단 아래 칸에서 번역을 고칩니다. 문단 안에 빈 줄은 넣을 수 없습니다.']),
+      list,
+      el('label', { class: 'stt-check', title: '직접 고친 번역에 맞춰 영어 원문 문단도 AI로 고쳐서 저장합니다. 되돌리는 기능은 없으니 원문을 따로 보관해 두세요.' }, [sync, '영어 원문도 같이 고치기 (AI 호출, 고친 문단마다 1회)']),
+      el('div', { class: 'stt-row' }, [saveButton, button('취소', () => { editorDone = null; modal.dismiss(); })]),
+    ]));
+  }
+
+  // ---- 저장한 기타 지침 ----
+
+  let selectedNoteId = '';
+  let lastNote: { name: string; text: string } | null = null;
+
+  function noteTools(): HTMLElement {
+    const notes = store?.notes ?? [];
+    if (!notes.some((n) => n.id === selectedNoteId)) selectedNoteId = '';
+    const picked = notes.find((n) => n.id === selectedNoteId);
+    const load = button('불러오기', async () => {
+      if (!picked) return;
+      if (draft.freeContext.trim() && draft.freeContext.trim() !== picked.text.trim()) {
+        const { confirmed } = await ctx.ui.showConfirm({ title: '기타 지침 불러오기', message: `이 채팅의 기타 지침을 "${picked.name}"의 내용으로 바꿉니다. 지금 적힌 내용은 사라집니다.`, variant: 'warning', confirmLabel: '바꾸기' });
+        if (!confirmed) return;
+      }
+      // A copy: later changes to either side do not reach the other.
+      draft.freeContext = picked.text;
+      draft.freeContextEnabled = true;
+      markDirty();
+      renderPanel();
+      notify('info', '불러왔습니다. 아래 저장 버튼을 눌러야 이 채팅에 적용됩니다.');
+    }, '', '저장한 기타 지침을 이 채팅에 복사합니다');
+    const remove = button('삭제', async () => {
+      if (!picked) return;
+      const { confirmed } = await ctx.ui.showConfirm({ title: '저장한 기타 지침 삭제', message: `"${picked.name}"을 보관함에서 지울까요? 이미 불러와 쓰는 채팅의 기타 지침은 그대로 남습니다.`, variant: 'danger', confirmLabel: '삭제' });
+      if (confirmed) toBackend({ type: 'delete_note', id: picked.id });
+    }, 'stt-danger');
+    load.disabled = remove.disabled = !picked;
+    return el('div', { class: 'stt-field' }, [
+      el('div', { class: 'stt-row' }, [
+        button('예시 넣기 (지문 문체)', () => {
+          draft.freeContext = `${draft.freeContext.trimEnd()}${draft.freeContext.trim() ? '\n\n' : ''}${NARRATION_STYLE_EXAMPLE}`;
+          draft.freeContextEnabled = true;
+          markDirty();
+          renderPanel();
+        }, '', 'tlsiddl/marinara-translation-tools의 예시 기타 지침을 아래에 이어 붙입니다. 저장 전에 고쳐 쓰세요'),
+        button('이 기타 지침 저장', () => {
+          const modal = ctx.ui.showModal({ title: '기타 지침 저장', width: Math.min(520, window.innerWidth - 32), maxHeight: 420, persistent: true });
+          const name = el('input', { type: 'text', value: '', placeholder: '이름 (최대 60자)' });
+          modal.root.replaceChildren(el('div', { class: 'stt-modal' }, [
+            el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
+            el('div', { class: 'stt-row' }, [
+              button('저장', () => {
+                if (!name.value.trim()) return notify('warning', '이름을 입력해 주세요.');
+                lastNote = { name: name.value, text: draft.freeContext };
+                toBackend({ type: 'save_note', note: lastNote });
+                modal.dismiss();
+              }, 'stt-primary'),
+              button('취소', () => modal.dismiss()),
+            ]),
+          ]));
+        }, '', '지금 적힌 기타 지침을 이름을 붙여 모든 채팅에서 쓸 수 있게 보관합니다'),
+      ]),
+      select('저장한 기타 지침', selectedNoteId, [['', notes.length ? '고르세요' : '저장한 것이 없습니다'], ...notes.map((n): [string, string] => [n.id, n.name])], (v) => {
+        selectedNoteId = v;
+      }, false, true),
+      el('div', { class: 'stt-row' }, [load, remove]),
+      el('div', { class: 'stt-note' }, ['불러오기는 복사입니다. 저장한 것과 이 채팅의 기타 지침은 서로 연결되지 않습니다. (여러 방이 함께 쓰며 같이 바뀌는 묶음은 위의 "번역 지침 묶음")']),
+    ]);
+  }
+
   function markDirty(): void {
     dirty = true;
     status = '';
@@ -825,7 +960,7 @@ export function setup(ctx: SpindleFrontendContext) {
       el('div', { class: 'stt-section' }, [
         el('h3', {}, ['참고 정보']),
         check('기타 지침 추가 (장르·시대·지역·배경 등)', 'freeContextEnabled', renderPanel),
-        draft.freeContextEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 기타 지침', 'freeContext', { multiline: true })]) : null,
+        draft.freeContextEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 기타 지침', 'freeContext', { multiline: true }), noteTools()]) : null,
         check('대사 지침 추가 (응답 번역에만)', 'incomingVoiceEnabled', renderPanel),
         draft.incomingVoiceEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 대사 지침 (# Character Voice Instructions)', 'incomingVoicePrompt', { multiline: true })]) : null,
         check('이전 대화를 번역 참고로 포함', 'contextEnabled', renderPanel),
@@ -923,6 +1058,30 @@ export function setup(ctx: SpindleFrontendContext) {
         }
         decorate();
         return;
+      case 'edit_data':
+        if (msg.chatId !== chatId) return;
+        if (!msg.ok || !msg.pairs || !msg.sourceKey) {
+          notify('warning', msg.error || '이 메시지는 고칠 수 없습니다.');
+          return;
+        }
+        openEditor(msg.chatId, msg.messageId, msg.sourceKey, msg.pairs);
+        return;
+      case 'edit_result':
+        editorDone?.(msg);
+        return;
+      case 'note_result':
+        if (msg.needsOverwrite && lastNote) {
+          const again = lastNote;
+          void ctx.ui
+            .showConfirm({ title: '같은 이름이 있어요', message: `"${msg.needsOverwrite}" 이름으로 저장한 기타 지침이 있습니다. 덮어쓸까요?\n이미 불러와 쓰는 채팅의 기타 지침은 그대로입니다.`, variant: 'warning', confirmLabel: '덮어쓰기' })
+            .then(({ confirmed }) => {
+              if (confirmed) toBackend({ type: 'save_note', note: again, overwrite: true });
+            });
+          return;
+        }
+        if (!msg.ok) notify('warning', msg.error || '저장하지 못했습니다.');
+        else notify('info', '기타 지침을 저장했습니다.');
+        return;
       case 'text_result': {
         const p = pending.get(msg.reqId);
         if (!p) return;
@@ -941,6 +1100,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   return () => {
     clearInterval(routeTimer);
+    document.removeEventListener('visibilitychange', onVisible);
     window.removeEventListener('beforeunload', onBeforeUnload);
     if (viewSaveTimer) clearTimeout(viewSaveTimer);
     removeFontStyle?.();

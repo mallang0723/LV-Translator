@@ -23,22 +23,26 @@ export interface ToolbarState {
   label: string;
   /** The delete-translation button is only offered while the visible swipe has a translation and nothing is running. */
   canDelete: boolean;
+  /** The correct-translation button: a finished translation of the visible swipe and nothing running. */
+  canEdit: boolean;
   busy: boolean;
 }
 
 export function toolbarState(view: Pick<MessageView, 'busy' | 'text' | 'status'> | null): ToolbarState {
-  if (!view) return { action: 'translate', force: false, label: '번역', canDelete: false, busy: false };
-  if (view.busy) return { action: 'cancel', force: false, label: '번역 중단 (번역 중입니다)', canDelete: false, busy: true };
+  if (!view) return { action: 'translate', force: false, label: '번역', canDelete: false, canEdit: false, busy: false };
+  if (view.busy) return { action: 'cancel', force: false, label: '번역 중단 (번역 중입니다)', canDelete: false, canEdit: false, busy: true };
   const exists = view.text !== null || view.status !== null;
   return {
     action: 'translate',
     force: exists,
     label: exists ? '다시 번역 (저장된 번역을 새로 만듭니다)' : '번역',
     canDelete: view.text !== null,
+    canEdit: view.text !== null && view.status === 'done',
     busy: false,
   };
 }
 
+export const EDIT_TRANSLATION_LABEL = '번역 고치기 (문단별로 번역을 손으로 고칩니다)';
 export const DELETE_TRANSLATION_LABEL = '번역 삭제 (지금 보이는 스와이프의 번역만 지웁니다. 메시지는 그대로입니다)';
 
 /** Message id from a decorator scope such as `message:<id>:actions`. */

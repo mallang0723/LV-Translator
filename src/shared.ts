@@ -5,6 +5,14 @@ import { normalizeIllustrations } from './illustrations';
 /** Maximum per-message views in a chat/window response. */
 export const VIEW_WINDOW = 30;
 import { lenientTags } from './translate/protect';
+import { createAssembly } from './vendor/tt-1.8.0/assembly';
+import { FREE_CONTEXT_MAX } from './vendor/tt-1.8.0/catalog';
+
+const notesTools = createAssembly({ currentScope: () => ({}), storedConfig: { presets: [] }, paragraph: {} });
+
+/** Limits inherited from Translation Tools 1.8.0: 100 notes, names up to 60 characters, text up to 12,000. */
+export const NOTE_LIMITS = { count: notesTools.NOTES_MAX as number, name: notesTools.NOTE_NAME_MAX as number, text: FREE_CONTEXT_MAX };
+export const newNoteId = (): string => notesTools.newNoteId();
 
 /**
  * below: original, then translation. above: translation, then original. only: translation alone.
@@ -115,11 +123,20 @@ export function normalizeView(value: unknown): ViewSettings {
   };
 }
 
+/** A saved 기타 지침 (Translation Tools 1.8.0 "기타 지침 저장"): loading one copies its text into a chat. */
+export interface Note {
+  id: string;
+  name: string;
+  text: string;
+}
+
 export interface Store {
   version: 1;
   view: ViewSettings;
   userPresets: UserPreset[];
   userBundles: UserBundle[];
+  /** Saved 기타 지침, shared by every chat. Copied (not linked) into a chat when loaded. */
+  notes: Note[];
   /** Settings for chats that have none of their own yet. */
   defaults: ChatSettings;
   chats: Record<string, ChatSettings>;
@@ -233,7 +250,7 @@ export function normalizeStore(value: unknown): Store {
     seen.add(id);
     userPresets.push({ id, name, prompt });
   }
-  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, defaults, chats };
+  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, notes: notesTools.normalizeNotes(raw.notes) as Note[], defaults, chats };
 }
 
 export function settingsFor(store: Store, chatId: string | null): ChatSettings {
@@ -276,6 +293,8 @@ export interface TranslationRecord {
   unit?: TranslationUnit;
   /** Number of source parts. */
   total: number;
+  /** Paragraph indexes the user corrected by hand (번역 고치기); parts[i] is then the user's text. */
+  edited?: number[];
   /** Index of a part that stopped early (output limit), or -1. */
   truncatedPart: number;
   status: TranslationStatus;
@@ -340,13 +359,18 @@ export interface ConnectionSummary {
 // frontend -> backend
 export type ToBackend =
   | { type: 'hello' }
-  | { type: 'hint'; chatId: string | null; activeId?: string; chatConnectionId?: string }
+  /** `open`: the chat was just opened or came back on screen (a missed reply may be translated then). */
+  | { type: 'hint'; chatId: string | null; activeId?: string; chatConnectionId?: string; open?: boolean }
   | { type: 'save_connection'; chatId: string | null; connectionId: string }
   | { type: 'chat'; chatId: string; messageIds?: string[] }
   | { type: 'view_messages'; chatId: string; messageIds: string[] }
   | { type: 'save_settings'; chatId: string | null; settings: ChatSettings; asDefault: boolean }
   | { type: 'save_preset'; preset: UserPreset }
   | { type: 'delete_preset'; id: string }
+  | { type: 'save_note'; note: { name: string; text: string }; overwrite?: boolean }
+  | { type: 'delete_note'; id: string }
+  | { type: 'edit_open'; chatId: string; messageId: string }
+  | { type: 'edit_save'; chatId: string; messageId: string; sourceKey: string; edits: Array<{ index: number; text: string }>; syncSource: boolean }
   | { type: 'save_bundle'; bundle: UserBundle }
   | { type: 'delete_bundle'; id: string }
   | { type: 'translate'; chatId: string; messageId: string; force: boolean }
@@ -363,4 +387,7 @@ export type ToBackend =
 export type ToFrontend =
   | { type: 'state'; store: Store; presets: PresetSummary[]; connections: ConnectionSummary[] }
   | { type: 'views'; chatId: string; views: MessageView[]; replace: boolean; requestedIds?: string[]; plainIds?: string[] }
-  | { type: 'text_result'; reqId: string; ok: boolean; text?: string; error?: string };
+  | { type: 'text_result'; reqId: string; ok: boolean; text?: string; error?: string }
+  | { type: 'edit_data'; chatId: string; messageId: string; ok: boolean; error?: string; sourceKey?: string; pairs?: Array<{ source: string; translation: string; edited: boolean }> }
+  | { type: 'edit_result'; chatId: string; messageId: string; ok: boolean; error?: string; rewritten?: number; saved?: boolean }
+  | { type: 'note_result'; ok: boolean; error?: string; needsOverwrite?: string };

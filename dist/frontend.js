@@ -16,98 +16,6 @@ function parseTags(raw) {
   return [...new Set(names)];
 }
 
-// src/shared.ts
-var VIEW_WINDOW = 30;
-var FONT_MIN = 12;
-var FONT_MAX = 32;
-var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
-function fontSize(value, fallback) {
-  const n = Number(value);
-  return value === null || value === "" || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
-}
-function normalizeView(value) {
-  const v = value && typeof value === "object" ? value : {};
-  return {
-    paragraphView: v.paragraphView === "tap" ? "tap" : "interleave",
-    paragraphOrder: v.paragraphOrder === "translation-first" ? "translation-first" : "source-first",
-    sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
-    translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize)
-  };
-}
-var LONG_SPLIT_DEFAULT = 7000;
-var INHERIT_PRESET_ID = "builtin-inherit";
-var DEFAULT_SETTINGS = {
-  connectionId: "",
-  modelLanguage: "English",
-  myLanguage: "Korean",
-  outgoingPresetId: INHERIT_PRESET_ID,
-  incomingPresetId: INHERIT_PRESET_ID,
-  outgoingPrompt: "",
-  incomingPrompt: "",
-  translateMyMessages: false,
-  showDraftButton: false,
-  autoTranslate: false,
-  displayMode: "below",
-  translationUnit: "whole",
-  autoContinue: true,
-  longSplitChars: LONG_SPLIT_DEFAULT,
-  protectHtml: true,
-  protectCode: true,
-  excludeRules: "",
-  excludeTags: "",
-  bundleId: "",
-  glossary: "",
-  freeContextEnabled: false,
-  freeContext: "",
-  incomingVoiceEnabled: false,
-  incomingVoicePrompt: "",
-  contextEnabled: false,
-  contextIncludeOriginal: true,
-  contextIncludeTranslation: true,
-  contextIncludeUserInput: false,
-  contextMessageCount: 3
-};
-function settingsFor(store, chatId) {
-  return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
-}
-function effectiveConnectionId(store, chatId) {
-  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
-}
-
-// src/connection.ts
-var CONNECTION_HINT = "AI 연결을 찾지 못했습니다. 번역 설정에서 연결을 골랐는지, 그리고 저장했는지 확인해 주세요(저장하지 않으면 적용되지 않습니다). Lumiverse에 기본 연결이 있는지도 확인해 보세요.";
-function pickConnection(list, chosen, hint = {}) {
-  const has = (id) => id ? list.some((c) => c.id === id) : false;
-  const staleId = chosen && !has(chosen) ? chosen : undefined;
-  const found = (id, source) => staleId ? { id, source, staleId } : { id, source };
-  if (chosen && has(chosen))
-    return { id: chosen, source: "chosen" };
-  if (has(hint.chatId))
-    return found(hint.chatId, "chat");
-  if (has(hint.activeId))
-    return found(hint.activeId, "active");
-  const def = list.find((c) => c.is_default);
-  if (def)
-    return found(def.id, "default");
-  const first = list[0];
-  return first ? found(first.id, "first") : null;
-}
-var SOURCE_LABELS = {
-  chosen: "설정에서 고른 연결",
-  chat: "이 채팅에 지정된 연결",
-  active: "지금 쓰는(활성) 연결",
-  default: "기본 연결",
-  first: "첫 번째 연결",
-  host: "Lumiverse가 정하는 연결"
-};
-function friendlyError(message) {
-  if (/No connection profile found/i.test(message))
-    return CONNECTION_HINT;
-  if (/userId is required/i.test(message))
-    return "이 확장은 사용자 정보를 받지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.";
-  return message;
-}
-
 // src/vendor/tt-1.8.0/prompts.ts
 var MARINARA_TRANSLATION_GENERAL_PROMPTS = Object.freeze({
   base: `You are a translator. Translate the given text accurately into {{targetLanguage}}, preserving formatting, markdown, and any special characters like *asterisks* for actions. Output ONLY the translated text, nothing else -- no explanations, no extra commentary.
@@ -745,6 +653,560 @@ ${instruction}`;
   }
 });
 
+// src/vendor/tt-1.8.0/catalog.ts
+var FREE_CONTEXT_MAX = 12000;
+var CONTEXT_SYSTEM_INSTRUCTIONS = MARINARA_TRANSLATION_REFERENCE_PROMPTS.previousContext;
+var { base: BASE_PROMPT, roleplay: ORIGINAL_ROLEPLAY_PROMPT, literaryRoleplay: LITERARY_ROLEPLAY_PROMPT } = MARINARA_TRANSLATION_GENERAL_PROMPTS;
+var HANGUL_ONLY_RULE = "- Write the Korean in Hangul only. Never leave or insert Chinese characters (Hanzi/Hanja/Kanji) or Japanese kana in the Korean text, not even for a single word; write every word in Hangul. Only text that the rules above tell you to keep exactly as written or to write in another language (a kept original line, a foreign dialogue line in the dual form, a tag, a metadata line such as the §RP tag) keeps its own characters.";
+var withHangulRule = (prompt) => `${prompt.trimEnd()}
+${HANGUL_ONLY_RULE}`;
+var BUILTIN_PRESETS = Object.freeze([
+  Object.freeze({
+    id: "builtin-inherit",
+    name: "채팅 설정 유지",
+    prompt: BASE_PROMPT,
+    replace: false,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-roleplay",
+    name: "자연스러운 RP",
+    prompt: ORIGINAL_ROLEPLAY_PROMPT,
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-literary-roleplay",
+    name: "범용 문학·RP",
+    prompt: LITERARY_ROLEPLAY_PROMPT,
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-english-korean",
+    name: "영어→한국어 문학·RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_LITERARY_PROMPTS.legacy.english),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-chinese-korean",
+    name: "중국어→한국어 문학·RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_LITERARY_PROMPTS.legacy.chinese),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-japanese-korean",
+    name: "일본어→한국어 문학·RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_LITERARY_PROMPTS.legacy.japanese),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-bilingual-dialogue-korean",
+    name: "원문 대사 병기·한국어 RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_BILINGUAL_PROMPTS.legacy),
+    replace: true,
+    builtin: true
+  })
+]);
+var V2_PRESETS = [
+  {
+    id: "builtin-english-korean-v2",
+    legacyId: "builtin-english-korean",
+    sourceId: "custom-6d2179ba-aa61-443d-b4d0-2871f3b71dd4",
+    name: "영어→한국어 문학·RP v2",
+    prompt: withHangulRule(MARINARA_TRANSLATION_LITERARY_PROMPTS.v2.english),
+    replace: true,
+    builtin: true
+  },
+  {
+    id: "builtin-japanese-korean-v2",
+    legacyId: "builtin-japanese-korean",
+    sourceId: "custom-50681179-369c-47e6-8aa0-c784d6b4f4c4",
+    name: "일본어→한국어 문학·RP v2",
+    prompt: withHangulRule(MARINARA_TRANSLATION_LITERARY_PROMPTS.v2.japanese),
+    replace: true,
+    builtin: true
+  },
+  {
+    id: "builtin-chinese-korean-v2",
+    legacyId: "builtin-chinese-korean",
+    sourceId: "custom-bb53f4d1-e48e-4458-855b-36aeed276cf7",
+    name: "중국어→한국어 문학·RP v2",
+    prompt: withHangulRule(MARINARA_TRANSLATION_LITERARY_PROMPTS.v2.chinese),
+    replace: true,
+    builtin: true
+  },
+  {
+    id: "builtin-bilingual-dialogue-korean-v2",
+    legacyId: "builtin-bilingual-dialogue-korean",
+    sourceId: "custom-05aa88b0-9167-4567-8eb0-bd55007c1669",
+    name: "원문 대사 병기·한국어 RP v2",
+    prompt: withHangulRule(MARINARA_TRANSLATION_BILINGUAL_PROMPTS.v2),
+    replace: true,
+    builtin: true
+  }
+];
+var ADDITIONAL_BUILTIN_PRESETS = Object.freeze([
+  Object.freeze({
+    id: "builtin-korean-style-foreign-dialogue-generate",
+    name: "한국어 문체·이름 중심·외국인 대사 병기 (외국어 대사 생성)",
+    prompt: withHangulRule(`Translate the source into natural Korean. Output only the translation, with no notes or explanations. Preserve meaning, point of view, characterization, emotional nuance, formatting (paragraph breaks, markdown, *asterisks*), and the author's narrative style, pacing, imagery and register. Do not add, omit, censor, soften or invent content.
+
+Narration and pronouns:
+- Resolve he/she/they/him/her/his from the source, the previous context, the glossary and the character voice notes. When the referent is clear, use that person's name in the form the glossary or voice notes give, or leave the subject out where Korean reads naturally without it. Rephrase instead of repeating the same name in back-to-back clauses.
+- Avoid habitual 그, 그녀, 그의, 그녀의. Use them only where a name or omission would make the referent unclear or the sentence awkward.
+- Leaving a word out must not erase where an action is directed. When the source says toward whom or onto whose body something happens (onto him, against his skin, to his mouth), keep that in Korean, once, with the name or a short pointer such as 그 살갗 or 그 입술, so the reader never has to guess who does what to whom.
+- The voice block marked "- 역할: 유저 페르소나" is the user's persona; apply the same rule when she/her or he/him refers to that person.
+- Never guess a referent. If the source is ambiguous, keep it ambiguous in Korean rather than picking a person. Third-person narration stays third person.
+
+Dialogue voice:
+- Follow each speaker's voice notes for speech level, sentence endings, address terms and first-person forms; otherwise infer them from the relationship and the scene. Keep each character's voice consistent.
+
+Spoken language (read the "- 사용 언어:" line in each speaker's voice block):
+- Foreign language means any language other than Korean, regardless of the source text's language.
+- Work out who speaks each quoted line from dialogue tags and context.
+- Korean only: when the speaker's 사용 언어 is Korean, missing, empty or marked "(추정)", or the speaker is unclear.
+- If a speaker has no voice block, treat them as Korean-speaking (Korean only).
+- If 사용 언어 lists Korean plus another language, use the dual form only when the source line itself is in the other language; otherwise Korean only.
+- Do not decide anyone's spoken language from their name, appearance or the language the source is written in.
+- When the speaker's 사용 언어 is another language, give the line in that language followed by the Korean translation in the dual form. If the source line is already written in that language, keep it exactly as written. Otherwise write it in that language yourself as a faithful translation of the source line: same meaning, tone and length, nothing added. If you cannot write that language reliably, use Korean only.
+- Dual form: "foreign line" (한국어 번역) — the foreign line inside the source quotation marks, a space, then a natural Korean translation in that speaker's voice in parentheses.
+- This applies only to spoken dialogue in quotation marks. Narration, actions and inner thoughts are always Korean only.`),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-korean-style-foreign-dialogue",
+    name: "한국어 문체·이름 중심·외국인 대사 병기 (원문 있을 때만)",
+    prompt: withHangulRule(`Translate the source into natural Korean. Output only the translation, with no notes or explanations. Preserve meaning, point of view, characterization, emotional nuance, formatting (paragraph breaks, markdown, *asterisks*), and the author's narrative style, pacing, imagery and register. Do not add, omit, censor, soften or invent content.
+
+Narration and pronouns:
+- Resolve he/she/they/him/her/his from the source, the previous context, the glossary and the character voice notes. When the referent is clear, use that person's name in the form the glossary or voice notes give, or leave the subject out where Korean reads naturally without it. Rephrase instead of repeating the same name in back-to-back clauses.
+- Avoid habitual 그, 그녀, 그의, 그녀의. Use them only where a name or omission would make the referent unclear or the sentence awkward.
+- Leaving a word out must not erase where an action is directed. When the source says toward whom or onto whose body something happens (onto him, against his skin, to his mouth), keep that in Korean, once, with the name or a short pointer such as 그 살갗 or 그 입술, so the reader never has to guess who does what to whom.
+- The voice block marked "- 역할: 유저 페르소나" is the user's persona; apply the same rule when she/her or he/him refers to that person.
+- Never guess a referent. If the source is ambiguous, keep it ambiguous in Korean rather than picking a person. Third-person narration stays third person.
+
+Dialogue voice:
+- Follow each speaker's voice notes for speech level, sentence endings, address terms and first-person forms; otherwise infer them from the relationship and the scene. Keep each character's voice consistent.
+
+Spoken language (read the "- 사용 언어:" line in each speaker's voice block):
+- Foreign language means any language other than Korean, regardless of the source text's language.
+- Work out who speaks each quoted line from dialogue tags and context.
+- Korean only: when the speaker's 사용 언어 is Korean, missing, empty or marked "(추정)", or the speaker is unclear.
+- If a speaker has no voice block, treat them as Korean-speaking (Korean only).
+- If 사용 언어 lists Korean plus another language, use the dual form only when the source line itself is in the other language.
+- Do not decide anyone's spoken language from their name, appearance or the language the source is written in.
+- When the speaker's 사용 언어 is another language and the line in the source is actually written in that language, keep the line exactly as written and add the Korean translation in the dual form. When the line is written in any other language, translate it into Korean only. Never write new foreign-language text.
+- Dual form: "foreign line" (한국어 번역) — the foreign line inside the source quotation marks, a space, then a natural Korean translation in that speaker's voice in parentheses.
+- This applies only to spoken dialogue in quotation marks. Narration, actions and inner thoughts are always Korean only.`),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-korean-style-keep-model-dialogue",
+    name: "한국어 문체·이름 중심·모델 병기 유지 (지문만 번역)",
+    prompt: withHangulRule(`Translate the narration of the source into natural Korean and keep the dialogue the model already wrote for display. Output only the result, with no notes or explanations. Preserve meaning, point of view, characterization, emotional nuance, formatting (paragraph breaks, line breaks, markdown, *asterisks*, speaker labels such as "Name |"), and the author's narrative style, pacing, imagery and register. Do not add, omit, censor, soften or invent content.
+
+Narration and pronouns:
+- Resolve he/she/they/him/her/his from the source, the previous context, the glossary and the character voice notes. When the referent is clear, use that person's name in the form the glossary or voice notes give, or leave the subject out where Korean reads naturally without it. Rephrase instead of repeating the same name in back-to-back clauses.
+- Avoid habitual 그, 그녀, 그의, 그녀의. Use them only where a name or omission would make the referent unclear or the sentence awkward.
+- Leaving a word out must not erase where an action is directed. When the source says toward whom or onto whose body something happens (onto him, against his skin, to his mouth), keep that in Korean, once, with the name or a short pointer such as 그 살갗 or 그 입술, so the reader never has to guess who does what to whom.
+- The voice block marked "- 역할: 유저 페르소나" is the user's persona; apply the same rule when she/her or he/him refers to that person.
+- Never guess a referent. If the source is ambiguous, keep it ambiguous in Korean rather than picking a person. Third-person narration stays third person.
+
+Dialogue the model already wrote (keep as is):
+- Decide by the text inside the quotation marks and the parentheses after it. Ignore the speaker label ("Name |") when deciding whether a line already contains Korean.
+- A quoted dialogue line is final display text when the quote is in Korean, or when a Korean translation in parentheses follows it: "foreign line" (한국어 번역). Copy such a line exactly as written, character for character, together with its speaker label, quotation marks and parenthetical translation. Do not translate, rephrase, re-pair, reorder or correct it, even if the Korean translation looks wrong.
+- Never change a word inside the quoted original. Foreign words mixed into the line (chérie, señor, davvero, etc.) stay exactly as they are; do not swap them for English or any other language.
+- If a segment contains nothing but such kept lines, output the segment unchanged.
+- A dialogue line on its own (with a speaker label, or as its own paragraph) whose quote contains no Korean and has no parenthetical translation is a foreign-language line (English included) whose translation is missing: keep the original text exactly as written and add a natural Korean translation right after it, in parentheses on the same line: "original line" (한국어 번역). Write that translation in the speaker's voice, following the voice notes for speech level, sentence endings and address terms.
+- Short quotes inside a narration sentence (for example "Fine," he said.) are part of the narration: translate them into Korean with it, with no dual form.
+- Keep inline markers and tags exactly as they appear, with their attributes and position, around the same text: markers such as <x1>…</x1>, and raw tags such as <speaker="Name">…</speaker> when they appear. Never drop, move, translate, rename or add a marker or tag, and never turn a marker into a different tag.
+- Keep metadata lines such as the §RP tag exactly as written, and keep scene dividers such as *** on their own line with the blank lines around them.
+- Narration, descriptions, actions and inner thoughts are always translated into Korean.`),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-english-paraphrase-korean",
+    name: "영어→한국어 의역·문학·RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_PARAPHRASE_PROMPTS.english),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-english-source-style-korean",
+    name: "영어→영문학 번역체·RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_SOURCE_STYLE_PROMPTS.english),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-chinese-paraphrase-korean",
+    name: "중국어→한국어 의역·문학·RP",
+    prompt: withHangulRule(MARINARA_TRANSLATION_PARAPHRASE_PROMPTS.chinese),
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-literary-roleplay-input",
+    name: "문학·RP·3인칭 지문 인풋용",
+    prompt: MARINARA_TRANSLATION_INPUT_PROMPTS.literaryRoleplay,
+    replace: true,
+    builtin: true
+  }),
+  Object.freeze({
+    id: "builtin-literary-roleplay-input-bilingual-dialogue",
+    name: "문학·RP·3인칭 지문 인풋용 대사 병기",
+    prompt: MARINARA_TRANSLATION_INPUT_PROMPTS.bilingualDialogue,
+    replace: true,
+    builtin: true
+  })
+]);
+var BUILTIN_PRESET_ORDER = new Map([
+  "builtin-inherit",
+  "builtin-korean-style-foreign-dialogue",
+  "builtin-korean-style-foreign-dialogue-generate",
+  "builtin-roleplay",
+  "builtin-literary-roleplay",
+  "builtin-literary-roleplay-input",
+  "builtin-literary-roleplay-input-bilingual-dialogue",
+  "builtin-english-korean",
+  "builtin-english-korean-v2",
+  "builtin-english-paraphrase-korean",
+  "builtin-english-source-style-korean",
+  "builtin-chinese-korean",
+  "builtin-chinese-korean-v2",
+  "builtin-chinese-paraphrase-korean",
+  "builtin-japanese-korean",
+  "builtin-japanese-korean-v2",
+  "builtin-bilingual-dialogue-korean",
+  "builtin-bilingual-dialogue-korean-v2"
+].map((id, index) => [id, index]));
+
+// src/vendor/tt-1.8.0/assembly.ts
+function createAssembly(host) {
+  const { currentScope, storedConfig, paragraph } = host;
+  const LEGACY_VOICE_INSTRUCTION_START = "[Translation Tools: Character Voice Instructions]";
+  const LEGACY_VOICE_INSTRUCTION_END = "[/Translation Tools: Character Voice Instructions]";
+  const NOTE_NAME_MAX = 60;
+  const NOTES_MAX = 100;
+  function normalizeNotes(value) {
+    const notes = [];
+    const ids = new Set;
+    const names = new Set;
+    for (const item of Array.isArray(value) ? value : []) {
+      if (!item || typeof item !== "object" || Array.isArray(item))
+        continue;
+      const id = typeof item.id === "string" ? item.id.trim() : "";
+      const name = typeof item.name === "string" ? item.name.trim().slice(0, NOTE_NAME_MAX) : "";
+      const text = typeof item.text === "string" ? item.text.trim().slice(0, FREE_CONTEXT_MAX) : "";
+      if (!id.startsWith("note-") || ids.has(id) || !name || names.has(name) || !text)
+        continue;
+      ids.add(id);
+      names.add(name);
+      notes.push({ id, name, text });
+      if (notes.length >= NOTES_MAX)
+        break;
+    }
+    return notes;
+  }
+  function newNoteId() {
+    try {
+      return `note-${crypto.randomUUID()}`;
+    } catch {
+      return `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+  }
+  function escapeContextValue(value) {
+    return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  }
+  function stripIncomingVoiceInstruction(prompt) {
+    let result = typeof prompt === "string" ? prompt : "";
+    while (true) {
+      const start = result.indexOf(LEGACY_VOICE_INSTRUCTION_START);
+      if (start < 0)
+        break;
+      const end = result.indexOf(LEGACY_VOICE_INSTRUCTION_END, start + LEGACY_VOICE_INSTRUCTION_START.length);
+      if (end < 0) {
+        result = result.slice(0, start);
+        break;
+      }
+      const before = result.slice(0, start).trimEnd();
+      const after = result.slice(end + LEGACY_VOICE_INSTRUCTION_END.length).trimStart();
+      result = before && after ? `${before}
+
+${after}` : before || after;
+    }
+    const header = MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice("").trim();
+    const at = result.indexOf(header);
+    if (at >= 0 && (at === 0 || result[at - 1] === `
+`))
+      result = result.slice(0, at);
+    return result.trim();
+  }
+  const VOICE_MACRO = /\{\{\s*voice\s*\}\}/giu;
+  const VOCAB_MACRO = /\{\{\s*vocab\s*\}\}/giu;
+  const VOCAB_MACRO_TEST = /\{\{\s*vocab\s*\}\}/iu;
+  const VOICE_MACRO_LINE = /^[ \t]*\{\{\s*voice\s*\}\}[ \t]*(?:\r?\n|$)/gimu;
+  const VOCAB_MACRO_LINE = /^[ \t]*\{\{\s*vocab\s*\}\}[ \t]*(?:\r?\n|$)/gimu;
+  const GLOSSARY_RULE = MARINARA_TRANSLATION_REFERENCE_PROMPTS.glossary.replace(/\s*Translate only \[Text to Translate\]\.?\s*$/u, "");
+  function voiceSection(scope) {
+    const instruction = scope.incomingVoiceEnabled ? scope.incomingVoicePrompt.trim() : "";
+    return instruction ? MARINARA_TRANSLATION_REFERENCE_RENDERERS.characterVoice(instruction) : "";
+  }
+  function fillPromptMacros(prompt, voice, vocab) {
+    const hasVoice = /\{\{\s*voice\s*\}\}/iu.test(prompt);
+    const hasVocab = VOCAB_MACRO_TEST.test(prompt);
+    const put = (text, all, line, value) => value ? text.replace(all, () => value) : text.replace(line, "").replace(all, "");
+    const text = put(put(prompt, VOICE_MACRO, VOICE_MACRO_LINE, voice), VOCAB_MACRO, VOCAB_MACRO_LINE, vocab).replace(/\n{3,}/g, `
+
+`).trim();
+    return { text, hasVoice, hasVocab };
+  }
+  function parseGlossary(raw) {
+    const pairs = [];
+    for (const line of raw.split(/\r?\n/u)) {
+      const separator = line.indexOf("=");
+      if (separator < 1)
+        continue;
+      const left = line.slice(0, separator).trim();
+      const right = line.slice(separator + 1).trim();
+      if (left && right)
+        pairs.push({ left, right });
+    }
+    return pairs;
+  }
+  function glossarySection(raw, sourceText, targetLanguage) {
+    const pairs = parseGlossary(raw);
+    if (!pairs.length)
+      return "";
+    const exact = [];
+    const bidirectional = [];
+    for (const pair of pairs) {
+      const hasLeft = sourceText.includes(pair.left);
+      const hasRight = sourceText.includes(pair.right);
+      if (hasLeft && !hasRight)
+        exact.push(`"${pair.left}" → "${pair.right}"`);
+      else if (hasRight && !hasLeft)
+        exact.push(`"${pair.right}" → "${pair.left}"`);
+      else
+        bidirectional.push(`"${pair.left}" ↔ "${pair.right}"`);
+    }
+    return MARINARA_TRANSLATION_REFERENCE_RENDERERS.glossary(targetLanguage, exact, bidirectional);
+  }
+  function freeContextSection(raw, lore = "", scope = null) {
+    if (scope && LIVE_PROMPT_PRESET_IDS.has(scope.incomingPresetId) && raw.trim()) {
+      const parts = [`# User Translation Style Instructions
+Follow these instructions for wording, style and rhythm. They never add facts, events or sentences that the source does not have. Passages inside example tags show style only; never copy their names, events or phrases.
+
+${raw.trim()}`];
+      if (lore.trim())
+        parts.push(MARINARA_TRANSLATION_REFERENCE_RENDERERS.freeContext(escapeContextValue(lore.trim())));
+      return parts.join(`
+
+`);
+    }
+    const context = [raw.trim(), lore.trim()].filter(Boolean).join(`
+
+`);
+    if (!context)
+      return "";
+    const escaped = escapeContextValue(context);
+    return MARINARA_TRANSLATION_REFERENCE_RENDERERS.freeContext(escaped);
+  }
+  const LIVE_PROMPT_PRESET_IDS = new Set(["builtin-korean-style-foreign-dialogue", "builtin-korean-style-foreign-dialogue-generate", "builtin-korean-style-keep-model-dialogue"]);
+  function livePresetPrompt(scope) {
+    if (!LIVE_PROMPT_PRESET_IDS.has(scope.incomingPresetId))
+      return "";
+    const preset = storedConfig?.presets.find((item) => item.id === scope.incomingPresetId);
+    return preset?.replace ? preset.prompt : "";
+  }
+  const personaNameCache = new Map;
+  async function personaSection(scope, chatId) {
+    try {
+      if (!chatId || !LIVE_PROMPT_PRESET_IDS.has(scope.incomingPresetId))
+        return "";
+      const chat = await paragraph.getChat(chatId);
+      const personaId = chat?.personaId;
+      if (!personaId)
+        return "";
+      let name = personaNameCache.get(personaId);
+      if (name === undefined) {
+        name = String((await paragraph.getPersona(personaId))?.name || "").trim();
+        if (name)
+          personaNameCache.set(personaId, name);
+      }
+      if (!name)
+        return "";
+      return `# User Persona
+The user's persona is named "${name}". When she/her/he/him/they or similar refer to the user's persona, use "${name}" or omit naturally; do not use 그/그녀 for them.`;
+    } catch {
+      return "";
+    }
+  }
+  function buildSystemPrompt(body, hasContext = false, scope = currentScope(), glossary = "", incoming = false, lore = "", persona = "") {
+    const live = incoming ? livePresetPrompt(scope) : "";
+    const existing = live || (typeof body.systemPrompt === "string" ? stripIncomingVoiceInstruction(body.systemPrompt) : "");
+    const voice = incoming ? voiceSection(scope) : "";
+    const filled = fillPromptMacros(existing || BASE_PROMPT, voice, glossary ? `${GLOSSARY_RULE}
+${glossary}` : "");
+    const sections = [filled.text];
+    if (glossary && !filled.hasVocab)
+      sections.push(MARINARA_TRANSLATION_REFERENCE_PROMPTS.glossary);
+    const freeContext = scope.freeContextEnabled ? freeContextSection(scope.freeContext, lore, scope) : "";
+    if (freeContext)
+      sections.push(freeContext);
+    if (voice && !filled.hasVoice)
+      sections.push(voice);
+    if (incoming && persona)
+      sections.push(persona);
+    if (hasContext)
+      sections.push(CONTEXT_SYSTEM_INSTRUCTIONS);
+    return sections.filter(Boolean).join(`
+
+`);
+  }
+  return {
+    NOTE_NAME_MAX,
+    NOTES_MAX,
+    normalizeNotes,
+    newNoteId,
+    escapeContextValue,
+    stripIncomingVoiceInstruction,
+    VOCAB_MACRO_TEST,
+    GLOSSARY_RULE,
+    voiceSection,
+    fillPromptMacros,
+    parseGlossary,
+    glossarySection,
+    freeContextSection,
+    LIVE_PROMPT_PRESET_IDS,
+    livePresetPrompt,
+    personaSection,
+    buildSystemPrompt
+  };
+}
+
+// src/shared.ts
+var VIEW_WINDOW = 30;
+var notesTools = createAssembly({ currentScope: () => ({}), storedConfig: { presets: [] }, paragraph: {} });
+var NOTE_LIMITS = { count: notesTools.NOTES_MAX, name: notesTools.NOTE_NAME_MAX, text: FREE_CONTEXT_MAX };
+var FONT_MIN = 12;
+var FONT_MAX = 32;
+var DEFAULT_VIEW = { paragraphView: "interleave", paragraphOrder: "source-first", sourceFontSize: 16, translationFontSize: 18 };
+function fontSize(value, fallback) {
+  const n = Number(value);
+  return value === null || value === "" || !Number.isFinite(n) ? fallback : Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n)));
+}
+function normalizeView(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return {
+    paragraphView: v.paragraphView === "tap" ? "tap" : "interleave",
+    paragraphOrder: v.paragraphOrder === "translation-first" ? "translation-first" : "source-first",
+    sourceFontSize: fontSize(v.sourceFontSize, DEFAULT_VIEW.sourceFontSize),
+    translationFontSize: fontSize(v.translationFontSize, DEFAULT_VIEW.translationFontSize)
+  };
+}
+var LONG_SPLIT_DEFAULT = 7000;
+var INHERIT_PRESET_ID = "builtin-inherit";
+var DEFAULT_SETTINGS = {
+  connectionId: "",
+  modelLanguage: "English",
+  myLanguage: "Korean",
+  outgoingPresetId: INHERIT_PRESET_ID,
+  incomingPresetId: INHERIT_PRESET_ID,
+  outgoingPrompt: "",
+  incomingPrompt: "",
+  translateMyMessages: false,
+  showDraftButton: false,
+  autoTranslate: false,
+  displayMode: "below",
+  translationUnit: "whole",
+  autoContinue: true,
+  longSplitChars: LONG_SPLIT_DEFAULT,
+  protectHtml: true,
+  protectCode: true,
+  excludeRules: "",
+  excludeTags: "",
+  bundleId: "",
+  glossary: "",
+  freeContextEnabled: false,
+  freeContext: "",
+  incomingVoiceEnabled: false,
+  incomingVoicePrompt: "",
+  contextEnabled: false,
+  contextIncludeOriginal: true,
+  contextIncludeTranslation: true,
+  contextIncludeUserInput: false,
+  contextMessageCount: 3
+};
+function settingsFor(store, chatId) {
+  return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
+}
+function effectiveConnectionId(store, chatId) {
+  return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
+}
+
+// src/connection.ts
+var CONNECTION_HINT = "AI 연결을 찾지 못했습니다. 번역 설정에서 연결을 골랐는지, 그리고 저장했는지 확인해 주세요(저장하지 않으면 적용되지 않습니다). Lumiverse에 기본 연결이 있는지도 확인해 보세요.";
+function pickConnection(list, chosen, hint = {}) {
+  const has = (id) => id ? list.some((c) => c.id === id) : false;
+  const staleId = chosen && !has(chosen) ? chosen : undefined;
+  const found = (id, source) => staleId ? { id, source, staleId } : { id, source };
+  if (chosen && has(chosen))
+    return { id: chosen, source: "chosen" };
+  if (has(hint.chatId))
+    return found(hint.chatId, "chat");
+  if (has(hint.activeId))
+    return found(hint.activeId, "active");
+  const def = list.find((c) => c.is_default);
+  if (def)
+    return found(def.id, "default");
+  const first = list[0];
+  return first ? found(first.id, "first") : null;
+}
+var SOURCE_LABELS = {
+  chosen: "설정에서 고른 연결",
+  chat: "이 채팅에 지정된 연결",
+  active: "지금 쓰는(활성) 연결",
+  default: "기본 연결",
+  first: "첫 번째 연결",
+  host: "Lumiverse가 정하는 연결"
+};
+function friendlyError(message) {
+  if (/No connection profile found/i.test(message))
+    return CONNECTION_HINT;
+  if (/userId is required/i.test(message))
+    return "이 확장은 사용자 정보를 받지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.";
+  return message;
+}
+
+// src/vendor/tt-1.8.0/example-narration-style.ts
+var NARRATION_STYLE_EXAMPLE = `ABSOLUTE WORD BAN: never write 계집 or 계집애 anywhere in the translation, in any scene, tone or viewpoint, even when the source has no word for the woman at all. Do not turn a sentence about her into a label for her: "She didn't have an ounce of fear in her" = 서연에게는 두려움이라곤 눈곱만큼도 없었다 (never ~없는 계집이었다). Only when the source itself uses a crude word for a woman (girl, wench, broad, bitch) choose 여자, 아가씨 as the tone requires. Check the finished translation once for 계집 and rewrite any sentence that has it.
+
+Narration style (all scenes): write the Korean narration as original Korean web-fiction prose in close third person, not as a translated novel.
+- Free indirect style: let the viewpoint character's own judgment and tone run through the narration with endings such as ~할 테다, ~터였다, ~나 다름없었다, ~일 리 없었다, ~기 짝이 없었다, ~였으니까. Keep the source's meaning, but phrase each judgment the way that character would think it.
+- Translate sentence by sentence but not word by word: merge or split English sentences when Korean rhythm needs it, carry clauses with connective endings (~더니, ~자, ~며, ~채, ~는데), and turn English idioms and similes into natural Korean expressions.
+- Avoid translationese: 개인적인 모욕, ~한 양, ~에 대해, ~것이다, ~하는 중이었다 chains, stacked ~의, and literal "그는/그녀는". Use names, 제/제 몸 for reflexives, or omission.
+- Keep blank lines, paragraph breaks and scene dividers (***) exactly where the source has them.
+- Keep the source logic exact even while paraphrasing: contrast and irony, cause and effect, time frame, and who owns or does what. "Ten years of X, and Y happened" means Y happened now despite X, not repeatedly during those years. Write possessives as the right person's name when 제/자기 could point to the wrong one (his office = 도하의 사무실, not the company's). Do not drop images that carry meaning, such as a comparison to a startled deer.
+- Numbers and units stay exact: twenty degrees colder = 20도 더 차가운 (not 스무 배), centuries = 수백 년, millennia = 수천 년. Physical descriptions stay exact: slit-pupiled = 세로 동공의 (not 가늘게 좁아진), purple bruise = 보랏빛 멍.
+- Write spelled-out English numbers as Arabic numerals with Korean units: thirty-two degrees = 32도 (never 서른두 도), five kilos = 5킬로그램, two miles = 2마일, twenty minutes = 20분. Keep native Korean words only for small everyday counts in speech-like narration (한 번, 두 사람, 세 걸음).
+- Do not soften or guess what the source states: "she had jumped off" is 뛰어내렸다, not 떨어졌다; "So that was whose car" means realizing whose car it was, not guessing (~였던 모양이었다).
+- Add nothing the source does not say: no extra modifiers or actions (덜덜 떨리는 손, 능숙한), no invented positions, names or ship names. Paraphrase the wording, never the facts.
+- Distances and sizes stay at the source scale: a fraction of an inch = 거의 닿을 듯한 거리 / 몇 밀리미터, an inch = 2~3센티미터; never turn them into 한 뼘 or other folk units.
+- Terms: keep world terms fixed (consigliere = 콘실리에레, gangplank = 트랩) and write a character's fixed traits the same way every time (slate/storm/blue-gray eyes = 청회색 눈). A chill is 냉기 or 한기, never 온기.
+- 제/자기 always means the subject of its own clause. When "his/her" belongs to someone other than that subject, write the owner's name: "the girl who borrowed his car" = 도하의 차를 빌려 쓰던 서연 (never 제 차).
+- Terms: throat = 목/목울대 (멱살 is a shirt collar you grab, never something you bite); the base of her throat = 목 아래 오목한 곳 (front of the neck, never 목덜미, which is the back); nape = 목덜미; amusement = 재미/흥미/웃음기 (never 유흥 or 조소); effortless(ly) = 아무렇지 않게/힘들이지 않고 (never an invented image such as 숨결 하나 없이, 손짓 하나 없이); faint = 희미한.
+- When two people are in one sentence, do not use 저/제 for both of them; name one of them.
+- 계집/계집애 are banned (see the word ban at the top).
+`;
+
 // src/message-ui.ts
 function targetLabel(view) {
   const name = view.name.trim();
@@ -752,18 +1214,20 @@ function targetLabel(view) {
 }
 function toolbarState(view) {
   if (!view)
-    return { action: "translate", force: false, label: "번역", canDelete: false, busy: false };
+    return { action: "translate", force: false, label: "번역", canDelete: false, canEdit: false, busy: false };
   if (view.busy)
-    return { action: "cancel", force: false, label: "번역 중단 (번역 중입니다)", canDelete: false, busy: true };
+    return { action: "cancel", force: false, label: "번역 중단 (번역 중입니다)", canDelete: false, canEdit: false, busy: true };
   const exists = view.text !== null || view.status !== null;
   return {
     action: "translate",
     force: exists,
     label: exists ? "다시 번역 (저장된 번역을 새로 만듭니다)" : "번역",
     canDelete: view.text !== null,
+    canEdit: view.text !== null && view.status === "done",
     busy: false
   };
 }
+var EDIT_TRANSLATION_LABEL = "번역 고치기 (문단별로 번역을 손으로 고칩니다)";
 var DELETE_TRANSLATION_LABEL = "번역 삭제 (지금 보이는 스와이프의 번역만 지웁니다. 메시지는 그대로입니다)";
 function messageIdFromScope(scope) {
   const m = /^message:(.+):actions$/.exec(scope);
@@ -784,6 +1248,7 @@ function wantsBar(view, mode) {
 
 // src/toolbar.ts
 var ICON_TRANSLATE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+var ICON_EDIT = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 var ICON_TRANSLATE_DELETE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + '<g transform="translate(0.5 0.5) scale(0.72)"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></g>' + '<path d="m15.5 15.5 6 6" stroke-width="2.6"/><path d="m21.5 15.5-6 6" stroke-width="2.6"/></svg>';
 var BUBBLE_ROW = '[data-component="BubbleActions"]';
 var SLOT_ATTR = "data-stt-tb";
@@ -840,7 +1305,7 @@ function mountToolbars(opts) {
     const state = toolbarState(view ?? null);
     const show = view ? view.role !== "system" : opts.canTranslate?.(meta.id) === true;
     const look = show ? lookOf(slot) : { kind: "own" };
-    const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${look.kind === "host" ? look.className : look.kind}` : "";
+    const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${state.canEdit && !!opts.onEdit}|${look.kind === "host" ? look.className : look.kind}` : "";
     if (slot.getAttribute("data-stt-sig") === sig)
       return;
     slot.setAttribute("data-stt-sig", sig);
@@ -851,6 +1316,8 @@ function mountToolbars(opts) {
     const children = [
       button(`stt-tb-translate${state.busy ? " stt-tb-busy" : ""}`, state.label, ICON_TRANSLATE, () => state.action === "cancel" ? opts.onCancel(meta.id) : opts.onTranslate(meta.id, state.force), look)
     ];
+    if (state.canEdit && opts.onEdit)
+      children.push(button("stt-tb-edit", EDIT_TRANSLATION_LABEL, ICON_EDIT, () => opts.onEdit(meta.id), look));
     if (state.canDelete)
       children.push(button("stt-tb-del", DELETE_TRANSLATION_LABEL, ICON_TRANSLATE_DELETE, () => opts.onDelete(meta.id), look));
     slot.replaceChildren(...children);
@@ -1046,6 +1513,11 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-sticky { position: sticky; bottom: 0; background: color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
+.stt-edit-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.stt-edit-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.25)); }
+.stt-edit-src { white-space: pre-wrap; font-size: 0.85em; opacity: 0.8; }
+.stt-modal .stt-edit-row textarea { min-height: 64px; }
+.stt-badge { font-size: 0.75em; opacity: 0.75; }
 .stt-panel, .stt-section, .stt-field, .stt-modal { min-width: 0; overflow-wrap: anywhere; }
 .stt-row > .stt-field { flex: 1 1 130px; }
 .stt-panel select { min-width: 0; max-width: 100%; }
@@ -1134,7 +1606,7 @@ function setup(ctx) {
     return m ? decodeURIComponent(m[1]) : null;
   }
   let hint = {};
-  async function sendHint(forChat = chatId) {
+  async function sendHint(forChat = chatId, open = false) {
     const next = {};
     try {
       const id = ctx.connections?.getActive?.()?.activeProfileId;
@@ -1148,7 +1620,7 @@ function setup(ctx) {
         next.chatId = pinned.trim();
     } catch {}
     hint = next;
-    toBackend({ type: "hint", chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId });
+    toBackend({ type: "hint", chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId, ...open ? { open: true } : {} });
   }
   async function translateText(text, forChat) {
     await sendHint(forChat);
@@ -1257,6 +1729,10 @@ function setup(ctx) {
       if (chatId)
         toBackend({ type: "cancel", chatId, messageId: id });
     },
+    onEdit: (id) => {
+      if (chatId)
+        toBackend({ type: "edit_open", chatId, messageId: id });
+    },
     onDelete: (id) => {
       const forChat = chatId;
       const view = views.get(id);
@@ -1332,13 +1808,21 @@ function setup(ctx) {
     renderDraftButton();
     renderPanel();
     if (next) {
-      sendHint(next);
+      sendHint(next, true);
       const messageIds = ctx.dom.listMessageElements().slice(-VIEW_WINDOW).map(({ messageId }) => messageId);
       viewRequests.take(messageIds);
       toBackend({ type: "chat", chatId: next, messageIds: messageIds.length ? messageIds : undefined });
       queueDecorate();
     }
   }
+  let lastVisibleHint = 0;
+  const onVisible = () => {
+    if (document.visibilityState !== "visible" || !chatId || Date.now() - lastVisibleHint < 1e4)
+      return;
+    lastVisibleHint = Date.now();
+    sendHint(chatId, true);
+  };
+  document.addEventListener("visibilitychange", onVisible);
   const routeTimer = setInterval(() => {
     const next = chatIdFromLocation();
     if (next !== chatId)
@@ -1603,6 +2087,132 @@ function setup(ctx) {
       preview
     ]);
   }
+  const SYNC_PREF = "stt-sync-source";
+  const readSyncPref = () => {
+    try {
+      return localStorage.getItem(SYNC_PREF) !== "0";
+    } catch {
+      return true;
+    }
+  };
+  const writeSyncPref = (on) => {
+    try {
+      localStorage.setItem(SYNC_PREF, on ? "1" : "0");
+    } catch {}
+  };
+  let editorDone = null;
+  function openEditor(forChat, messageId, sourceKey, pairs) {
+    const modal = ctx.ui.showModal({ title: "번역 고치기", width: Math.min(720, window.innerWidth - 32), maxHeight: 820, persistent: true });
+    const areas = pairs.map((pair) => el("textarea", { value: pair.translation, spellcheck: false, rows: 3 }));
+    const list = el("div", { class: "stt-edit-list" }, pairs.map((pair, i) => el("div", { class: "stt-edit-row" }, [
+      el("div", { class: "stt-edit-src" }, [pair.source]),
+      areas[i],
+      pair.edited ? el("span", { class: "stt-badge" }, ["직접 고침"]) : null
+    ])));
+    const korean = /korean|한국|^ko\b/i.test(current().myLanguage);
+    const sync = el("input", { type: "checkbox", checked: korean && readSyncPref() });
+    sync.disabled = !korean;
+    const saveButton = button("저장", () => {
+      const edits = areas.flatMap((area, index) => area.value !== pairs[index].translation && area.value.trim() ? [{ index, text: area.value }] : []);
+      if (!edits.length) {
+        modal.dismiss();
+        return;
+      }
+      writeSyncPref(sync.checked);
+      saveButton.disabled = true;
+      saveButton.textContent = sync.checked ? "영어 원문 고치는 중…" : "저장 중…";
+      editorDone = (result) => {
+        if (result.messageId !== messageId)
+          return;
+        editorDone = null;
+        if (!result.ok) {
+          saveButton.disabled = false;
+          saveButton.textContent = "저장";
+          notify("error", result.error || "저장하지 못했습니다.");
+          return;
+        }
+        modal.dismiss();
+        if (result.error)
+          notify("warning", result.error);
+        else if (sync.checked)
+          notify("info", result.rewritten ? `영어 원문 ${result.rewritten}문단을 고쳤습니다.` : "고칠 영어 문단을 찾지 못했습니다. 번역만 저장했습니다.");
+      };
+      toBackend({ type: "edit_save", chatId: forChat, messageId, sourceKey, edits, syncSource: sync.checked });
+    }, "stt-primary");
+    modal.root.replaceChildren(el("div", { class: "stt-modal" }, [
+      el("div", { class: "stt-note" }, ["원문 문단 아래 칸에서 번역을 고칩니다. 문단 안에 빈 줄은 넣을 수 없습니다."]),
+      list,
+      el("label", { class: "stt-check", title: "직접 고친 번역에 맞춰 영어 원문 문단도 AI로 고쳐서 저장합니다. 되돌리는 기능은 없으니 원문을 따로 보관해 두세요." }, [sync, "영어 원문도 같이 고치기 (AI 호출, 고친 문단마다 1회)"]),
+      el("div", { class: "stt-row" }, [saveButton, button("취소", () => {
+        editorDone = null;
+        modal.dismiss();
+      })])
+    ]));
+  }
+  let selectedNoteId = "";
+  let lastNote = null;
+  function noteTools() {
+    const notes = store?.notes ?? [];
+    if (!notes.some((n) => n.id === selectedNoteId))
+      selectedNoteId = "";
+    const picked = notes.find((n) => n.id === selectedNoteId);
+    const load = button("불러오기", async () => {
+      if (!picked)
+        return;
+      if (draft.freeContext.trim() && draft.freeContext.trim() !== picked.text.trim()) {
+        const { confirmed } = await ctx.ui.showConfirm({ title: "기타 지침 불러오기", message: `이 채팅의 기타 지침을 "${picked.name}"의 내용으로 바꿉니다. 지금 적힌 내용은 사라집니다.`, variant: "warning", confirmLabel: "바꾸기" });
+        if (!confirmed)
+          return;
+      }
+      draft.freeContext = picked.text;
+      draft.freeContextEnabled = true;
+      markDirty();
+      renderPanel();
+      notify("info", "불러왔습니다. 아래 저장 버튼을 눌러야 이 채팅에 적용됩니다.");
+    }, "", "저장한 기타 지침을 이 채팅에 복사합니다");
+    const remove = button("삭제", async () => {
+      if (!picked)
+        return;
+      const { confirmed } = await ctx.ui.showConfirm({ title: "저장한 기타 지침 삭제", message: `"${picked.name}"을 보관함에서 지울까요? 이미 불러와 쓰는 채팅의 기타 지침은 그대로 남습니다.`, variant: "danger", confirmLabel: "삭제" });
+      if (confirmed)
+        toBackend({ type: "delete_note", id: picked.id });
+    }, "stt-danger");
+    load.disabled = remove.disabled = !picked;
+    return el("div", { class: "stt-field" }, [
+      el("div", { class: "stt-row" }, [
+        button("예시 넣기 (지문 문체)", () => {
+          draft.freeContext = `${draft.freeContext.trimEnd()}${draft.freeContext.trim() ? `
+
+` : ""}${NARRATION_STYLE_EXAMPLE}`;
+          draft.freeContextEnabled = true;
+          markDirty();
+          renderPanel();
+        }, "", "tlsiddl/marinara-translation-tools의 예시 기타 지침을 아래에 이어 붙입니다. 저장 전에 고쳐 쓰세요"),
+        button("이 기타 지침 저장", () => {
+          const modal = ctx.ui.showModal({ title: "기타 지침 저장", width: Math.min(520, window.innerWidth - 32), maxHeight: 420, persistent: true });
+          const name = el("input", { type: "text", value: "", placeholder: "이름 (최대 60자)" });
+          modal.root.replaceChildren(el("div", { class: "stt-modal" }, [
+            el("label", { class: "stt-field" }, [el("span", {}, ["이름"]), name]),
+            el("div", { class: "stt-row" }, [
+              button("저장", () => {
+                if (!name.value.trim())
+                  return notify("warning", "이름을 입력해 주세요.");
+                lastNote = { name: name.value, text: draft.freeContext };
+                toBackend({ type: "save_note", note: lastNote });
+                modal.dismiss();
+              }, "stt-primary"),
+              button("취소", () => modal.dismiss())
+            ])
+          ]));
+        }, "", "지금 적힌 기타 지침을 이름을 붙여 모든 채팅에서 쓸 수 있게 보관합니다")
+      ]),
+      select("저장한 기타 지침", selectedNoteId, [["", notes.length ? "고르세요" : "저장한 것이 없습니다"], ...notes.map((n) => [n.id, n.name])], (v) => {
+        selectedNoteId = v;
+      }, false, true),
+      el("div", { class: "stt-row" }, [load, remove]),
+      el("div", { class: "stt-note" }, ['불러오기는 복사입니다. 저장한 것과 이 채팅의 기타 지침은 서로 연결되지 않습니다. (여러 방이 함께 쓰며 같이 바뀌는 묶음은 위의 "번역 지침 묶음")'])
+    ]);
+  }
   function markDirty() {
     dirty = true;
     status = "";
@@ -1717,7 +2327,7 @@ function setup(ctx) {
     ]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["참고 정보"]),
       check("기타 지침 추가 (장르·시대·지역·배경 등)", "freeContextEnabled", renderPanel),
-      draft.freeContextEnabled ? el("div", { class: "stt-sub" }, [text("이 방에만 추가 · 기타 지침", "freeContext", { multiline: true })]) : null,
+      draft.freeContextEnabled ? el("div", { class: "stt-sub" }, [text("이 방에만 추가 · 기타 지침", "freeContext", { multiline: true }), noteTools()]) : null,
       check("대사 지침 추가 (응답 번역에만)", "incomingVoiceEnabled", renderPanel),
       draft.incomingVoiceEnabled ? el("div", { class: "stt-sub" }, [text("이 방에만 추가 · 대사 지침 (# Character Voice Instructions)", "incomingVoicePrompt", { multiline: true })]) : null,
       check("이전 대화를 번역 참고로 포함", "contextEnabled", renderPanel),
@@ -1813,6 +2423,33 @@ function setup(ctx) {
         }
         decorate();
         return;
+      case "edit_data":
+        if (msg.chatId !== chatId)
+          return;
+        if (!msg.ok || !msg.pairs || !msg.sourceKey) {
+          notify("warning", msg.error || "이 메시지는 고칠 수 없습니다.");
+          return;
+        }
+        openEditor(msg.chatId, msg.messageId, msg.sourceKey, msg.pairs);
+        return;
+      case "edit_result":
+        editorDone?.(msg);
+        return;
+      case "note_result":
+        if (msg.needsOverwrite && lastNote) {
+          const again = lastNote;
+          ctx.ui.showConfirm({ title: "같은 이름이 있어요", message: `"${msg.needsOverwrite}" 이름으로 저장한 기타 지침이 있습니다. 덮어쓸까요?
+이미 불러와 쓰는 채팅의 기타 지침은 그대로입니다.`, variant: "warning", confirmLabel: "덮어쓰기" }).then(({ confirmed }) => {
+            if (confirmed)
+              toBackend({ type: "save_note", note: again, overwrite: true });
+          });
+          return;
+        }
+        if (!msg.ok)
+          notify("warning", msg.error || "저장하지 못했습니다.");
+        else
+          notify("info", "기타 지침을 저장했습니다.");
+        return;
       case "text_result": {
         const p = pending.get(msg.reqId);
         if (!p)
@@ -1832,6 +2469,7 @@ function setup(ctx) {
   resetChat(chatIdFromLocation());
   return () => {
     clearInterval(routeTimer);
+    document.removeEventListener("visibilitychange", onVisible);
     window.removeEventListener("beforeunload", onBeforeUnload);
     if (viewSaveTimer)
       clearTimeout(viewSaveTimer);
