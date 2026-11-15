@@ -56,7 +56,7 @@ export async function fakeHost(options: HostOptions = {}) {
   const counts = { fullReads: 0, tailReads: 0, writes: 0 };
   const readOptions: unknown[] = [];
   const updates: Array<Record<string, any>> = [];
-  const sent: ToFrontend[] = [];
+  const sent: any[] = [];
   const warnings: string[] = [];
   const errors: string[] = [];
   const calls: Record<string, any>[] = [];
@@ -135,7 +135,7 @@ export async function fakeHost(options: HostOptions = {}) {
     setComplete(fn: typeof complete) { complete = fn; },
     async send(payload: ToBackend) { receive(payload, uid); await settle(); },
     async emit(payload: Record<string, unknown>) { handlers.get('GENERATION_ENDED')!({ generationId: 'generation', chatId, ...payload }, uid); await settle(); },
-    store: () => store,
+    store: (): any => store,
     record(message: Message, source = message.content) {
       return (message.metadata?.[METADATA_KEY] as MessageTranslations | undefined)?.entries[sourceHash(source)];
     },

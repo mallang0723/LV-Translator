@@ -5,6 +5,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import provenance from '../src/vendor/tt-1.8.0/provenance.json';
+import { NARRATION_STYLE_EXAMPLE } from '../src/vendor/tt-1.8.0/example-narration-style';
 
 const dir = new URL('../src/vendor/tt-1.8.0/', import.meta.url).pathname;
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -29,6 +30,11 @@ describe('vendored Translation Tools 1.8.0 code', () => {
       expect(b.header).toBe(expected.sha256);
       expect([b.start, b.end]).toEqual([expected.startLine, expected.endLine]);
     }
+  });
+
+  test('the bundled 기타 지침 example is the upstream file', () => {
+    expect(sha(NARRATION_STYLE_EXAMPLE)).toBe(provenance.example.sha256);
+    expect(NARRATION_STYLE_EXAMPLE).toContain('ABSOLUTE WORD BAN');
   });
 
   test('blocks equal the upstream commit when the clone is present', () => {

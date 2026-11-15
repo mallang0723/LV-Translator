@@ -19,6 +19,7 @@ import {
 } from './prompt';
 import { hasNoText, splitParagraphs } from './paragraphs';
 import { checkMarkers, protect, restore } from './protect';
+import { isPairedDialogue } from '../vendor/tt-1.8.0/helpers';
 
 export const MAX_AUTO_CONTINUE = 4;
 /** Most text pieces the marker fallback may translate one by one. */
@@ -46,6 +47,8 @@ export interface EngineJob {
   previous: ContextMessage[];
   /** Continue this record instead of starting over. */
   resume?: TranslationRecord;
+  /** The "# User Persona" section for the live presets (see personaSectionFor); '' = none. */
+  persona?: string;
 }
 
 export class TranslationError extends Error {
@@ -74,8 +77,16 @@ function resumable(record: TranslationRecord | null | undefined, pieces: string[
   return !!record && sameArray(record.pieces, pieces) && record.total === total && (record.unit ?? 'whole') === settings.translationUnit;
 }
 
+/**
+ * Paragraphs that need no request: no text at all, or (paragraph mode, Korean target) dialogue the chat
+ * model already wrote as "original" (한국어) pairs, which Translation Tools 1.8.0 treats as final text.
+ */
+export function skipsRequest(part: string, settings: ChatSettings, targetLanguage: string): boolean {
+  return hasNoText(part) || (settings.translationUnit === 'paragraph' && isPairedDialogue(part, targetLanguage));
+}
+
 /** Requests still needed to translate `source` (parts already done in `record` are skipped). */
-export function requestsNeeded(source: string, settings: ChatSettings, record: TranslationRecord | null | undefined): number {
+export function requestsNeeded(source: string, settings: ChatSettings, record: TranslationRecord | null | undefined, direction: Direction = 'incoming'): number {
   let prot;
   try {
     prot = protect(source, settings);
@@ -84,7 +95,8 @@ export function requestsNeeded(source: string, settings: ChatSettings, record: T
   }
   const sources = partSources(prot.text, settings);
   const start = resumable(record, prot.pieces, sources.length, settings) ? record.parts.length : 0;
-  return sources.slice(start).filter((part) => !hasNoText(part)).length;
+  const target = direction === 'incoming' ? settings.myLanguage : settings.modelLanguage;
+  return sources.slice(start).filter((part) => !skipsRequest(part, settings, target)).length;
 }
 
 function sameArray(a: string[], b: string[]): boolean {
@@ -119,6 +131,7 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
       presets: job.presets,
       previous: job.previous,
       hasMarkers: /⟦\d+⟧/.test(part),
+      persona: job.persona,
     });
 
   const save = async () => {
@@ -172,8 +185,8 @@ export async function translate(job: EngineJob, deps: EngineDeps): Promise<Trans
 
   /** Translates part i from scratch. Returns true when complete (not cut off). */
   const translatePart = async (i: number): Promise<boolean> => {
-    if (hasNoText(sources[i]!)) {
-      // Separators, markup or protected parts only: kept as they are, no request.
+    if (skipsRequest(sources[i]!, settings, targetLanguage)) {
+      // Separators, markup, protected parts only, or dialogue already paired with its Korean: kept as they are, no request.
       record.parts[i] = sources[i]!;
       await save();
       return true;

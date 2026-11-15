@@ -85,5 +85,9 @@
       "endLine": 3929,
       "sha256": "6b985e9d30852bfb43f5dd46a0df0a0a5f8fd6f2d0dda947266949790a318590"
     }
+  },
+  "example": {
+    "path": "기타 지침/지문 문체.txt",
+    "sha256": "178c33f27392ae9d4c326bde3c938ab15fada546887e6dc9976d20ca72761649"
   }
 }

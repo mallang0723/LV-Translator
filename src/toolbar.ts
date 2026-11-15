@@ -9,13 +9,17 @@
 //     a documented, stable anchor, and the buttons are added by hand (idempotent, MutationObserver).
 // `registerMessageAction` is declared in lumiverse-spindle-types but the host does not implement it.
 
-import { DELETE_TRANSLATION_LABEL, messageIdFromScope, toolbarState } from './message-ui';
+import { DELETE_TRANSLATION_LABEL, EDIT_TRANSLATION_LABEL, messageIdFromScope, toolbarState } from './message-ui';
 import type { MessageView } from './shared';
 
 /** Material "translate" glyph pair (lucide "languages"); same 24px grid and stroke as the host's icons. */
 export const ICON_TRANSLATE =
   '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
   '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+
+/** Pencil: correct the translation by hand. */
+export const ICON_EDIT =
+  '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 
 /** The same glyph, smaller, with a cross in the corner: "remove the translation". */
 export const ICON_TRANSLATE_DELETE =
@@ -62,6 +66,7 @@ export interface ToolbarOptions {
   onTranslate: (messageId: string, force: boolean) => void;
   onCancel: (messageId: string) => void;
   onDelete: (messageId: string) => void;
+  onEdit?: (messageId: string) => void;
 }
 
 export interface ToolbarHandle {
@@ -115,7 +120,7 @@ export function mountToolbars(opts: ToolbarOptions): ToolbarHandle {
     const state = toolbarState(view ?? null);
     const show = view ? view.role !== 'system' : opts.canTranslate?.(meta.id) === true;
     const look = show ? lookOf(slot) : ({ kind: 'own' } as Look);
-    const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${look.kind === 'host' ? look.className : look.kind}` : '';
+    const sig = show ? `${state.label}|${state.busy}|${state.canDelete}|${state.canEdit && !!opts.onEdit}|${look.kind === 'host' ? look.className : look.kind}` : '';
     if (slot.getAttribute('data-stt-sig') === sig) return;
     slot.setAttribute('data-stt-sig', sig);
     if (!show) {
@@ -131,6 +136,7 @@ export function mountToolbars(opts: ToolbarOptions): ToolbarHandle {
         look,
       ),
     ];
+    if (state.canEdit && opts.onEdit) children.push(button('stt-tb-edit', EDIT_TRANSLATION_LABEL, ICON_EDIT, () => opts.onEdit!(meta.id), look));
     if (state.canDelete) children.push(button('stt-tb-del', DELETE_TRANSLATION_LABEL, ICON_TRANSLATE_DELETE, () => opts.onDelete(meta.id), look));
     slot.replaceChildren(...children);
   }
