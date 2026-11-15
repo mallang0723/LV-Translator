@@ -60,7 +60,7 @@
 
 ## 5. 연동 계약 (번역 쪽만 구현. 기억 서재 쪽은 다른 에이전트)
 
-핸드셰이크: rpcPool `st_translator.contract` = `{ name:'lv-tx', v:1, ext:'st_translator', version:'0.4.0', provides:['pub-translation@1','glossary@1'] }`. 상대 `anon_memory_lv.contract`(`src/adapter/contract.ts`의 `PEER_ID` 한 곳)를 20초 캐시로 읽고 `name==='lv-tx' && v===1`이면 `ok`, 읽기가 던지면 `none`(설치 안 됨), 그 외 `incompatible`(설정 화면에 한 줄). 설치 감지 이벤트 구독은 하지 않았다(⚠️ `EXTENSION_LOADED`가 확장에게 오는지 확인 못 함 → TTL로 대신).
+핸드셰이크: rpcPool `st_translator.contract`(정책 `{ requires: [] }`로 게시: 정책이 없으면 호스트가 읽는 쪽에 **이 확장의 모든 권한**(`generation`, `chat_mutation`, `chats`)을 요구한다 — `~/Lumiverse/src/spindle/shared-rpc-pool.service.ts:155-185`) = `{ name:'lv-tx', v:1, ext:'st_translator', version:'0.4.0', provides:['pub-translation@1','glossary@1'] }`. 상대 `anon_memory_lv.contract`(`src/adapter/contract.ts`의 `PEER_ID` 한 곳)를 20초 캐시로 읽고 `name==='lv-tx' && v===1`이면 `ok`, 읽기가 던지면 `none`(설치 안 됨), 그 외 `incompatible`(설정 화면에 한 줄). **기억 서재 쪽에 필요한 것:** `rpcPool.sync('contract', {...}, { requires: [] })`로 게시해야 한다. 정책이 없으면 읽는 쪽(이 확장)이 상대의 모든 권한을 가져야 읽을 수 있고, 거부되면 `peerState`가 `none`이 되어 `pub`·단어장이 조용히 꺼진다(호스트의 "requires" 거부 메시지는 경고 로그 1회로 남긴다). 설치 감지 이벤트 구독은 하지 않았다(⚠️ `EXTENSION_LOADED`가 확장에게 오는지 확인 못 함 → TTL로 대신).
 
 메시지 `metadata.st_translator.pub`(상대가 있고 `ok`일 때만, 끝난 번역(`status:'done'`)만):
 ```
@@ -71,14 +71,14 @@ pub: { v:1, h:"<FNV-1a32 base36 of message.content, 저장된 그대로>", lang:
 - `paras` 키 = `hashText(normalizeForKey(문단))`(따옴표 정규화, `*_~\`#>` 제거, 공백 정리). **문단 단위 기록일 때만** 넣고(복원한 원문 문단 기준), 400개 초과 시 앞 문단부터 버린다. `edited`는 손으로 고친 문단.
 - `writeTranslations`(모든 쓰기의 단일 관문)에서 **쓰는 시점의 `message.content` 기준**으로 계산하므로 `generatedContent`가 보이지 않는 swipe여도 어긋나지 않는다. 번역 삭제는 같은 쓰기에서 `pub`을 지운다. 번역 고치기는 한 번의 `updateMessage`에 새 `content`와 새 `pub.h`가 함께 실린다.
 - 스와이프·수정 이벤트 후: `pub.h`가 현재 내용과 다르면 교체/삭제, `pub`이 없는데 현재 내용의 끝난 번역이 있으면 새로 투영. 새 쓰기가 만든 이벤트는 `pub.h`가 일치해 거기서 멈춘다(루프 없음, 테스트: 스와이프 왕복에서 쓰기 1회씩).
-- 기억 서재가 없으면 `pub`을 쓰지 않는다(맵 §4.2.7). 과거 메시지의 일괄 재기록·요청 시 투영은 만들지 않았다.
+- 기억 서재가 없거나 끝난 번역이 아니면 `pub`을 쓰지 않고, 있던 `pub`은 같은 쓰기에서 **지운다**(같은 해시 밑에 옛 `text`가 남지 않게). 기억 서재가 다시 보이면 `refreshPub`이 다음 이벤트에서 되살린다(맵 §4.2.7). 과거 메시지의 일괄 재기록·요청 시 투영은 만들지 않았다.
 
-채팅 `chat.metadata.st_translator = { v:1, glossary:{ text, hash, at } }`: 상대가 `ok` + 호스트 `chat-conditional-metadata-v1` + `chats` 권한이 모두 있을 때만, `chats.get` → `compareAndSetMetadata({expected_metadata, metadata})`(다른 키 보존, 1회 재시도). 단어장 저장(`save_settings`)과 채팅 열기(`hint.open`, 해시 같으면 쓰기 없음) 때. `text`는 묶음까지 합친 유효 단어장을 `왼쪽 = 오른쪽` 한 줄씩 정규화, `hash = hashText(text)`. 비어 있고 전에 공개한 적이 없으면 쓰지 않는다. 실패는 조용히 무시(경고 로그 1회).
+채팅 `chat.metadata.st_translator = { v:1, glossary:{ text, hash, at } }`: 상대가 `ok` + 호스트 `chat-conditional-metadata-v1` + `chats` 권한이 모두 있을 때만, `chats.get` → `compareAndSetMetadata({expected_metadata, metadata})`(다른 키 보존, 1회 재시도). 단어장 저장(`save_settings`)과 채팅 열기(`hint.open`, 해시 같으면 쓰기 없음) 때. `text`는 묶음까지 합친 유효 단어장을 `왼쪽 = 오른쪽` 한 줄씩 정리한 것(**방향은 사용자가 쓴 그대로, 순서 없는 쌍**: LV 입력칸은 `내 언어 용어 = 모델 언어 용어`이고 원본 단어장도 양방향 `A = B`이므로 기억 서재도 순서 없는 쌍으로 읽어야 한다), `hash = hashText(text)`. 비어 있고 전에 공개한 적이 없으면 쓰지 않는다. 실패는 조용히 무시(경고 로그 1회).
 권한: `spindle.json`에 `chats` 추가(재승인). 지도의 판단과 같다. 단어장 공개를 원치 않는 사용자가 `chats`를 거부해도 번역은 정상.
 
 ## 6. 테스트
 
-`bun test` 286개 통과(0.3.6 시작 235 → 이번 +51), 타입 검사·빌드 통과. 주요 신규: `vendor.test.ts`(조각 SHA·원본 일치), `presets.test.ts`(1.5.4 해시와 1.8.0 차이는 매크로·한글 줄뿐), `prompt.test.ts`(24 요청 + 바뀐 7건은 줄 묶음 비교로 내용 보존 확인), `tt180-helpers.test.ts`(짝 대사 원본 판정 5건, `hashText` 벡터, 노트, 요청 조립), `backend-lean.test.ts`, `backend-tt180.test.ts`(번역 고치기 6건, 노트, catch-up, 짝 대사, 페르소나), `backend-contract.test.ts`(핸드셰이크, pub, 단어장, 열화 경로).
+`bun test` 288개 통과(0.3.6 시작 235 → 이번 +53), 타입 검사·빌드 통과. 주요 신규: `vendor.test.ts`(조각 SHA·원본 일치), `presets.test.ts`(1.5.4 해시와 1.8.0 차이는 매크로·한글 줄뿐), `prompt.test.ts`(24 요청 + 바뀐 7건은 줄 묶음 비교로 내용 보존 확인), `tt180-helpers.test.ts`(짝 대사 원본 판정 5건, `hashText` 벡터, 노트, 요청 조립), `backend-lean.test.ts`, `backend-tt180.test.ts`(번역 고치기 6건, 노트, catch-up, 짝 대사, 페르소나), `backend-contract.test.ts`(핸드셰이크, pub, 단어장, 열화 경로).
 요청 24건 중 7건이 1.5.4와 달라졌고(`tests/fixtures/upstream-requests-1.8.0.json`, 1.5.4 값은 `expected154`로 보관) 이유는 전부 ① 기본 프롬프트의 `{{vocab}}`로 단어장이 시스템 프롬프트로 이동 ② `{{voice}}` 자리 ③ 한글 전용 줄이며, 줄 집합 비교로 그 외 변화가 없음을 검증한다. 1.5.4에서 "채팅 설정 유지 + 빈 프롬프트 + 대사 지침"일 때 지시문이 빠지던 버그는 1.8.0에서 사라져 이전의 보정 코드를 지웠다.
 
 ## 7. 확인하지 못한 것 (실제 Lumiverse 7880 QA는 리뷰어)
@@ -92,4 +92,10 @@ pub: { v:1, h:"<FNV-1a32 base36 of message.content, 저장된 그대로>", lang:
 7. 프런트 번들이 101KB → 140KB(`shared.ts`가 노트 정규화를 위해 원본 조립 코드를 끌어옴). 줄이려면 노트 정규화를 백엔드로만 한정.
 8. 1.5.4→1.6.4 이력 공백(지도 §7)은 이번에도 메우지 않았다. 다만 1.8.0 프롬프트·조립은 원본을 직접 복사했으므로 그 사이 변화(매크로 등)는 이번에 반영된 셈이다.
 9. 번역 고치기에는 영어 원문을 되돌리는 기능이 없다(원본과 같음). 소유자 판단 필요: 되돌리기 보관(`prevSource`).
-10. 짝 대사 건너뜀이 `⟦n⟧`로 보호된 문단에서 원본과 같은 결과를 내는지는 소수 케이스만 확인했다.
+10. 이번 1.8.0 `expected` 값은 **내 빌드의 출력을 기록한 것**이다. 업스트림의 Playwright 테스트(`tests/test.js` 등)는 실행하지 못했다(브라우저 없음). 대신 1.5.4 값과의 줄 집합 비교, 프리셋 해시, 원본 조각 SHA로 막았다.
+11. 나가는 번역(outgoing)에서 라이브 프리셋 판정(기타 지침을 문체 지침으로 쓸지)은 **나가는 프리셋 id**를 본다. 원본은 채팅의 incoming 프리셋 id를 본다. 의도적 어긋남(한국어 문체 프리셋이 영어로 나가는 번역의 기타 지침을 문체 지침으로 바꾸지 않게).
+12. 짝 대사는 원본 `unitKind`의 절반(`isPairedDialogue`)만 옮겼다. 글자 비율(`scriptRatio ≥ 0.3`이면 이미 도착 언어) 절반은 LV에 없는 동작이라 옮기지 않았다. §3의 "같은 조건"은 이 절반에 한한 말이다.
+13. Stop 제외는 `GENERATION_STOPPED.content`가 저장된 메시지 내용과 같다는 가정에 기댄다(`message-generation.ts:184-190`은 저장 메시지의 content를 싣는다).
+14. 말투·단어 자동 수집 스캔 코드는 **복사하지 않았다**(권한 문제와 소유자 결정). 위치는 코드의 `TODO(tt-1.8.0 scan)`와 §1.2에 적었다. 소유자 규칙에는 "스캔 구간도 복사 대상"이라 적혀 있어 판단이 갈릴 수 있다.
+15. 지도 문서 `docs/translation-tools-1.8.0-map.md`(커밋 전 untracked였음)를 첫 커밋에 함께 넣었다. push 전에 둘지 정해 달라.
+16. 짝 대사 건너뜀이 `⟦n⟧`로 보호된 문단에서 원본과 같은 결과를 내는지는 소수 케이스만 확인했다.

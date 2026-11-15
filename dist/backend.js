@@ -2400,8 +2400,6 @@ function projectPub(mt, content, key, settings, publish, now) {
     mt.pub = pub;
     return true;
   }
-  if (!publish && mt.pub && mt.pub.h === hashText(content))
-    return true;
   delete mt.pub;
   return false;
 }
@@ -2674,20 +2672,26 @@ async function sendState(uid) {
 var SELF_VERSION = "0.4.0";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
+var warnedPeerDenied = false;
 async function peerState() {
   if (Date.now() - peer.at < PEER_TTL_MS)
     return peer.state;
   let state = "none";
   try {
     state = classifyPeer(await spindle.rpcPool.read(`${PEER_ID}.contract`));
-  } catch {
+  } catch (e) {
     state = "none";
+    const text = e instanceof Error ? e.message : String(e);
+    if (/requires/i.test(text) && !warnedPeerDenied) {
+      warnedPeerDenied = true;
+      spindle.log.warn(`[translator] memory extension link refused by the host: ${text}`);
+    }
   }
   peer = { at: Date.now(), state };
   return state;
 }
 try {
-  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION));
+  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
 }
@@ -3142,7 +3146,8 @@ async function saveEdit(uid, msg) {
         edited[pair.key] = 1;
     for (const k of Object.keys(edits))
       edited[k] = 1;
-    let state = { v: 1, map: { ...oldTranslations, ...edits }, edited, view: "", at: Date.now() };
+    const corrected = { v: 1, map: { ...oldTranslations, ...edits }, edited: { ...edited }, view: "", at: Date.now() };
+    let state = structuredClone(corrected);
     let newContent;
     let rewritten = 0;
     let sourceError = "";
@@ -3165,8 +3170,15 @@ async function saveEdit(uid, msg) {
         sourceError = errorText(e);
       }
     }
-    const content = newContent ?? original;
-    const next = recordFromMap(content, state.map, Object.keys(state.edited));
+    let content = newContent ?? original;
+    let next = recordFromMap(content, state.map, Object.keys(state.edited));
+    if (next.status !== "done" && newContent !== undefined) {
+      newContent = undefined;
+      rewritten = 0;
+      sourceError = "\uACE0\uCE5C \uC601\uC5B4 \uBB38\uB2E8\uC758 \uAD6C\uC870\uAC00 \uB9DE\uC9C0 \uC54A\uC544 \uC6D0\uBB38\uC740 \uADF8\uB300\uB85C \uB450\uC5C8\uC2B5\uB2C8\uB2E4";
+      content = original;
+      next = recordFromMap(content, corrected.map, Object.keys(corrected.edited));
+    }
     if (next.status !== "done")
       return result({ ok: false, error: "\uBB38\uB2E8 \uAD6C\uC870 \uB54C\uBB38\uC5D0 \uC774 \uBC88\uC5ED\uC744 \uC800\uC7A5\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC544\uBB34\uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
     if (snapshot.messages.get(messageId)?.content !== original)

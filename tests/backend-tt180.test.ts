@@ -96,6 +96,23 @@ test('edit: when the model fails, the correction is still saved and the English 
   });
 });
 
+test('edit: a model reply with a blank line keeps the English and still saves the correction', async () => {
+  await withTranslated(async (h, reply) => {
+    await h.send({ type: 'edit_open', chatId: h.chatId, messageId: 'reply' });
+    const open = h.sent.findLast((m: any) => m.type === 'edit_data');
+    h.setComplete(async () => ({ content: 'The lamp went out.\n\nDarkness fell.', finish_reason: 'stop' }));
+    const before = h.updates.length;
+    await h.send({ type: 'edit_save', chatId: h.chatId, messageId: 'reply', sourceKey: open.sourceKey, edits: [{ index: 0, text: '등불이 꺼졌다.' }], syncSource: true });
+    const result = h.sent.findLast((m: any) => m.type === 'edit_result');
+    expect(result).toMatchObject({ ok: true, rewritten: 0, saved: true });
+    expect(result.error).toContain('원문은 그대로 두었습니다');
+    expect(h.updates.length - before).toBe(1);
+    expect(h.updates.at(-1).content).toBeUndefined();
+    expect(reply.content.startsWith('The lamp was still burning.')).toBe(true);
+    expect(Object.values(entries(reply))[0]!.parts[0]).toBe('등불이 꺼졌다.');
+  });
+});
+
 test('edit: a stale source key or an unfinished record is refused without writing', async () => {
   await withTranslated(async (h) => {
     const before = h.updates.length;

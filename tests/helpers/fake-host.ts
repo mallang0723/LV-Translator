@@ -60,7 +60,7 @@ export async function fakeHost(options: HostOptions = {}) {
   const warnings: string[] = [];
   const errors: string[] = [];
   const calls: Record<string, any>[] = [];
-  const rpc = { synced: new Map<string, unknown>(), handlers: new Map<string, (ctx: any) => unknown>(), peers: new Map<string, unknown>(), reads: [] as string[] };
+  const rpc = { synced: new Map<string, unknown>(), policies: new Map<string, unknown>(), handlers: new Map<string, (ctx: any) => unknown>(), peers: new Map<string, unknown>(), reads: [] as string[] };
   const chatMetadata: { value: Record<string, unknown>; writes: Array<Record<string, any>> } = { value: structuredClone(options.chatMetadata ?? {}), writes: [] };
   const handlers = new Map<string, (payload: any, uid: string) => void>();
   let processor!: (ctx: any) => Promise<{ content: string } | undefined>;
@@ -122,7 +122,7 @@ export async function fakeHost(options: HostOptions = {}) {
     },
     host: { descriptorVersion: 1, lumiverseVersion: 'test', capabilities: options.caps ?? {}, extensionInstallationId: 'inst' },
     rpcPool: {
-      sync(endpoint: string, value: unknown) { rpc.synced.set(endpoint, value); return endpoint; },
+      sync(endpoint: string, value: unknown, policy?: unknown) { rpc.synced.set(endpoint, value); rpc.policies.set(endpoint, policy); return endpoint; },
       handle(endpoint: string, handler: (ctx: any) => unknown) { rpc.handlers.set(endpoint, handler); return endpoint; },
       async read(endpoint: string) { rpc.reads.push(endpoint); if (!rpc.peers.has(endpoint)) throw new Error('endpoint not found'); return rpc.peers.get(endpoint); },
       unregister(endpoint: string) { rpc.synced.delete(endpoint); rpc.handlers.delete(endpoint); },

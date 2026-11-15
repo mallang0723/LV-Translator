@@ -89,7 +89,11 @@ export function buildPub(content: string, record: TranslationRecord | undefined,
   return pub;
 }
 
-/** Sets or removes `pub` on a message's translations for the content it has now. Returns whether it is set. */
+/**
+ * Sets `pub` for the content it has now, or removes it. Whenever nothing is published (no peer, no finished
+ * translation of this content) any earlier `pub` goes too: it could carry old text under a still valid hash.
+ * Returns whether `pub` is set.
+ */
 export function projectPub(mt: MessageTranslations, content: string, key: string | null, settings: ChatSettings, publish: boolean, now: number): boolean {
   const record = key ? mt.entries[key] : undefined;
   const pub = publish ? buildPub(content, record, settings, now) : null;
@@ -97,8 +101,6 @@ export function projectPub(mt: MessageTranslations, content: string, key: string
     mt.pub = pub;
     return true;
   }
-  // Nothing to publish now. Without a peer an old projection of this very content is left alone; any other is stale.
-  if (!publish && mt.pub && mt.pub.h === hashText(content)) return true;
   delete mt.pub;
   return false;
 }
