@@ -113,6 +113,10 @@ export function assemblyFor(settings: ChatSettings, direction: Direction, preset
   };
 }
 
+// TODO(tt-1.8.0 scan): upstream's 말투·단어 자동 수집 (SCAN_GLOSSARY / SCAN_SPEECH / SCAN_WORLD, scanChat, extension.js
+// L3030-L3300 at 807d6a3) is not ported: it needs the characters, personas and world_books permissions. Until then the user
+// writes the '- 사용 언어: 영어' line in 대사 지침 by hand; the presets read it from there.
+
 /** The "# User Persona" section for a persona name (upstream wording), for the live presets only. */
 export async function personaSectionFor(settings: ChatSettings, presets: PromptPreset[], name: string): Promise<string> {
   const guides = effectiveGuides({ userBundles: [] }, settings);

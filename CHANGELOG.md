@@ -13,7 +13,7 @@
 - 기억 서재 연동 LV-TX v1(번역 쪽): `metadata.st_translator.pub`, 채팅 메타데이터 `st_translator.glossary`, rpcPool `st_translator.contract` 핸드셰이크. 새 권한 `chats`.
 - `chat-lean-messages-v1` 호스트: 작업 시작 시 채팅 끝 12개만 읽고 번역 기록은 `ownMetadata`로 이 확장 칸만 갱신. 없는 호스트는 0.3.6과 같음.
 - 이번에 옮기지 않음: 말투·단어 자동 수집(권한 필요), 대조 창의 문단별 재번역, 설정 백업.
-- 테스트 286개, 타입 검사, 빌드 통과. 실제 Lumiverse(7880) QA는 리뷰어 몫입니다. 자세한 내용: [REPORT-tt-1.8.0.md](REPORT-tt-1.8.0.md).
+- 테스트 288개, 타입 검사, 빌드 통과. 실제 Lumiverse(7880) QA는 리뷰어 몫입니다. 자세한 내용: [REPORT-tt-1.8.0.md](REPORT-tt-1.8.0.md).
 
 ## 0.3.6 — 2026-11-11
 

@@ -106,6 +106,7 @@ async function sendState(uid: Uid): Promise<void> {
 const SELF_VERSION = '0.4.0';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
+let warnedPeerDenied = false;
 
 /** Whether the memory extension is installed and speaks our contract version. A missing peer is simply "none". */
 async function peerState(): Promise<PeerState> {
@@ -113,8 +114,14 @@ async function peerState(): Promise<PeerState> {
   let state: PeerState = 'none';
   try {
     state = classifyPeer(await spindle.rpcPool.read(`${PEER_ID}.contract`));
-  } catch {
+  } catch (e) {
     state = 'none';
+    // A missing endpoint is the normal "not installed"; a permission refusal deserves one line in the log.
+    const text = e instanceof Error ? e.message : String(e);
+    if (/requires/i.test(text) && !warnedPeerDenied) {
+      warnedPeerDenied = true;
+      spindle.log.warn(`[translator] memory extension link refused by the host: ${text}`);
+    }
   }
   peer = { at: Date.now(), state };
   return state;
@@ -122,7 +129,9 @@ async function peerState(): Promise<PeerState> {
 
 try {
   // Every real host has the pool; the guard only keeps older test doubles quiet.
-  spindle.rpcPool?.sync('contract', handshake(SELF_VERSION));
+  // `requires: []`: any extension may read it. Without a policy the host demands that the reader holds every
+  // permission this extension has (shared-rpc-pool.service.ts assertRequesterCanReadEndpoint).
+  spindle.rpcPool?.sync('contract', handshake(SELF_VERSION), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
 }
@@ -619,7 +628,8 @@ async function saveEdit(uid: Uid, msg: Extract<ToBackend, { type: 'edit_save' }>
     const edited: Record<string, number> = {};
     for (const pair of pairs) if (pair.edited) edited[pair.key] = 1;
     for (const k of Object.keys(edits)) edited[k] = 1;
-    let state: UpstreamRecord = { v: 1, map: { ...oldTranslations, ...edits }, edited, view: '', at: Date.now() };
+    const corrected: UpstreamRecord = { v: 1, map: { ...oldTranslations, ...edits }, edited: { ...edited }, view: '', at: Date.now() };
+    let state: UpstreamRecord = structuredClone(corrected);
     let newContent: string | undefined;
     let rewritten = 0;
     let sourceError = '';
@@ -643,8 +653,17 @@ async function saveEdit(uid: Uid, msg: Extract<ToBackend, { type: 'edit_save' }>
         sourceError = errorText(e);
       }
     }
-    const content = newContent ?? original;
-    const next = recordFromMap(content, state.map, Object.keys(state.edited));
+    let content = newContent ?? original;
+    let next = recordFromMap(content, state.map, Object.keys(state.edited));
+    if (next.status !== 'done' && newContent !== undefined) {
+      // The model's English no longer lines up paragraph by paragraph (a blank line inside it, say):
+      // keep the English as it was and save only the correction.
+      newContent = undefined;
+      rewritten = 0;
+      sourceError = '고친 영어 문단의 구조가 맞지 않아 원문은 그대로 두었습니다';
+      content = original;
+      next = recordFromMap(content, corrected.map, Object.keys(corrected.edited));
+    }
     if (next.status !== 'done') return result({ ok: false, error: '문단 구조 때문에 이 번역을 저장할 수 없습니다. 아무것도 바꾸지 않았습니다.' });
     if (snapshot.messages.get(messageId)?.content !== original) return result({ ok: false, error: '그 사이 메시지 내용이 바뀌어 저장하지 않았습니다.' });
     const saved = await writeTranslations(uid, chatId, messageId, (draft) => {

@@ -13,8 +13,9 @@ const PARAGRAPH = { defaults: { autoTranslate: false }, chats: { chat: { autoTra
 const translationOf = (user: string) => `한국어(${user.split('\n\n').slice(1).join('\n\n').trim()})`;
 const mt = (m: Message) => m.metadata?.[METADATA_KEY] as MessageTranslations | undefined;
 
-test('handshake: the translator publishes name, version and what it provides', async () => {
+test('handshake: the translator publishes name, version and what it provides, readable by any extension', async () => {
   await withHost({ caps: CAPS }, async (h) => {
+    expect(h.rpc.policies.get('contract')).toEqual({ requires: [] });
     expect(h.rpc.synced.get('contract')).toEqual({ name: 'lv-tx', v: 1, ext: 'st_translator', version: '0.4.0', provides: ['pub-translation@1', 'glossary@1'] });
   });
 });
@@ -102,6 +103,17 @@ test('a partial or failed translation publishes nothing; a swipe to another text
     await settle();
     expect(mt(reply)?.pub?.h).toBe(hashText('Hello there.'));
     expect(h.updates.length - before).toBe(2); // one write per change, none repeated
+  });
+});
+
+test('without the peer, an old pub is dropped when the translation is rewritten (no stale text under a valid hash)', async () => {
+  await withHost({ caps: CAPS, store: WHOLE }, async (h) => {
+    const reply = makeMessage('a1', 'Hello there.', 'assistant', 0);
+    reply.metadata = { [METADATA_KEY]: { v: 1, entries: {}, pub: { v: 1, h: hashText('Hello there.'), lang: 'ko', text: '옛 번역', at: 1 } } };
+    h.messages.push(reply);
+    await h.emit({ messageId: 'a1', content: reply.content, generationType: 'normal' });
+    expect(h.record(reply)?.status).toBe('done');
+    expect(mt(reply)?.pub).toBeUndefined();
   });
 });
 
