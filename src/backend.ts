@@ -4,6 +4,7 @@
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import { BUILTIN_IDS, presetSummaries, promptPresets } from './presets';
+import { hostCaps, JOB_TAIL } from './adapter/host';
 import { deleteBundle, saveBundle } from './bundles';
 import {
   type ChatSettings,
@@ -158,6 +159,35 @@ async function cachedChat(chatId: string, refresh = false): Promise<ChatSnapshot
   return snapshot.load;
 }
 
+/**
+ * Brings the end of a loaded chat up to date at the start of a translation job. With the host's lean reads
+ * this is one `tail` read (whole swipes, not `light`, so the stored rows stay complete); anything else, or a
+ * message outside the tail, takes the full refresh.
+ */
+async function refreshForJob(chatId: string, messageId: string): Promise<ChatSnapshot> {
+  const snapshot = snapshotFor(chatId);
+  if (!snapshot.loaded || snapshot.load || !hostCaps(spindle).leanMessages) return cachedChat(chatId, true);
+  const invalidations = snapshot.invalidations;
+  snapshot.changes.clear();
+  snapshot.reading = true;
+  let rows: ChatMessage[];
+  try {
+    rows = (await (spindle.chat.getMessages as unknown as (id: string, options: { tail: number }) => Promise<unknown>)(chatId, { tail: JOB_TAIL })) as ChatMessage[];
+  } finally {
+    snapshot.reading = false;
+  }
+  const changes = new Map(snapshot.changes);
+  snapshot.changes.clear();
+  if (snapshot.invalidations !== invalidations || !rows.some((row) => row.id === messageId)) return cachedChat(chatId, true);
+  for (const row of rows) {
+    const changed = changes.get(row.id);
+    if (changed) changed.role = row.role;
+    else cacheMessage(snapshot, row);
+  }
+  for (const [id, message] of changes) if (!message) snapshot.messages.delete(id);
+  return snapshot;
+}
+
 function orderedMessages(snapshot: ChatSnapshot): ChatMessage[] {
   return [...snapshot.messages.values()].sort((a, b) => (a.index_in_chat ?? 0) - (b.index_in_chat ?? 0));
 }
@@ -173,7 +203,9 @@ async function writeTranslations(chatId: string, messageId: string, change: (mt:
   for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE)) delete mt.entries[k];
   const metadata = { ...(message.metadata ?? {}), [METADATA_KEY]: mt };
   const previousMetadata = message.metadata;
-  await spindle.chat.updateMessage(chatId, messageId, { metadata });
+  // With lean writes only our own key is merged on the host, atomically; otherwise the whole bag is rewritten.
+  if (hostCaps(spindle).leanMessages) await (spindle.chat.updateMessage as unknown as (id: string, mid: string, patch: { ownMetadata: unknown }) => Promise<void>)(chatId, messageId, { ownMetadata: mt });
+  else await spindle.chat.updateMessage(chatId, messageId, { metadata });
   if (!snapshot.messages.has(messageId)) return null;
   // A newer event may already have updated this row while the write awaited.
   if (message.metadata === previousMetadata) message.metadata = metadata;
@@ -321,7 +353,7 @@ async function translateMessage(uid: Uid, chatId: string, messageId: string, mod
     if (options.automatic && !settings.autoTranslate) return;
     // Generation may persist a new swipe without a preceding message event.
     // Refresh once at job entry, then all saves use this event-updated snapshot.
-    snapshot = await cachedChat(chatId, true);
+    snapshot = await refreshForJob(chatId, messageId);
     const messages = orderedMessages(snapshot);
     const index = messages.findIndex((m) => m.id === messageId);
     message = messages[index];

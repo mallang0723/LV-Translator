@@ -1,0 +1,18 @@
+{
+ "builtin-inherit": "0cb8df49f1af66a3942695a0a6f263c511bc55866f3d4ba65e19a1bc10a7b381",
+ "builtin-roleplay": "77169c31aa63c2a24f2918cb2f633a195967a4507d584d951b96b4a24db71417",
+ "builtin-literary-roleplay": "b35e5dd06fd1aa9b89eb321a50108047e1efdf655a62f88ad6c27f69e0d44cd7",
+ "builtin-english-korean": "8cbe3a465d57ac683eaab2e322274e15b6899ad8bf68afe2b21accd8fdb0185e",
+ "builtin-chinese-korean": "6ea9588580f1f8fe5dffebb9605e2937452a7d6bbf5e2ff96743b506a36ff57e",
+ "builtin-japanese-korean": "cb0aa0237d2e77aac9c1effe7ad2a8abc5b348081337f06bbff42dac4db66060",
+ "builtin-bilingual-dialogue-korean": "07fde7b84ddb61d0056c9611637130bd3dd5c18eea0ed4d7c6de23ef68e47d17",
+ "builtin-english-korean-v2": "0d4864add38438d5b409f8cb0fab7153407f428c133eea6f0bdc5dd0b27edde9",
+ "builtin-japanese-korean-v2": "2e9d8eb5b04891b808a343912859e29dd9251b6dcfa62f408d0abafcb185c7fe",
+ "builtin-chinese-korean-v2": "c4123f61e794ee41ba1478d94acbb1606e84372b38ba933e107ac28c5003d49a",
+ "builtin-bilingual-dialogue-korean-v2": "87f87101643e707d517db73c9cfccabc6c0e0cc5287432e6b57d005db0c63e34",
+ "builtin-english-paraphrase-korean": "bfcdd4bb6b50592cd09f2cf802d0b95125c57725679c808e9c12fd01f6a93bab",
+ "builtin-english-source-style-korean": "dfe6b98d7d1b79e3b196d30830d94205781d2a562fd919c6f479aa2765403af1",
+ "builtin-chinese-paraphrase-korean": "7dc17ec65358dfbffc6bfe80d5f5f93a6db69a96166e5c65b13eafc8e148ce41",
+ "builtin-literary-roleplay-input": "74f1929e6e4a821fabb79b4f15471f77a12f5746f029927face28ada630459b6",
+ "builtin-literary-roleplay-input-bilingual-dialogue": "28947f9104d70e03d588cf2866ffb977b18290b0632bbb98a75dae6dae7001aa"
+}

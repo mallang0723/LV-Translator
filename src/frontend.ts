@@ -27,7 +27,7 @@ import {
 } from './shared';
 import { ExcludeRuleError, parseTags } from './translate/protect';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
-import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './presets/upstream/general';
+import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
 import { showsToggle, targetLabel, wantsBar } from './message-ui';
 import { type DecoratorSpec, mountToolbars } from './toolbar';
 import { ViewRequests, visibleMessageIds } from './view-requests';
@@ -587,7 +587,7 @@ export function setup(ctx: SpindleFrontendContext) {
       }, true, true),
     );
     if (inherit) {
-      box.append(text('이 채팅의 프롬프트 (비워 두면 기본 번역 프롬프트, {{targetLanguage}} 사용 가능)', promptKey, { multiline: true, cls: 'stt-prompt', placeholder: MARINARA_TRANSLATION_GENERAL_PROMPTS.base }));
+      box.append(text('이 채팅의 프롬프트 (비워 두면 기본 번역 프롬프트, {{targetLanguage}} 사용 가능)', promptKey, { multiline: true, cls: 'stt-prompt', placeholder: MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim() }));
     } else {
       box.append(el('textarea', { class: 'stt-prompt', readOnly: true, value: preset.prompt }));
     }

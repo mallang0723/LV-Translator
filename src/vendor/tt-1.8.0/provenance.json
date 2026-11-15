@@ -1,0 +1,89 @@
+{
+  "upstream": "https://github.com/tlsiddl/marinara-translation-tools",
+  "commit": "807d6a3097687f092a1d13f8e745fc79214a2326",
+  "file": "personal-extension/extension.js",
+  "version": "1.8.0",
+  "fileSha256": "1c3b900a015ff35ed95150e459c39c28fae9d3dd02ccaa59ababac20caa6f15b",
+  "slices": {
+    "prompts.ts#prompts": {
+      "startLine": 2,
+      "endLine": 647,
+      "sha256": "bad7d781315425d6e14c4f48a94e8b5f2a844fcdedd3d5a1ea5e59a4d7f28751"
+    },
+    "catalog.ts#limits": {
+      "startLine": 4472,
+      "endLine": 4477,
+      "sha256": "01b0e04ac33e53d805b1fbe498467f0497211869ad0ad29d77e0559f59e3b9e9"
+    },
+    "catalog.ts#presets": {
+      "startLine": 4478,
+      "endLine": 4710,
+      "sha256": "56f2b0866a812fbc627ca52425c9ad078dff40f764316b153c96b295d54ba685"
+    },
+    "assembly.ts#legacy-voice": {
+      "startLine": 4711,
+      "endLine": 4712,
+      "sha256": "879c1f8fc54d495a1f3e712283ca28b8ad3d2621cb1d549dd2c4f053e68866ef"
+    },
+    "assembly.ts#notes": {
+      "startLine": 4779,
+      "endLine": 4806,
+      "sha256": "ee1976f9dbb409aa60bfa0913ef0f0ca2441d595292dd35158742eb09e071e65"
+    },
+    "assembly.ts#escape": {
+      "startLine": 5122,
+      "endLine": 5127,
+      "sha256": "398dfaae14816ba9258e6bd70b3004c3f6a3f799015f90e05c9e3c3b5790afbd"
+    },
+    "assembly.ts#macros": {
+      "startLine": 5451,
+      "endLine": 5499,
+      "sha256": "5c624cc7a4193e01bebe747b5edf821a2071fd169e5e1f0bb44f4e04659aec2e"
+    },
+    "assembly.ts#prompt": {
+      "startLine": 4917,
+      "endLine": 5008,
+      "sha256": "182672dba74fb16e8e04841ea18d9529057cd18be7f57dfba8072e5cf32ab44e"
+    },
+    "helpers.ts#hashText": {
+      "startLine": 1899,
+      "endLine": 1907,
+      "sha256": "72d5c3f2ba035577e456c7df705e0c31e7a38d3d08bc5af90b2ab69707aea265"
+    },
+    "helpers.ts#langScript": {
+      "startLine": 1935,
+      "endLine": 1944,
+      "sha256": "3742ab5f2853595a5084a8ee3f3b6aeb0bdd2f2d966f2d132b59d4ca904f96e1"
+    },
+    "helpers.ts#normalizeForKey": {
+      "startLine": 1954,
+      "endLine": 1965,
+      "sha256": "437ba06bacf8d7ebeb0bd83b029f2e5466b0fe12ec5ac3500f2ff76a79d04448"
+    },
+    "helpers.ts#stripMarks": {
+      "startLine": 2276,
+      "endLine": 2278,
+      "sha256": "3f035f0918e186a4742c0779dd6bf6ff46f6dfa24e56f4e00603c4d4f964e2b6"
+    },
+    "helpers.ts#paired": {
+      "startLine": 2335,
+      "endLine": 2353,
+      "sha256": "9b15dc33d2c17273e127865c0319b64771d823f02097276f0013a5bec9ac5c4f"
+    },
+    "sync-source.ts#system": {
+      "startLine": 3009,
+      "endLine": 3011,
+      "sha256": "5dbba9e9f89d82b1dc5b31e096e4e9683e90601e12f6fb44c0ddfffd3b7a0c43"
+    },
+    "sync-source.ts#sync": {
+      "startLine": 3040,
+      "endLine": 3081,
+      "sha256": "f887d169fec4de3c1ba69549e06084eabd2adf6a49c9521151ae5770ce43610e"
+    },
+    "catch-up.ts#catch-up": {
+      "startLine": 3900,
+      "endLine": 3929,
+      "sha256": "6b985e9d30852bfb43f5dd46a0df0a0a5f8fd6f2d0dda947266949790a318590"
+    }
+  }
+}
