@@ -2506,8 +2506,6 @@ async function forwardMessage(uid, chatId, raw) {
   if (!raw?.id)
     return;
   wideReads.update(chatId, eventMsg(raw));
-  if (typeof raw.content === "string")
-    wideReads.see(chatId, raw.id, raw.content);
   let character = null;
   try {
     character = await resolveSpeakers(spindle, uid, chatId);
