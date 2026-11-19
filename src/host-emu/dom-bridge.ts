@@ -67,17 +67,31 @@ function forwardLongMessageToggle(e: MouseEvent): void {
  * The message text is never touched: nothing here is ever written back to the message.
  */
 const mirrored = new WeakMap<Element, string>();
-const watched = new WeakSet<ShadowRoot>();
 const MIRROR = 'data-lv-mirror';
+/**
+ * Elements that act on the WHOLE document once they sit in the light DOM (a shadow root scopes them; the mirror does not). The mirror
+ * never carries them: a `<style>` in it would apply Lumiverse's island CSS (`p`, `img`, `*`...) and a card's own rules to the entire app,
+ * even with `display:none` on the mirror. The translated shadow gets the real island's `<style>` elements back (`restoreIslands`).
+ */
+const DOCUMENT_WIDE = 'style, link, meta, base, title, script, template';
 
-function syncMirror(island: HTMLElement, onChange: () => void): void {
+/** The island's shadow content as the mirror should hold it: serialised, without anything that acts document-wide. */
+function mirrorHtml(shadow: ShadowRoot): string {
+  const box = document.createElement('div');
+  for (const node of Array.from(shadow.childNodes)) box.append(node.cloneNode(true));
+  for (const el of Array.from(box.querySelectorAll(DOCUMENT_WIDE))) el.remove();
+  return box.innerHTML;
+}
+
+function syncMirror(island: HTMLElement, onChange: () => void, observers: Map<ShadowRoot, MutationObserver>): void {
   const shadow = island.shadowRoot;
   if (!shadow) return;
-  if (!watched.has(shadow)) {
-    watched.add(shadow);
-    new MutationObserver(onChange).observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true });
+  if (!observers.has(shadow)) {
+    const o = new MutationObserver(onChange);
+    o.observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true });
+    observers.set(shadow, o);
   }
-  const html = shadow.innerHTML;
+  const html = mirrorHtml(shadow);
   let mirror = island.querySelector<HTMLElement>(`:scope > [${MIRROR}]`);
   if (mirror && mirrored.get(mirror) === html) return;
   if (!mirror) {
@@ -146,7 +160,10 @@ function restoreIslands(view: HTMLElement & { _ptxFor?: HTMLElement }): void {
       const shadow = target.attachShadow({ mode: 'open' });
       const style = document.createElement('style');
       style.textContent = VIEW_CSS;
-      shadow.append(style, ...Array.from(mirror.childNodes));
+      // The island's own `<style>` elements (Lumiverse's base CSS and the card's) come from the real island, not from the mirror.
+      const real = from.length === to.length ? from[i]!.shadowRoot : null;
+      const styles = real ? Array.from(real.querySelectorAll('style')).map((st) => st.cloneNode(true)) : [];
+      shadow.append(...styles, style, ...Array.from(mirror.childNodes));
       mirror.remove();
       renderInlineMarkdown(shadow);
       // Tap a translated paragraph to see the original (the page-level handler cannot see through the shadow root).
@@ -216,6 +233,7 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
   const added = new Set<Element>();
+  const shadowObservers = new Map<ShadowRoot, MutationObserver>();
 
   function tag(message: Element): void {
     for (const body of Array.from(message.querySelectorAll('[data-component="MessageContent"]'))) {
@@ -247,7 +265,7 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
     if (destroyed) return;
     for (const m of Array.from(root.querySelectorAll('[data-message-id]'))) tag(m);
     for (const island of Array.from(root.querySelectorAll<HTMLElement>('.mari-message-content [data-lumiverse-html-island]'))) {
-      if (!island.closest('.ptx-view')) syncMirror(island, queue);
+      if (!island.closest('.ptx-view')) syncMirror(island, queue, shadowObservers);
     }
     for (const v of Array.from(root.querySelectorAll<HTMLElement>('.ptx-view'))) {
       restoreIslands(v);
@@ -275,6 +293,9 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
       for (const b of Array.from(document.querySelectorAll('[data-lv-act="continue"]'))) b.remove();
       if (timer) clearTimeout(timer);
       observer.disconnect();
+      for (const o of shadowObservers.values()) o.disconnect();
+      shadowObservers.clear();
+      for (const m of Array.from(document.querySelectorAll(`[${MIRROR}]`))) m.remove();
       for (const el of added) {
         if (el.hasAttribute('data-ptx-host-button')) el.remove();
         else el.classList.remove('mari-message-content', 'mari-message-actions');

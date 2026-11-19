@@ -1,5 +1,14 @@
 # 변경 기록
 
+## 0.5.5 — 2026-11-19
+
+허니 검수(SYHO-239) 조건 3개 해소. 원작 `extension.js`는 그대로다(`verify:original` 9개 동일, 패치 0). 바뀐 것은 `src/host-emu/dom-bridge.ts`와 시험·문서뿐이다.
+
+- **CSS 유출 수정(조건 1):** 0.5.4의 숨은 복사본(`[data-lv-mirror]`)이 island의 `<style>`까지 라이트 DOM에 옮겨, 번역을 하지 않아도 island가 화면에 뜨기만 하면 루미버스 island 기본 CSS(`p` 여백, `img` 높이, `*` 등)와 카드의 `<style>`이 앱 전체에 적용됐다. 복사본은 이제 문서 전체에 효과를 내는 요소(`style`·`link`·`meta`·`base`·`title`·`script`·`template`)를 싣지 않는다. 번역된 shadow를 만들 때(`restoreIslands`) 스타일은 **실제 island shadow의 `<style>` 사본**을 앞에 붙여 가져온다. 번역 직후 복사본이 `.ptx-view`에 복제돼 shadow로 옮겨지기 전(최대 60ms)에도 같은 유출이 있었으나 이 경로도 함께 막힌다.
+- **`destroy()` 정리(조건 2):** 확장을 끄면 모든 복사본을 지우고 shadow MutationObserver를 모두 끊는다(옛 코드는 관찰 기록이 모듈 전역이라 끈 뒤 다시 켜도 shadow를 다시 관찰하지 못했다).
+- **시험:** 스타일이 든 island로 `scripts/qa-original.mjs`에 회귀 시험 4항목(라이트 DOM에 `<style>` 없음·페이지 문단 색 불변·번역된 island가 자기 스타일 유지·destroy 정리). 0.5.4(d3481ae) 코드에서는 실패하고 이번 코드에서는 통과한다.
+- **문서(조건 3):** 화면 밖 번역의 한계와 열린 확인을 README·`docs/tt-1.10.0-ui-parity.md`에 적었다. 옛 기록만이 아니라, **지금도 화면 밖에서 번역되는 메시지**는 복사본이 없어 원작 `fallbackRoot`로 키가 만들어지고 island 블록과 맞지 않을 수 있다. 열린 확인: 루미버스 채팅 찾기(`getChatFindHighlightRoots`)와 regex action 열거가 복사본을 잡는지는 실호스트(보리) 관측 전이다(⚠️ 코드 읽기 추론).
+
 ## 0.5.4 — 2026-11-19
 
 실호스트 QA(보리 분석·빠게뜨 화면) 결과. 원작 `extension.js`는 그대로다(`verify:original` 9개 동일, 패치 0).
