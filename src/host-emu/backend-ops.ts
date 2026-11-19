@@ -108,6 +108,39 @@ export class WideReads {
   drop(chatId: string): void {
     this.reads.delete(chatId);
   }
+
+  private served = new Map<string, string>();
+
+  /** The content of a message as the original last saw it (a row it read, an event it was sent, or what it wrote). */
+  see(chatId: string, id: string, content: string): void {
+    this.served.set(`${chatId}:${id}`, content);
+    if (this.served.size > 2000) this.served.delete(this.served.keys().next().value as string);
+  }
+
+  seen(chatId: string, id: string): string | undefined {
+    return this.served.get(`${chatId}:${id}`);
+  }
+}
+
+const PARAGRAPHS = /(\n[ \t]*\n)/; // the split the original's syncSourceToEdits uses
+
+/**
+ * The original rewrites paragraphs of the content it holds (`base`) and sends the whole result (`next`). If the message changed
+ * since (an edit elsewhere, another swipe), `next` would overwrite that. Applies only the paragraphs the original changed onto the
+ * current content; null when they cannot be lined up (a paragraph it changed was changed meanwhile, or the paragraph count differs).
+ */
+export function mergeParagraphEdit(base: string, next: string, current: string): string | null {
+  if (current === base) return next;
+  const b = base.split(PARAGRAPHS), n = next.split(PARAGRAPHS), c = current.split(PARAGRAPHS);
+  if (b.length !== n.length || b.length !== c.length) return null;
+  const out = [...c];
+  for (let i = 0; i < b.length; i++) {
+    if (n[i] === b[i]) continue;
+    if (c[i] === n[i]) continue; // the original already holds the current text of this paragraph
+    if (c[i] !== b[i]) return null;
+    out[i] = n[i]!;
+  }
+  return out.join('');
 }
 
 const ms = (n: unknown): number => {
@@ -354,6 +387,7 @@ export function createEmuBridge(d: EmuDeps) {
       const rows = await tail(chatId, want);
       await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
       const kept = await d.keptTags?.();
+      for (const m of rows) wide.see(chatId, m.id, String(m.content ?? ''));
       return rows.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     /** Messages on screen that the opening read did not reach: those among the end of the chat (OLD_TAILS), by id. Older ones are absent. */
@@ -372,11 +406,13 @@ export function createEmuBridge(d: EmuDeps) {
       }
       await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
       const [sp, kept] = [await speakers(chatId), await d.keptTags?.()];
+      for (const m of found) wide.see(chatId, m.id, String(m.content ?? ''));
       return found.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     async getMessage(chatId: string, messageId: string): Promise<MessageRow> {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
+      wide.see(chatId, row.id, String(row.content ?? ''));
       return messageRow(chatId, row, speakerOf(row, await speakers(chatId)), await d.keptTags?.());
     },
     async patchExtra(chatId: string, messageId: string, patch: Record<string, unknown>, swipeIndex?: number): Promise<void> {
@@ -386,7 +422,18 @@ export function createEmuBridge(d: EmuDeps) {
       await writeTt(chatId, m, swipe, patch[PT_KEY]);
     },
     async updateContent(chatId: string, messageId: string, content: string): Promise<void> {
-      await host.chat.updateMessage(chatId, messageId, { content });
+      // Double safety (the page's cache normally keeps the original's copy current): write onto the message as it is now.
+      const base = wide.seen(chatId, messageId);
+      let final = content;
+      if (base !== undefined) {
+        wide.drop(chatId);
+        const current = String((await findMessage(chatId, messageId)).content ?? '');
+        const merged = mergeParagraphEdit(base, content, current);
+        if (merged === null) throw Object.assign(new Error('그 사이 메시지 내용이 바뀌어 영어 원문을 고치지 못했습니다.'), { status: 409 });
+        final = merged;
+      }
+      await host.chat.updateMessage(chatId, messageId, { content: final });
+      wide.see(chatId, messageId, final);
     },
     generateRaw,
     /** The original's `POST /api/translate` after it has put the glossary, notes and context in (what Marinara's translate endpoint does with it). */

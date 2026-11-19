@@ -1969,6 +1969,34 @@ class WideReads {
   drop(chatId) {
     this.reads.delete(chatId);
   }
+  served = new Map;
+  see(chatId, id, content) {
+    this.served.set(`${chatId}:${id}`, content);
+    if (this.served.size > 2000)
+      this.served.delete(this.served.keys().next().value);
+  }
+  seen(chatId, id) {
+    return this.served.get(`${chatId}:${id}`);
+  }
+}
+var PARAGRAPHS = /(\n[ \t]*\n)/;
+function mergeParagraphEdit(base, next, current) {
+  if (current === base)
+    return next;
+  const b = base.split(PARAGRAPHS), n = next.split(PARAGRAPHS), c = current.split(PARAGRAPHS);
+  if (b.length !== n.length || b.length !== c.length)
+    return null;
+  const out = [...c];
+  for (let i = 0;i < b.length; i++) {
+    if (n[i] === b[i])
+      continue;
+    if (c[i] === n[i])
+      continue;
+    if (c[i] !== b[i])
+      return null;
+    out[i] = n[i];
+  }
+  return out.join("");
 }
 var ms = (n) => {
   const v = Number(n);
@@ -2183,6 +2211,8 @@ function createEmuBridge(d) {
       const rows = await tail(chatId, want);
       await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
       const kept = await d.keptTags?.();
+      for (const m of rows)
+        wide.see(chatId, m.id, String(m.content ?? ""));
       return rows.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     async messagesFor(chatId, ids) {
@@ -2202,11 +2232,14 @@ function createEmuBridge(d) {
       }
       await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
       const [sp, kept] = [await speakers(chatId), await d.keptTags?.()];
+      for (const m of found)
+        wide.see(chatId, m.id, String(m.content ?? ""));
       return found.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     async getMessage(chatId, messageId) {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
+      wide.see(chatId, row.id, String(row.content ?? ""));
       return messageRow(chatId, row, speakerOf(row, await speakers(chatId)), await d.keptTags?.());
     },
     async patchExtra(chatId, messageId, patch, swipeIndex) {
@@ -2217,7 +2250,18 @@ function createEmuBridge(d) {
       await writeTt(chatId, m, swipe, patch[PT_KEY]);
     },
     async updateContent(chatId, messageId, content) {
-      await host.chat.updateMessage(chatId, messageId, { content });
+      const base = wide.seen(chatId, messageId);
+      let final = content;
+      if (base !== undefined) {
+        wide.drop(chatId);
+        const current = String((await findMessage(chatId, messageId)).content ?? "");
+        const merged = mergeParagraphEdit(base, content, current);
+        if (merged === null)
+          throw Object.assign(new Error("\uADF8 \uC0AC\uC774 \uBA54\uC2DC\uC9C0 \uB0B4\uC6A9\uC774 \uBC14\uB00C\uC5B4 \uC601\uC5B4 \uC6D0\uBB38\uC744 \uACE0\uCE58\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."), { status: 409 });
+        final = merged;
+      }
+      await host.chat.updateMessage(chatId, messageId, { content: final });
+      wide.see(chatId, messageId, final);
     },
     generateRaw,
     async translate(req, requestId) {
@@ -2462,6 +2506,8 @@ async function forwardMessage(uid, chatId, raw) {
   if (!raw?.id)
     return;
   wideReads.update(chatId, eventMsg(raw));
+  if (typeof raw.content === "string")
+    wideReads.see(chatId, raw.id, raw.content);
   let character = null;
   try {
     character = await resolveSpeakers(spindle, uid, chatId);
