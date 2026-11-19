@@ -960,6 +960,113 @@ await page2.evaluate(() => { for (const id of ['m16', 'm17', 'm18', 'm19']) { do
   check('0.5.6 on screen at the end of the generation: all 4 cells translated, none missing, no second pass', view.missing === 0 && view.translated === 4, JSON.stringify(view));
   await page2.evaluate((id) => { document.querySelector(`[data-message-id="${id}"]`)?.remove(); const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); }, id);
 }
+// ---- 0.5.7 (A): the off-screen "heal" has a switch (our setting 화면에 나타날 때 빠진 칸 자동 보충 번역, default on) ----
+// ---- 0.5.7 (B): Lumiverse's reasoning Auto-parse: the body the original reads is think-stripped and trimmed, the reasoning sits in a box outside the body ----
+const setHeal = async (on) => {
+  await page2.evaluate((on) => {
+    window.__cleanup();
+    const base = window.__lvStore;
+    window.__lvStore = LVInt.normalizeStore({ ...base, chats: {}, defaults: { ...base.defaults, healOffscreen: on } }); // chats: {} - a chat's own saved setting would win over the default
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  }, on);
+  await page2.waitForTimeout(600);
+};
+const segCalls = (n) => page2.evaluate((k) => window.__quiet.slice(k).map((c) => c.messages.find((m) => m.role === 'user').content).filter((u) => /<segment id=/.test(u)), n);
+const bodyUnits = (id) => page2.evaluate((id) => { const v = document.querySelector(`[data-message-id="${id}"] .ptx-view`); return v ? { missing: v.querySelectorAll('.ptx-u.is-missing').length, translated: v.querySelectorAll('.ptx-u[data-k]').length } : null; }, id);
+/** Message on screen the way Lumiverse draws it with Auto-parse ON: the reasoning box is a sibling OUTSIDE the body; the body holds the think-stripped, trimmed text. */
+const autoParseRow = (id, think, paras) => page2.evaluate(([id, think, paras]) => {
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', id);
+  row.innerHTML = '<div><div class="reasoning-box"></div><div data-component="MessageContent"><div class="b"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  row.querySelector('.reasoning-box').textContent = think;
+  for (const t of paras) { const p = document.createElement('p'); p.textContent = t; row.querySelector('.b').append(p); }
+  document.querySelector('#chat').append(row);
+}, [id, think, paras]);
+const dropMsg = (id) => page2.evaluate((id) => { document.querySelector(`[data-message-id="${id}"]`)?.remove(); const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); }, id);
+const addMsg = (id, content) => page2.evaluate(([id, content]) => { window.__cleanup(); window.__auto = true; window.__messages.push({ id, role: 'assistant', content, swipes: [content], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] }); window.__cleanup = window.__LVSetup(window.__ctx); }, [id, content]);
+const endGen = async (id, content) => {
+  await page2.evaluate(([id]) => window.__emit('GENERATION_STARTED', { generationId: 'g-' + id, chatId: 'c1', generationType: 'normal' }), [id]);
+  await page2.waitForTimeout(300);
+  await page2.evaluate(([id, content]) => window.__emit('GENERATION_ENDED', { generationId: 'g-' + id, chatId: 'c1', messageId: id, content, generationType: 'normal' }), [id, content]);
+  await page2.waitForFunction((id) => Object.keys(window.__messages.find((x) => x.id === id)?.metadata?.st_translator_tt?.['0']?.map ?? {}).length >= 1, id, { timeout: 8000 }).catch(() => {});
+};
+const THINK = 'secret plan: she will lie about the key';
+// (A) off-screen translation, then the message appears with a cell the off-screen split could not key (a header touching the text)
+for (const heal of [false, true]) {
+  const id = heal ? 'm22' : 'm21';
+  await setHeal(heal);
+  const f = OFFSCREEN[0];
+  const content = `${f.above}\n${f.src}\n${f.below}`;
+  await addMsg(id, content);
+  await page2.waitForTimeout(400);
+  await endGen(id, content); // not on screen
+  const n0 = await page2.evaluate(() => window.__quiet.length);
+  await page2.evaluate(([f, id]) => {
+    const row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', id);
+    row.innerHTML = '<div><div data-component="MessageContent"><div class="b"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    const mk = (text) => { const p = document.createElement('p'); p.textContent = text; return p; };
+    const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = f.island;
+    row.querySelector('.b').append(mk(f.above), d, mk(f.below));
+    document.querySelector('#chat').append(row);
+  }, [f, id]);
+  await page2.waitForSelector(`[data-message-id="${id}"] .ptx-view`, { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(3000);
+  const calls = await segCalls(n0);
+  const left = await page2.evaluate((id) => { const v = document.querySelector(`[data-message-id="${id}"] .ptx-view`); const sh = [...(v?.querySelectorAll('[data-lumiverse-html-island]') ?? [])].map((e) => e.shadowRoot).filter(Boolean); return [v, ...sh].filter(Boolean).reduce((n, r) => n + r.querySelectorAll('.ptx-u.is-missing').length, 0); }, id);
+  if (heal) check('0.5.7 (A) heal ON (default): the message that reached the screen with missing cells is continued once (1 more call), nothing missing', calls.length === 1 && left === 0, JSON.stringify({ calls: calls.length, left }));
+  else check('0.5.7 (A) heal OFF: no extra model call when the message reaches the screen; the missing cells stay for the 이어서 번역 button', calls.length === 0 && left > 0, JSON.stringify({ calls: calls.length, left }));
+  await dropMsg(id);
+}
+await setHeal(true);
+check('0.5.7 (A): the switch is in our section of the settings form, on by default', await page2.evaluate(() => { const sw = document.querySelector('#tab [name="lv:healOffscreen"]'); return !!sw && !!sw.closest('[data-lv-section]') && sw.checked === true && /빠진 칸 자동 보충 번역 \(모델 호출 1회 추가\)/.test(sw.closest('[data-lv-switch]').textContent); }));
+await page2.locator('#tab [name="lv:healOffscreen"]').evaluate((e) => e.click());
+await page2.locator('#tab .tpg-save').click();
+await page2.waitForTimeout(800);
+check('0.5.7 (A): turning it off and saving with the one save button writes healOffscreen=false', (await page2.evaluate(() => window.__lvSaves?.at(-1)?.settings?.healOffscreen)) === false);
+await setHeal(true);
+// (B) Auto-parse ON, the reply is on screen when the generation ends: reasoning box outside the body, body = think-stripped + trimmed
+{
+  const id = 'm23';
+  const content = `<think>\n${THINK}\n</think>\n\nHead up and look at the sky.\n\nThe stars were out.\n`;
+  await addMsg(id, content);
+  await autoParseRow(id, THINK, ['Head up and look at the sky.', 'The stars were out.']);
+  await page2.waitForTimeout(800);
+  const n0 = await page2.evaluate(() => window.__quiet.length);
+  await endGen(id, content);
+  await page2.waitForSelector(`[data-message-id="${id}"] .ptx-view`, { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(2500);
+  const calls = await segCalls(n0);
+  const u = await bodyUnits(id);
+  const stored = await page2.evaluate((id) => window.__messages.find((x) => x.id === id).content, id);
+  check('0.5.7 (B) Auto-parse: on-screen reply is translated from the body cells in one request; the think text is not sent', calls.length === 1 && !calls.join('').includes('secret plan') && (calls[0].match(/<segment id=/g) ?? []).length === 2, JSON.stringify(calls).slice(0, 300));
+  check('0.5.7 (B) Auto-parse: the reading view shows both body cells translated (keys come from the cells), none missing, reasoning box untouched', !!u && u.translated === 2 && u.missing === 0 && (await page2.evaluate((id) => document.querySelector(`[data-message-id="${id}"] .reasoning-box`)?.textContent, id)) === THINK, JSON.stringify(u));
+  check('0.5.7 (B) Auto-parse: the stored message text (think included) is not touched by showing/translating', stored === content);
+  await dropMsg(id);
+}
+// (B2) Auto-parse ON and the reply was translated off screen (think text is part of the source the original splits there)
+for (const heal of [true, false]) {
+  const id = heal ? 'm25' : 'm24';
+  await setHeal(heal);
+  const content = `<think>${THINK}</think>\nHead up and look at the sky.\n\nThe stars were out.`;
+  await addMsg(id, content);
+  await page2.waitForTimeout(400);
+  await endGen(id, content);
+  const sentOff = await page2.evaluate(() => window.__quiet.filter((c) => c.messages.some((m) => /<segment id=/.test(m.content))).slice(-1)[0]?.messages.find((m) => m.role === 'user').content ?? '');
+  const n0 = await page2.evaluate(() => window.__quiet.length);
+  await autoParseRow(id, THINK, ['Head up and look at the sky.', 'The stars were out.']);
+  await page2.waitForSelector(`[data-message-id="${id}"] .ptx-view`, { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(3000);
+  const calls = await segCalls(n0);
+  const u = await bodyUnits(id);
+  const stored = await page2.evaluate((id) => window.__messages.find((x) => x.id === id).content, id);
+  if (heal) check('0.5.7 (B2) off-screen + Auto-parse, heal ON: the body is fully translated after one heal call, and the think text is not sent again', !!u && u.missing === 0 && calls.length === 1 && !calls.join('').includes('secret plan'), JSON.stringify({ u, calls: calls.length }));
+  else check('0.5.7 (B2) off-screen + Auto-parse, heal OFF: no heal call (the cell that merged with the think tail stays missing; documented limit)', !!u && calls.length === 0, JSON.stringify({ u, calls: calls.length }));
+  check(`0.5.7 (B2) heal ${heal ? 'ON' : 'OFF'}: the stored text (think included) is unchanged`, stored === content);
+  console.log(`INFO heal=${heal}: the off-screen request included the think text: ${sentOff.includes('secret plan')}`);
+  await dropMsg(id);
+}
+await setHeal(true);
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

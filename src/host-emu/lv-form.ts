@@ -26,6 +26,8 @@ export interface LvValues {
   autoTranslate: boolean;
   translateMyMessages: boolean;
   showDraftButton: boolean;
+  /** Continue once a message translated off screen when it reaches the screen with untranslated cells (one more model call). */
+  healOffscreen: boolean;
   protectHtml: boolean;
   protectCode: boolean;
   excludeRules: string;
@@ -97,6 +99,7 @@ function build(cls: Classes, hasChat: boolean): string {
         ${switchRow(cls, 'autoTranslate', 'AI 응답 자동 번역')}
         ${switchRow(cls, 'translateMyMessages', '내 메시지를 보내기 전에 번역', '채팅에는 번역문이 남습니다.')}
         ${switchRow(cls, 'showDraftButton', '입력창 옆에 번역 버튼 표시')}
+        ${switchRow(cls, 'healOffscreen', '화면에 나타날 때 빠진 칸 자동 보충 번역 (모델 호출 1회 추가)', '화면 밖에서 번역된 메시지가 화면에 나타났을 때 번역이 빠진 칸이 있으면 한 번 자동으로 이어서 번역합니다. 끄면 빠진 칸은 「이어서 번역」 버튼으로 채웁니다.')}
       </section>
       <section class="tpg-group" data-lv-section="exclude">
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
@@ -181,7 +184,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
     q<HTMLInputElement>(form, 'myLanguage').value = s.values.myLanguage;
     q<HTMLInputElement>(form, 'batchChars').value = s.values.batchChars > 0 ? String(s.values.batchChars) : '';
     q<HTMLTextAreaElement>(form, 'excludeRules').value = s.values.excludeRules;
-    for (const k of ['autoTranslate', 'translateMyMessages', 'showDraftButton', 'protectHtml', 'protectCode'] as const) q<HTMLInputElement>(form, k).checked = s.values[k];
+    for (const k of ['autoTranslate', 'translateMyMessages', 'showDraftButton', 'healOffscreen', 'protectHtml', 'protectCode'] as const) q<HTMLInputElement>(form, k).checked = s.values[k];
     const asDefault = form.querySelector<HTMLInputElement>('[name="lv:asDefault"]');
     if (asDefault) asDefault.checked = false;
     // The original paints its switch rows on every form `change`.
@@ -230,6 +233,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
       autoTranslate: checked('autoTranslate'),
       translateMyMessages: checked('translateMyMessages'),
       showDraftButton: checked('showDraftButton'),
+      healOffscreen: checked('healOffscreen'),
       protectHtml: checked('protectHtml'),
       protectCode: checked('protectCode'),
       excludeRules: q<HTMLTextAreaElement>(form, 'excludeRules').value,

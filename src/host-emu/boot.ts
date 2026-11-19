@@ -16,6 +16,8 @@ export interface StartOptions {
   cache?: MessageCache;
   /** How long a storage call may stay unanswered before the original gets an error (default 20 s; see guard.ts). */
   storageTimeoutMs?: number;
+  /** Whether a message translated off screen is continued once when it reaches the screen with untranslated cells (our setting 화면에 나타날 때 빠진 칸 자동 보충 번역; default on). */
+  healOffscreen?: () => boolean;
   /** Test hook: the original's text (defaults to the embedded pinned copy). */
   source?: string;
 }
@@ -23,6 +25,7 @@ export interface StartOptions {
 export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandle } {
   const removeStyle = opts.addStyle(SHIM_CSS);
   const dom = startDomBridge(document, {
+    healEnabled: opts.healOffscreen,
     hasUnusedKeys: (id, used) => {
       const chat = opts.activeChatId();
       const map = chat ? ((opts.cache?.row(chat, id)?.extra as { paraTranslate?: { map?: Record<string, unknown> } } | undefined)?.paraTranslate?.map ?? null) : null;

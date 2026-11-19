@@ -1303,6 +1303,7 @@ var DEFAULT_SETTINGS = {
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
   batchChars: 0,
+  healOffscreen: true,
   protectHtml: true,
   protectCode: true,
   excludeRules: "",
@@ -8793,6 +8794,8 @@ function startDomBridge(root = document, options = {}) {
   function autoContinue(view) {
     const message = view.closest("[data-message-id]");
     const id = message?.getAttribute("data-message-id");
+    if (options.healEnabled && !options.healEnabled())
+      return;
     if (!message || !id || autoTimers.has(id) || view.querySelector(".ptx-pill"))
       return;
     const signature = missingCells(view).join("\x01");
@@ -8805,6 +8808,8 @@ function startDomBridge(root = document, options = {}) {
     autoTimers.set(id, setTimeout(() => {
       autoTimers.delete(id);
       if (destroyed || !view.isConnected || view.querySelector(".ptx-pill"))
+        return;
+      if (options.healEnabled && !options.healEnabled())
         return;
       const now = missingCells(view).join("\x01");
       if (!now || now !== signature)
@@ -9412,6 +9417,7 @@ ${HIDDEN}`;
 function startOriginal(opts) {
   const removeStyle = opts.addStyle(SHIM_CSS);
   const dom = startDomBridge(document, {
+    healEnabled: opts.healOffscreen,
     hasUnusedKeys: (id, used) => {
       const chat = opts.activeChatId();
       const map = chat ? opts.cache?.row(chat, id)?.extra?.paraTranslate?.map ?? null : null;
@@ -9837,6 +9843,7 @@ function build(cls, hasChat) {
         ${switchRow(cls, "autoTranslate", "AI 응답 자동 번역")}
         ${switchRow(cls, "translateMyMessages", "내 메시지를 보내기 전에 번역", "채팅에는 번역문이 남습니다.")}
         ${switchRow(cls, "showDraftButton", "입력창 옆에 번역 버튼 표시")}
+        ${switchRow(cls, "healOffscreen", "화면에 나타날 때 빠진 칸 자동 보충 번역 (모델 호출 1회 추가)", "화면 밖에서 번역된 메시지가 화면에 나타났을 때 번역이 빠진 칸이 있으면 한 번 자동으로 이어서 번역합니다. 끄면 빠진 칸은 「이어서 번역」 버튼으로 채웁니다.")}
       </section>
       <section class="tpg-group" data-lv-section="exclude">
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
@@ -9915,7 +9922,7 @@ function mountLvForm(root, host) {
     q(form, "myLanguage").value = s.values.myLanguage;
     q(form, "batchChars").value = s.values.batchChars > 0 ? String(s.values.batchChars) : "";
     q(form, "excludeRules").value = s.values.excludeRules;
-    for (const k of ["autoTranslate", "translateMyMessages", "showDraftButton", "protectHtml", "protectCode"])
+    for (const k of ["autoTranslate", "translateMyMessages", "showDraftButton", "healOffscreen", "protectHtml", "protectCode"])
       q(form, k).checked = s.values[k];
     const asDefault = form.querySelector('[name="lv:asDefault"]');
     if (asDefault)
@@ -9962,6 +9969,7 @@ function mountLvForm(root, host) {
       autoTranslate: checked("autoTranslate"),
       translateMyMessages: checked("translateMyMessages"),
       showDraftButton: checked("showDraftButton"),
+      healOffscreen: checked("healOffscreen"),
       protectHtml: checked("protectHtml"),
       protectCode: checked("protectCode"),
       excludeRules: q(form, "excludeRules").value,
@@ -10238,7 +10246,8 @@ function setup(ctx) {
     cache,
     storage: emuStorage,
     activeChatId: () => chatId,
-    addStyle: (css) => ctx.dom.addStyle(css)
+    addStyle: (css) => ctx.dom.addStyle(css),
+    healOffscreen: () => store ? current().healOffscreen : true
   });
   const visible = watchVisibleMessages({
     chat: () => chatId,
@@ -10449,7 +10458,7 @@ ${bundle.freeContext.trim()}` : "",
   }
   function lvState() {
     if (!store) {
-      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "" }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
+      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "" }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
     }
     const s = current();
     let bundleId = s.bundleId;
@@ -10466,7 +10475,7 @@ ${bundle.freeContext.trim()}` : "",
       ready: true,
       chatKey: chatId ?? "",
       hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId },
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId },
       connections: options,
       connectionNote: note,
       linkNote: link === "none" ? "" : link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.",
@@ -10503,6 +10512,7 @@ ${bundle.freeContext.trim()}` : "",
         autoTranslate: v.autoTranslate,
         translateMyMessages: v.translateMyMessages,
         showDraftButton: v.showDraftButton,
+        healOffscreen: v.healOffscreen,
         protectHtml: v.protectHtml,
         protectCode: v.protectCode,
         excludeRules: v.excludeRules,
