@@ -265,6 +265,8 @@ export interface DomBridge {
 }
 
 export interface DomBridgeOptions {
+  /** The heal is on (default) unless this answers false; asked each time, so the setting takes effect without a reload. */
+  healEnabled?: () => boolean;
   /**
    * Whether the stored translation of a message holds keys that none of the cells now on screen uses (a translation made from the message
    * source while it was off screen). Only then is a message with untranslated cells continued by itself; without this, never.
@@ -284,6 +286,7 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
   function autoContinue(view: HTMLElement): void {
     const message = view.closest('[data-message-id]');
     const id = message?.getAttribute('data-message-id');
+    if (options.healEnabled && !options.healEnabled()) return;
     if (!message || !id || autoTimers.has(id) || view.querySelector('.ptx-pill')) return;
     const signature = missingCells(view).join('\u0001');
     if (!signature || autoTried.get(id) === signature) return;
@@ -293,6 +296,7 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
     autoTimers.set(id, setTimeout(() => {
       autoTimers.delete(id);
       if (destroyed || !view.isConnected || view.querySelector('.ptx-pill')) return;
+      if (options.healEnabled && !options.healEnabled()) return;
       const now = missingCells(view).join('\u0001');
       if (!now || now !== signature) return;
       autoTried.set(id, signature);

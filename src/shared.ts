@@ -55,6 +55,11 @@ export interface ChatSettings {
   longSplitChars: number;
   /** Max characters of paragraphs in ONE request of the original's paragraph translation (0 = the original's own 6000 as it is). */
   batchChars: number;
+  /**
+   * 0.5.7: when a message that was translated off screen later reaches the screen with cells left without a translation, press the original's
+   * translate button once for it (0.5.6 `autoContinue` in dom-bridge.ts). It costs one more model call. Default on.
+   */
+  healOffscreen: boolean;
   /** Keep HTML tags, attributes, <style>/<script> and comments; translate only the text between tags. */
   protectHtml: boolean;
   /** Keep fenced code blocks untranslated. */
@@ -165,6 +170,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
   batchChars: 0,
+  healOffscreen: true,
   protectHtml: true,
   protectCode: true,
   excludeRules: '',
@@ -212,6 +218,7 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
       ? (batch > 0 ? batch : 0)
       : Object.hasOwn(s, 'batchChars') ? base.batchChars
       : Number.isFinite(split) && split > 0 && split !== LONG_SPLIT_DEFAULT ? split : base.batchChars,
+    healOffscreen: bool(s.healOffscreen, base.healOffscreen),
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),

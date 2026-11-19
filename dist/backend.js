@@ -1552,6 +1552,7 @@ var DEFAULT_SETTINGS = {
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
   batchChars: 0,
+  healOffscreen: true,
   protectHtml: true,
   protectCode: true,
   excludeRules: "",
@@ -1592,6 +1593,7 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200000, split)) : base.longSplitChars,
     batchChars: Number.isFinite(batch) ? batch > 0 ? batch : 0 : Object.hasOwn(s, "batchChars") ? base.batchChars : Number.isFinite(split) && split > 0 && split !== LONG_SPLIT_DEFAULT ? split : base.batchChars,
+    healOffscreen: bool(s.healOffscreen, base.healOffscreen),
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
@@ -2465,7 +2467,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.6";
+var SELF_VERSION = "0.5.7";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
