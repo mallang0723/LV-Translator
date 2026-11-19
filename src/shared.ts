@@ -53,6 +53,8 @@ export interface ChatSettings {
   autoContinue: boolean;
   /** Sources at least this long are translated paragraph group by group. 0 = never split. */
   longSplitChars: number;
+  /** Max characters of paragraphs in ONE request of the original's paragraph translation (0 = the original's own 6000 as it is). */
+  batchChars: number;
   /** Keep HTML tags, attributes, <style>/<script> and comments; translate only the text between tags. */
   protectHtml: boolean;
   /** Keep fenced code blocks untranslated. */
@@ -162,6 +164,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   translationUnit: 'whole',
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
+  batchChars: 0,
   protectHtml: true,
   protectCode: true,
   excludeRules: '',
@@ -186,6 +189,7 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
   const s = (value && typeof value === 'object' && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
   const count = Number.parseInt(String(s.contextMessageCount ?? ''), 10);
   const split = Number.parseInt(String(s.longSplitChars ?? ''), 10);
+  const batch = Number.parseInt(String(s.batchChars ?? ''), 10);
   const mode = s.displayMode;
   return {
     connectionId: str(s.connectionId, base.connectionId).trim(),
@@ -202,6 +206,7 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
     translationUnit: s.translationUnit === 'paragraph' ? 'paragraph' : s.translationUnit === 'whole' ? 'whole' : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200_000, split)) : base.longSplitChars,
+    batchChars: Number.isFinite(batch) ? (batch > 0 ? batch : 0) : base.batchChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),

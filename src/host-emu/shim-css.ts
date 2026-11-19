@@ -11,7 +11,7 @@ ${SCOPE} {
   --foreground: var(--lumiverse-text, inherit);
   --background: var(--lumiverse-bg, Canvas);
   --primary: var(--lumiverse-primary, #7c6cf0);
-  --primary-foreground: var(--lumiverse-primary-text, #fff);
+  --primary-foreground: var(--lumiverse-primary-contrast, var(--lvtr-on-primary, #fff));
   --secondary: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 10%, transparent));
   --accent: var(--lumiverse-fill-hover, color-mix(in srgb, currentColor 16%, transparent));
   --muted-foreground: var(--lumiverse-text-muted, color-mix(in srgb, currentColor 65%, transparent));
@@ -71,7 +71,7 @@ function utilities(): string {
     scoped('.hover\\:text-\\[var\\(--destructive\\)\\]:hover') + '{color:var(--destructive)}',
     scoped('.focus\\:ring-\\[var\\(--primary\\)\\]\\/40:focus') + '{box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 40%,transparent)}',
     scoped('.peer:focus-visible~.peer-focus-visible\\:ring-2') + '{box-shadow:0 0 0 2px var(--ring)}',
-    scoped('.mari-chrome-field') + '{background:var(--secondary);border:1px solid var(--border);color:var(--foreground);outline:none}',
+    scoped('.mari-chrome-field') + '{background:var(--secondary);border:1px solid var(--border);color:var(--foreground);outline:none;box-sizing:border-box}',
     scoped('.mari-accent-animated') + '{}',
     scoped('select, input[type=text], input[type=number], textarea') + '{font:inherit;color:var(--foreground);box-sizing:border-box}',
     scoped('button') + '{font:inherit}',
@@ -85,6 +85,13 @@ function utilities(): string {
  *   - "후처리 후 번역" (N2): Marinara's post-processing step (`postProcessingPending`) does not exist in Lumiverse.
  */
 const HIDDEN = `
-.tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }`;
+/* The original hides the message content it has translated with display:none. Lumiverse measures that content to decide whether the long-message
+   "더보기" button exists, and a display:none content measures 0: the button is removed and the translation (a clone) stays folded with no way to open
+   it. So the hidden content keeps its layout (same width) and only has no height and no paint. */
+.mari-message-content[data-ptx-hidden] { display: block !important; height: 0 !important; min-height: 0 !important; overflow: hidden !important; visibility: hidden !important; margin: 0 !important; padding: 0 !important; border: 0 !important; }
+.tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }
+/* The original colours a few TEXTS with the primary colour itself (the save status line "저장했습니다."). On the page background that must be the host's
+   "primary as text" tint, not the button fill, or a light primary on a light page cannot be read. */
+.tpg-form [data-tpg-status][data-kind="success"] { color: var(--lumiverse-primary-text, var(--primary)) !important; }`;
 
 export const SHIM_CSS = `${VARS}\n${utilities()}\n${HIDDEN}`;

@@ -14,6 +14,8 @@ export interface StartOptions {
   addStyle: (css: string) => () => void;
   /** The message cache the original finds as the app's (see message-cache.ts). */
   cache?: MessageCache;
+  /** How long a storage call may stay unanswered before the original gets an error (default 20 s; see guard.ts). */
+  storageTimeoutMs?: number;
   /** Test hook: the original's text (defaults to the embedded pinned copy). */
   source?: string;
 }
@@ -23,7 +25,7 @@ export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandl
   const dom = startDomBridge();
   // Before the original starts: it looks for the cache while it starts.
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
-  const emu = runOriginal({ source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId });
+  const emu = runOriginal({ source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
     emu,
     stop() {

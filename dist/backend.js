@@ -1551,6 +1551,7 @@ var DEFAULT_SETTINGS = {
   translationUnit: "whole",
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
+  batchChars: 0,
   protectHtml: true,
   protectCode: true,
   excludeRules: "",
@@ -1573,6 +1574,7 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
   const s = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const count = Number.parseInt(String(s.contextMessageCount ?? ""), 10);
   const split = Number.parseInt(String(s.longSplitChars ?? ""), 10);
+  const batch = Number.parseInt(String(s.batchChars ?? ""), 10);
   const mode = s.displayMode;
   return {
     connectionId: str(s.connectionId, base.connectionId).trim(),
@@ -1589,6 +1591,7 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
     translationUnit: s.translationUnit === "paragraph" ? "paragraph" : s.translationUnit === "whole" ? "whole" : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200000, split)) : base.longSplitChars,
+    batchChars: Number.isFinite(batch) ? batch > 0 ? batch : 0 : base.batchChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
@@ -2385,7 +2388,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.2";
+var SELF_VERSION = "0.5.3";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -2547,6 +2550,24 @@ async function emu(uid, msg) {
           leasedGenerations.delete(leasedGenerations.values().next().value);
       }
       reply({ ok: true, data: granted });
+      return;
+    }
+    if (msg.op === "lv.save") {
+      const arg = msg.args[0] ?? {};
+      const chatId = typeof arg.chatId === "string" && arg.chatId ? arg.chatId : null;
+      const store = await loadStore(uid);
+      const settings = normalizeSettings(arg.settings, store.defaults, store.userBundles);
+      const id = typeof arg.connectionId === "string" ? arg.connectionId.trim() : settings.connectionId;
+      settings.connectionId = id;
+      if (chatId)
+        store.chats[chatId] = settings;
+      if (arg.asDefault || !chatId)
+        store.defaults = settings;
+      else
+        store.defaults = { ...store.defaults, connectionId: id };
+      await saveStore(uid, store);
+      reply({ ok: true, data: true });
+      await sendState(uid);
       return;
     }
     if (msg.op === "storage.get") {

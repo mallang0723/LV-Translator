@@ -1302,6 +1302,7 @@ var DEFAULT_SETTINGS = {
   translationUnit: "whole",
   autoContinue: true,
   longSplitChars: LONG_SPLIT_DEFAULT,
+  batchChars: 0,
   protectHtml: true,
   protectCode: true,
   excludeRules: "",
@@ -8590,6 +8591,74 @@ function findActionRow(messageEl) {
   return null;
 }
 var TRANSLATE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-languages" aria-hidden="true">' + '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
+function forwardLongMessageToggle(e) {
+  const target = e.target;
+  const copy = target?.closest?.("[data-long-message-toggle]");
+  const view = copy?.closest(".ptx-view");
+  if (!copy || !view)
+    return;
+  const host = view._ptxFor ?? view.previousElementSibling;
+  const real = host?.querySelector("[data-long-message-toggle]");
+  e.preventDefault();
+  e.stopPropagation();
+  if (real && real !== copy)
+    real.click();
+}
+function restoreIslands(view) {
+  const host = view._ptxFor;
+  if (!host?.isConnected)
+    return;
+  const from = host.querySelectorAll("[data-lumiverse-html-island]");
+  const to = view.querySelectorAll("[data-lumiverse-html-island]");
+  if (!to.length || from.length !== to.length)
+    return;
+  to.forEach((target, i) => {
+    const source = from[i].shadowRoot;
+    if (!source || target.shadowRoot)
+      return;
+    const shadow = target.attachShadow({ mode: "open" });
+    for (const node of Array.from(source.childNodes))
+      shadow.append(node.cloneNode(true));
+  });
+}
+var PLAY_ICON = '<polygon points="6 3 20 12 6 21 6 3"/>';
+function syncContinueButton(view) {
+  const bar = view.querySelector(".ptx-bar");
+  if (!bar)
+    return;
+  const want = !!view.querySelector(".ptx-u.is-missing") && !!view.querySelector(".ptx-u[data-k]");
+  const have = bar.querySelector('[data-lv-act="continue"]');
+  if (!want) {
+    have?.remove();
+    return;
+  }
+  if (have)
+    return;
+  const base = bar.querySelector('[data-ptx-act="retranslate"]') ?? bar.querySelector("button");
+  if (!base)
+    return;
+  const button = base.cloneNode(true);
+  button.removeAttribute("data-ptx-act");
+  button.setAttribute("data-lv-act", "continue");
+  button.setAttribute("title", "번역이 없는 문단만 이어서 번역");
+  const svg = button.querySelector("svg");
+  if (svg)
+    svg.innerHTML = PLAY_ICON;
+  const label = button.querySelector("span");
+  if (label)
+    label.textContent = "이어서 번역";
+  bar.prepend(button);
+}
+function onContinueClick(e) {
+  const button = e.target?.closest?.('[data-lv-act="continue"]');
+  if (!button)
+    return;
+  e.preventDefault();
+  e.stopPropagation();
+  const message = button.closest("[data-message-id]");
+  const native = message?.querySelector(".mari-message-actions button:has(svg.lucide-languages)");
+  native?.click();
+}
 function startDomBridge(root = document) {
   let timer = null;
   let destroyed = false;
@@ -8625,6 +8694,10 @@ function startDomBridge(root = document) {
       return;
     for (const m of Array.from(root.querySelectorAll("[data-message-id]")))
       tag(m);
+    for (const v of Array.from(root.querySelectorAll(".ptx-view"))) {
+      restoreIslands(v);
+      syncContinueButton(v);
+    }
   }
   const queue = () => {
     if (timer || destroyed)
@@ -8637,10 +8710,16 @@ function startDomBridge(root = document) {
   const observer = new MutationObserver(queue);
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
   scan();
+  document.addEventListener("click", forwardLongMessageToggle, true);
+  document.addEventListener("click", onContinueClick, true);
   return {
     scan,
     destroy() {
       destroyed = true;
+      document.removeEventListener("click", forwardLongMessageToggle, true);
+      document.removeEventListener("click", onContinueClick, true);
+      for (const b of Array.from(document.querySelectorAll('[data-lv-act="continue"]')))
+        b.remove();
       if (timer)
         clearTimeout(timer);
       observer.disconnect();
@@ -8808,6 +8887,138 @@ function createApiFetch(bridge, realFetch) {
   };
 }
 
+// src/host-emu/guard.ts
+var STORAGE_TIMEOUT_MS = 20000;
+
+class StorageTimeout extends Error {
+  constructor(what, ms) {
+    super(`${what}에 ${Math.round(ms / 1000)}초 안에 응답이 없습니다. 다시 시도해 주세요.`);
+    this.name = "StorageTimeout";
+  }
+}
+function within(promise, ms, what) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new StorageTimeout(what, ms)), ms);
+    promise.then((v) => {
+      clearTimeout(timer);
+      resolve(v);
+    }, (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
+}
+var same = (a, b) => {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+};
+function guardStorage(inner, ms = STORAGE_TIMEOUT_MS) {
+  return {
+    get: () => within(inner.get(), ms, "설정 읽기"),
+    async patch(p) {
+      try {
+        return await within(inner.patch(p), ms, "설정 저장");
+      } catch (e) {
+        if (!(e instanceof StorageTimeout))
+          throw e;
+        let stored = null;
+        try {
+          stored = await within(inner.get(), ms, "설정 확인");
+        } catch {
+          throw e;
+        }
+        if (stored && "config" in p && same(stored.config, p.config))
+          return stored;
+        throw e;
+      }
+    }
+  };
+}
+
+// src/host-emu/on-primary.ts
+var VAR = "--lvtr-on-primary";
+function toRgb(css) {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const c = canvas.getContext("2d", { willReadFrequently: true });
+    if (!c)
+      return null;
+    c.clearRect(0, 0, 1, 1);
+    c.fillStyle = "#000";
+    c.fillStyle = css;
+    c.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = c.getImageData(0, 0, 1, 1).data;
+    return { rgb: [r, g, b], a: (a ?? 255) / 255 };
+  } catch {
+    return null;
+  }
+}
+var lin = (v) => {
+  const s = v / 255;
+  return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+};
+var luminance = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+var contrastRatio = (a, b) => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+function pickOnColor(bg) {
+  return contrastRatio(bg, [255, 255, 255]) >= contrastRatio(bg, [17, 17, 20]) ? "#ffffff" : "#111114";
+}
+function resolved(property, fallback) {
+  const probe = document.createElement("span");
+  probe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;background-color:var(${property}, ${fallback})`;
+  document.body.append(probe);
+  const value = getComputedStyle(probe).backgroundColor;
+  probe.remove();
+  return toRgb(value);
+}
+function updateOnPrimary() {
+  const primary = resolved("--lumiverse-primary", "#7c6cf0");
+  if (!primary)
+    return null;
+  let bg = primary.rgb;
+  if (primary.a < 1) {
+    const page = resolved("--lumiverse-bg", "#1b1b22")?.rgb ?? [27, 27, 34];
+    bg = [0, 1, 2].map((i) => Math.round(primary.rgb[i] * primary.a + page[i] * (1 - primary.a)));
+  }
+  const color = pickOnColor(bg);
+  document.documentElement.style.setProperty(VAR, color);
+  return color;
+}
+function watchOnPrimary() {
+  if (typeof document === "undefined" || !document.body)
+    return () => {};
+  let queued = false;
+  const run = () => {
+    queued = false;
+    updateOnPrimary();
+  };
+  const queue = () => {
+    if (queued)
+      return;
+    queued = true;
+    setTimeout(run, 50);
+  };
+  run();
+  const observer = new MutationObserver(queue);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-glass"] });
+  observer.observe(document.body, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+  media?.addEventListener?.("change", queue);
+  const timer = setInterval(run, 5000);
+  return () => {
+    observer.disconnect();
+    media?.removeEventListener?.("change", queue);
+    clearInterval(timer);
+    document.documentElement.style.removeProperty(VAR);
+  };
+}
+
 // src/host-emu/runtime.ts
 var ACTIVE_CHAT_KEY = "marinara-active-chat-id";
 var EXTENSION_ID = "translation-presets-glossary";
@@ -8859,11 +9070,11 @@ function runOriginal(opts) {
   const log = opts.log ?? console;
   const api = createApiFetch(opts.bridge, window.fetch.bind(window));
   const win = shadowWindow(api);
-  const cleanups = [];
+  const cleanups = [watchOnPrimary()];
   const timers = new Set;
   const marinara = {
     extension: { id: EXTENSION_ID },
-    storage: opts.storage,
+    storage: guardStorage(opts.storage, opts.storageTimeoutMs ?? STORAGE_TIMEOUT_MS),
     log: { info: (...a) => log.info(...a), warn: (...a) => log.warn(...a), error: (...a) => log.error(...a) },
     setTimeout: (fn, ms) => {
       const t = setTimeout(fn, ms);
@@ -8909,7 +9120,7 @@ ${SCOPE} {
   --foreground: var(--lumiverse-text, inherit);
   --background: var(--lumiverse-bg, Canvas);
   --primary: var(--lumiverse-primary, #7c6cf0);
-  --primary-foreground: var(--lumiverse-primary-text, #fff);
+  --primary-foreground: var(--lumiverse-primary-contrast, var(--lvtr-on-primary, #fff));
   --secondary: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 10%, transparent));
   --accent: var(--lumiverse-fill-hover, color-mix(in srgb, currentColor 16%, transparent));
   --muted-foreground: var(--lumiverse-text-muted, color-mix(in srgb, currentColor 65%, transparent));
@@ -9011,7 +9222,7 @@ function utilities() {
     scoped(".hover\\:text-\\[var\\(--destructive\\)\\]:hover") + "{color:var(--destructive)}",
     scoped(".focus\\:ring-\\[var\\(--primary\\)\\]\\/40:focus") + "{box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 40%,transparent)}",
     scoped(".peer:focus-visible~.peer-focus-visible\\:ring-2") + "{box-shadow:0 0 0 2px var(--ring)}",
-    scoped(".mari-chrome-field") + "{background:var(--secondary);border:1px solid var(--border);color:var(--foreground);outline:none}",
+    scoped(".mari-chrome-field") + "{background:var(--secondary);border:1px solid var(--border);color:var(--foreground);outline:none;box-sizing:border-box}",
     scoped(".mari-accent-animated") + "{}",
     scoped("select, input[type=text], input[type=number], textarea") + "{font:inherit;color:var(--foreground);box-sizing:border-box}",
     scoped("button") + "{font:inherit}"
@@ -9020,7 +9231,14 @@ function utilities() {
 `);
 }
 var HIDDEN = `
-.tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }`;
+/* The original hides the message content it has translated with display:none. Lumiverse measures that content to decide whether the long-message
+   "더보기" button exists, and a display:none content measures 0: the button is removed and the translation (a clone) stays folded with no way to open
+   it. So the hidden content keeps its layout (same width) and only has no height and no paint. */
+.mari-message-content[data-ptx-hidden] { display: block !important; height: 0 !important; min-height: 0 !important; overflow: hidden !important; visibility: hidden !important; margin: 0 !important; padding: 0 !important; border: 0 !important; }
+.tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }
+/* The original colours a few TEXTS with the primary colour itself (the save status line "저장했습니다."). On the page background that must be the host's
+   "primary as text" tint, not the button fill, or a light primary on a light page cannot be read. */
+.tpg-form [data-tpg-status][data-kind="success"] { color: var(--lumiverse-primary-text, var(--primary)) !important; }`;
 var SHIM_CSS = `${VARS}
 ${utilities()}
 ${HIDDEN}`;
@@ -9030,7 +9248,7 @@ function startOriginal(opts) {
   const removeStyle = opts.addStyle(SHIM_CSS);
   const dom = startDomBridge();
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
-  const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId });
+  const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
     emu,
     stop() {
@@ -9174,6 +9392,371 @@ class GenerationDriver {
   }
 }
 
+// src/host-emu/split.ts
+var SEGMENT = /<segment id="(\d+)">\n([\s\S]*?)\n<\/segment>/g;
+function parseBatch(content) {
+  const open = content.indexOf(`<translate>
+`);
+  const close = content.lastIndexOf(`
+</translate>`);
+  if (open < 0 || close < open)
+    return null;
+  const body = content.slice(open + `<translate>
+`.length, close);
+  const segments = [];
+  let rebuilt = "";
+  for (const m of body.matchAll(SEGMENT)) {
+    segments.push({ id: Number(m[1]), text: m[2] });
+    rebuilt += m[0] + `
+`;
+  }
+  if (segments.length < 1 || rebuilt.slice(0, -1) !== body)
+    return null;
+  return { before: content.slice(0, open), after: content.slice(close + `
+</translate>`.length), segments };
+}
+function groupSegments(segments, limit) {
+  const groups = [];
+  let cur = [];
+  let size = 0;
+  for (const s of segments) {
+    if (cur.length && size + s.text.length > limit) {
+      groups.push(cur);
+      cur = [];
+      size = 0;
+    }
+    cur.push(s);
+    size += s.text.length;
+  }
+  if (cur.length)
+    groups.push(cur);
+  return groups;
+}
+var REPLY = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)<\/segment\s*>/gi;
+function withBatchLimit(generate, limit) {
+  return async (req, signal) => {
+    const max = limit();
+    if (!(max > 0))
+      return generate(req, signal);
+    const userIndex = req.messages.map((m) => m.role).lastIndexOf("user");
+    const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex].content) : null;
+    if (!parsed)
+      return generate(req, signal);
+    const groups = groupSegments(parsed.segments, max);
+    if (groups.length < 2)
+      return generate(req, signal);
+    const parts = [];
+    for (const group of groups) {
+      const body = group.map((s, i) => `<segment id="${i + 1}">
+${s.text}
+</segment>`).join(`
+`);
+      const messages = req.messages.map((m, i) => i === userIndex ? { ...m, content: `${parsed.before}<translate>
+${body}
+</translate>${parsed.after}` } : m);
+      const reply = await generate({ ...req, messages }, signal);
+      if (reply.aborted)
+        return reply;
+      const text = reply.content ?? "";
+      const found = new Map;
+      for (const m of text.matchAll(REPLY))
+        found.set(Number(m[1]), m[2].replace(/^\n+|\n+$/g, ""));
+      if (!found.size && group.length === 1 && text.trim() && !/<segment/i.test(text))
+        found.set(1, text.trim());
+      group.forEach((s, i) => {
+        const got = found.get(i + 1);
+        if (got !== undefined)
+          parts.push(`<segment id="${s.id}">
+${got}
+</segment>`);
+      });
+    }
+    return { content: parts.join(`
+`) };
+  };
+}
+
+// src/host-emu/lv-form.ts
+var FALLBACK = {
+  label: "text-[0.6875rem] font-medium text-[var(--muted-foreground)]",
+  select: "mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40",
+  input: "mari-chrome-field mt-0.5 w-full !rounded-md px-3 py-2 text-xs",
+  textarea: "mt-0.5 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40",
+  help: "text-[0.625rem] leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)]",
+  title: "text-xs font-semibold text-[var(--foreground)]",
+  button: "flex shrink-0 items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+  row: "flex scroll-mt-3 items-center gap-3 p-2 transition-colors justify-between rounded-lg px-3 py-2.5 text-left bg-[var(--secondary)] hover:bg-[var(--accent)]"
+};
+function classesFrom(form) {
+  const pick = (sel, fallback) => form.querySelector(sel)?.getAttribute("class")?.trim() || fallback;
+  return {
+    label: pick(".tpg-group > div > label", FALLBACK.label),
+    select: pick('select[name="outgoingPresetId"]', FALLBACK.select),
+    input: pick('input[name="paraKeepTags"]', FALLBACK.input),
+    textarea: pick('textarea[name="freeContext"]', FALLBACK.textarea),
+    help: pick(".tpg-group > div > p, .tpg-group p", FALLBACK.help),
+    title: pick(".tpg-group > h5", FALLBACK.title),
+    button: pick("[data-tpg-add]", FALLBACK.button),
+    row: FALLBACK.row
+  };
+}
+var esc2 = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+var seq = 0;
+function switchRow(cls, name, title, description = "") {
+  const id = `lv-switch-${++seq}`;
+  return `<div class="${cls.row}" data-tpg-switch data-lv-switch="${name}">
+      <span class="min-w-0 text-[0.6875rem] font-medium"><span class="inline-flex min-w-0 items-center gap-1.5"><label for="${id}" class="min-w-0 cursor-pointer">${esc2(title)}</label></span>${description ? `<label for="${id}" class="mt-0.5 block text-[0.625rem] leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)] cursor-pointer">${esc2(description)}</label>` : ""}</span>
+      <span class="inline-flex shrink-0 items-center gap-1.5"><label for="${id}" class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer"><input id="${id}" type="checkbox" name="lv:${name}" class="peer sr-only"><span aria-hidden="true" data-settings-switch-track="true" class="inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors bg-[var(--border)] peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring)]"><span data-settings-switch-thumb="true" class="pointer-events-none block h-4 w-4 shrink-0 rounded-full bg-[var(--background)] shadow-sm ring-1 ring-[var(--border)] transition-transform"></span></span></label></span>
+    </div>`;
+}
+function build(cls, hasChat) {
+  const field = (label, control) => `<div><label class="${cls.label}">${esc2(label)}</label>${control}</div>`;
+  const input = (name, extra = "") => `<input name="lv:${name}" class="${cls.input}" autocomplete="off" spellcheck="false" ${extra}>`;
+  return `
+      <section class="tpg-group" data-lv-section="basic">
+        <h5 class="${cls.title}">번역 연결·언어</h5>
+        ${field("번역에 쓸 AI 연결", `<select name="lv:connectionId" class="${cls.select}" aria-label="번역에 쓸 AI 연결"></select>`)}
+        <p class="${cls.help}" data-lv-connection-note></p>
+        <p class="${cls.help}" data-lv-link-note hidden></p>
+        ${field("모델 언어 (내 메시지를 이 언어로)", input("modelLanguage"))}
+        ${field("내 언어 (응답을 이 언어로)", input("myLanguage"))}
+        ${field("한 번에 번역할 최대 글자수 (긴 메시지를 나눌 때)", input("batchChars", 'inputmode="numeric" placeholder="비워 두면 원작 기본값(6000자)"'))}
+        <p class="${cls.help}">문단 번역은 문단을 묶어 한 번에 보냅니다. 숫자를 적으면 한 번에 보내는 문단의 글자 합이 그 수를 넘지 않게 나눠 번역합니다(문단 하나가 그보다 길면 그 문단만 따로 보냅니다). 비워 두면 원작이 하던 대로 합니다.</p>
+        ${switchRow(cls, "autoTranslate", "AI 응답 자동 번역")}
+        ${switchRow(cls, "translateMyMessages", "내 메시지를 보내기 전에 번역", "채팅에는 번역문이 남습니다.")}
+        ${switchRow(cls, "showDraftButton", "입력창 옆에 번역 버튼 표시")}
+      </section>
+      <section class="tpg-group" data-lv-section="exclude">
+        <h5 class="${cls.title}">번역하지 않을 부분</h5>
+        ${switchRow(cls, "protectHtml", "HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역")}
+        ${switchRow(cls, "protectCode", "코드 블록(```) 은 번역하지 않음")}
+        ${field("제외할 HTML 태그 (쉼표·공백으로 구분)", input("excludeTags", 'placeholder="choices, status, ui"'))}
+        <div class="tpg-inline-actions"><button type="button" class="${cls.button}" data-lv-suggest>추천 태그 넣기</button></div>
+        <p class="${cls.help}">이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. &lt;style&gt;·&lt;script&gt; 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다.</p>
+        ${field("제외 규칙 (한 줄에 하나)", `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;
+/HP: \\d+\\/\\d+/
+[상태창] ... [/상태창]"></textarea>`)}
+        <p class="${cls.help}">&lt;태그&gt; 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.</p>
+      </section>
+      <section class="tpg-group" data-lv-section="bundle">
+        <h5 class="${cls.title}">번역 지침 묶음</h5>
+        ${field("이 방의 묶음", `<select name="lv:bundleId" class="${cls.select}" aria-label="이 방의 묶음"></select>`)}
+        <div class="tpg-inline-actions">
+          <button type="button" class="${cls.button}" data-lv-bundle-new>새 묶음 만들기</button>
+          <button type="button" class="${cls.button}" data-lv-bundle-edit>묶음 편집</button>
+          <button type="button" class="${cls.button}" data-lv-bundle-delete>삭제</button>
+        </div>
+        <p class="${cls.help}">묶음의 단어집·추가 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침·말투는 위의 원작 설정에서 합니다). 선택은 아래 저장 버튼으로 적용합니다.</p>
+        <details data-lv-bundle-preview hidden><summary class="${cls.help}"></summary>
+          <label class="${cls.label}">단어집</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="glossary" placeholder="내용 없음"></textarea>
+          <label class="${cls.label}">추가 지침</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="freeContext" placeholder="내용 없음"></textarea>
+        </details>
+        ${hasChat ? switchRow(cls, "asDefault", "새 채팅의 기본값으로도 저장", "위 설정을 앞으로 만드는 채팅의 기본값으로도 저장합니다.") : ""}
+      </section>`;
+}
+var q = (form, name) => form.querySelector(`[name="lv:${name}"]`);
+function mountLvForm(root, host) {
+  const bound = new WeakSet;
+  const dirty = new WeakMap;
+  const chatOf = new WeakMap;
+  const bypass = new WeakSet;
+  let stopped = false;
+  function setStatus(form, message, kind = "info") {
+    const status = form.querySelector("[data-tpg-status]");
+    if (!status)
+      return;
+    status.textContent = message;
+    status.dataset.kind = kind;
+  }
+  function fill(form, force) {
+    const s = host.state();
+    const section = form.querySelector("[data-lv-sections]");
+    if (!section || !s.ready)
+      return;
+    const chatChanged = chatOf.get(form) !== s.chatKey;
+    chatOf.set(form, s.chatKey);
+    if (chatChanged || force)
+      dirty.set(form, false);
+    if (dirty.get(form)) {
+      fillLists(form, s);
+      return;
+    }
+    fillLists(form, s);
+    q(form, "modelLanguage").value = s.values.modelLanguage;
+    q(form, "myLanguage").value = s.values.myLanguage;
+    q(form, "batchChars").value = s.values.batchChars > 0 ? String(s.values.batchChars) : "";
+    q(form, "excludeTags").value = s.values.excludeTags;
+    q(form, "excludeRules").value = s.values.excludeRules;
+    for (const k of ["autoTranslate", "translateMyMessages", "showDraftButton", "protectHtml", "protectCode"])
+      q(form, k).checked = s.values[k];
+    const asDefault = form.querySelector('[name="lv:asDefault"]');
+    if (asDefault)
+      asDefault.checked = false;
+    form.dispatchEvent(new Event("change"));
+  }
+  function fillLists(form, s) {
+    const conn = q(form, "connectionId");
+    const wantConn = dirty.get(form) ? conn.value : s.values.connectionId;
+    conn.replaceChildren(...s.connections.map(([v, l]) => new Option(l, v)));
+    conn.value = wantConn;
+    const note = form.querySelector("[data-lv-connection-note]");
+    note.textContent = s.connectionNote.text;
+    note.style.color = s.connectionNote.kind === "err" ? "var(--destructive)" : "";
+    const link = form.querySelector("[data-lv-link-note]");
+    link.hidden = !s.linkNote;
+    link.textContent = s.linkNote;
+    const bundle = q(form, "bundleId");
+    const wantBundle = dirty.get(form) ? bundle.value : s.values.bundleId;
+    bundle.replaceChildren(new Option("없음", ""), ...s.bundles.map((b) => new Option(b.name, b.id)));
+    bundle.value = s.bundles.some((b) => b.id === wantBundle) ? wantBundle : "";
+    syncBundle(form, s);
+  }
+  function syncBundle(form, s = host.state()) {
+    const id = q(form, "bundleId").value;
+    const picked = s.bundles.find((b) => b.id === id);
+    form.querySelector("[data-lv-bundle-edit]").disabled = !picked;
+    form.querySelector("[data-lv-bundle-delete]").disabled = !picked;
+    const details = form.querySelector("[data-lv-bundle-preview]");
+    details.hidden = !picked;
+    if (picked) {
+      details.querySelector("summary").textContent = `${picked.name} · 내용 보기 (읽기 전용)`;
+      details.querySelector('[data-lv-preview="glossary"]').value = picked.glossary;
+      details.querySelector('[data-lv-preview="freeContext"]').value = picked.freeContext;
+    }
+  }
+  function read(form) {
+    const checked = (n) => q(form, n).checked;
+    return {
+      connectionId: q(form, "connectionId").value,
+      modelLanguage: q(form, "modelLanguage").value,
+      myLanguage: q(form, "myLanguage").value,
+      batchChars: Math.max(0, Number.parseInt(q(form, "batchChars").value, 10) || 0),
+      autoTranslate: checked("autoTranslate"),
+      translateMyMessages: checked("translateMyMessages"),
+      showDraftButton: checked("showDraftButton"),
+      protectHtml: checked("protectHtml"),
+      protectCode: checked("protectCode"),
+      excludeTags: q(form, "excludeTags").value,
+      excludeRules: q(form, "excludeRules").value,
+      bundleId: q(form, "bundleId").value,
+      asDefault: form.querySelector('[name="lv:asDefault"]')?.checked === true
+    };
+  }
+  function inject(form) {
+    if (form.querySelector("[data-lv-sections]"))
+      return;
+    const bar = form.querySelector(".tpg-savebar");
+    if (!bar)
+      return;
+    const wrap = document.createElement("div");
+    wrap.setAttribute("data-lv-sections", "");
+    wrap.style.display = "contents";
+    wrap.innerHTML = build(classesFrom(form), host.state().hasChat);
+    bar.before(wrap);
+    if (!bound.has(form)) {
+      bound.add(form);
+      form.addEventListener("input", (e) => {
+        if (e.target?.closest?.("[data-lv-sections]"))
+          dirty.set(form, true);
+      });
+      form.addEventListener("change", (e) => {
+        const t = e.target;
+        if (!t?.closest?.("[data-lv-sections]"))
+          return;
+        dirty.set(form, true);
+        if (t.name === "lv:bundleId")
+          syncBundle(form);
+      });
+      form.addEventListener("click", (e) => {
+        const t = e.target?.closest?.("button");
+        if (!t || !t.closest("[data-lv-sections]"))
+          return;
+        const id = q(form, "bundleId").value;
+        if (t.hasAttribute("data-lv-suggest")) {
+          const input = q(form, "excludeTags");
+          const have = new Set(input.value.split(/[\s,]+/).filter(Boolean));
+          for (const tag of host.suggestedTags)
+            have.add(tag);
+          input.value = [...have].join(", ");
+          dirty.set(form, true);
+        } else if (t.hasAttribute("data-lv-bundle-new"))
+          host.editBundle(null);
+        else if (t.hasAttribute("data-lv-bundle-edit") && id)
+          host.editBundle(id);
+        else if (t.hasAttribute("data-lv-bundle-delete") && id)
+          host.deleteBundle(id);
+      });
+      form.addEventListener("submit", (event) => {
+        if (bypass.has(form) || stopped)
+          return;
+        const s = host.state();
+        if (!s.ready || !form.querySelector("[data-lv-sections]"))
+          return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        (async () => {
+          const button = form.querySelector(".tpg-save");
+          if (button) {
+            button.disabled = true;
+            button.textContent = "저장 중";
+          }
+          setStatus(form, "설정을 저장하고 있습니다.");
+          try {
+            await host.save(read(form));
+          } catch (e) {
+            setStatus(form, e instanceof Error && e.message ? e.message : "설정을 저장하지 못했습니다.", "error");
+            if (button) {
+              button.disabled = false;
+              button.textContent = "저장";
+            }
+            return;
+          }
+          dirty.set(form, false);
+          const asDefault = form.querySelector('[name="lv:asDefault"]');
+          if (asDefault)
+            asDefault.checked = false;
+          if (button) {
+            button.disabled = false;
+            button.textContent = "저장";
+          }
+          bypass.add(form);
+          try {
+            form.requestSubmit();
+          } finally {
+            bypass.delete(form);
+          }
+        })();
+      }, true);
+    }
+    fill(form, true);
+  }
+  function scan() {
+    if (stopped)
+      return;
+    for (const form of Array.from(root.querySelectorAll("form.tpg-form")))
+      inject(form);
+  }
+  const observer = new MutationObserver(() => scan());
+  observer.observe(root, { childList: true, subtree: true });
+  scan();
+  return {
+    refresh() {
+      for (const form of Array.from(root.querySelectorAll("form.tpg-form"))) {
+        if (form.querySelector("[data-lv-sections]"))
+          fill(form, false);
+        else
+          inject(form);
+      }
+    },
+    stop() {
+      stopped = true;
+      observer.disconnect();
+      for (const el of Array.from(root.querySelectorAll("[data-lv-sections]")))
+        el.remove();
+    }
+  };
+}
+
 // src/frontend.ts
 var PANEL_CSS = `
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
@@ -9250,21 +9833,12 @@ function el(tag, props = {}, children = []) {
 var button = (label, onClick, cls = "", title) => el("button", { type: "button", class: `stt-btn ${cls}`.trim(), title: title ?? label, "aria-label": title ?? label, onClick }, [label]);
 var ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
 var SUGGESTED_TAGS = ["choices", "options", "status", "stats"];
-var parseTagsSafe = (raw) => {
-  try {
-    return parseTags(raw);
-  } catch {
-    return [];
-  }
-};
 function setup(ctx) {
   let store = null;
   let connections = [];
   let link = "none";
   let chatId = null;
   let lastDraftTranslation = null;
-  let dirty = false;
-  let markDirtyUi = null;
   const toBackend = (msg) => ctx.sendToBackend(msg);
   const notify = (kind, text) => toBackend({ type: "notify", kind, text });
   const current = () => store ? settingsFor(store, chatId) : DEFAULT_SETTINGS;
@@ -9292,8 +9866,9 @@ function setup(ctx) {
   }
   const rpc = new Map;
   let rpcCounter = 0;
+  const rpcPage = Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
   const call = (op, args, signal) => {
-    const id = `e${++rpcCounter}`;
+    const id = `e${rpcPage}.${++rpcCounter}`;
     return new Promise((resolve, reject) => {
       rpc.set(id, { resolve, reject });
       toBackend({ type: "emu", id, op, args });
@@ -9324,7 +9899,7 @@ function setup(ctx) {
     },
     updateContent: (c, m, content) => call("updateContent", [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call("patchExtra", [c, m, patch, swipe]),
-    generateRaw: (req, signal) => call("generateRaw", [req], signal),
+    generateRaw: withBatchLimit((req, signal) => call("generateRaw", [req], signal), () => store ? current().batchChars : 0),
     generateActive: (c) => call("generateActive", [c]),
     connections: () => call("connections", []),
     character: (id) => call("character", [id]),
@@ -9518,50 +10093,10 @@ ${bundle.freeContext.trim()}` : "",
     headerTitle: "양방향 번역",
     iconSvg: ICON
   });
-  const panel = el("div", { class: "stt-panel" });
-  const originalSettings = el("div", { class: "stt-panel" }, [
-    el("div", { class: "stt-note" }, ["아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답과 내 메시지 번역의 프롬프트·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·자동 번역·내 메시지 번역·제외 규칙·묶음에 쓰입니다."]),
-    settingsHost.element
-  ]);
-  tab.root.replaceChildren(panel, originalSettings);
-  let draft = { ...DEFAULT_SETTINGS };
-  let status = "";
-  function check(label, key, onChange) {
-    const input = el("input", { type: "checkbox", checked: draft[key] === true });
-    input.addEventListener("change", () => {
-      draft[key] = input.checked;
-      markDirty();
-      onChange?.();
-    });
-    return el("label", { class: "stt-check" }, [input, label]);
-  }
-  function text(label, key, opts = {}) {
-    const input = opts.multiline ? el("textarea", { value: String(draft[key] ?? ""), placeholder: opts.placeholder ?? "", class: opts.cls ?? "", spellcheck: false }) : el("input", { type: "text", value: String(draft[key] ?? ""), placeholder: opts.placeholder ?? "" });
-    input.setAttribute("data-stt-field", key);
-    input.addEventListener("input", () => {
-      draft[key] = input.value;
-      panel.querySelectorAll(`[data-stt-field="${key}"]`).forEach((other) => {
-        if (other !== input)
-          other.value = input.value;
-      });
-      markDirty();
-    });
-    return el("label", { class: "stt-field" }, [el("span", {}, [label]), input]);
-  }
-  function select(label, value, options, onChange, unsaved = true, rerender = false) {
-    const s = el("select", {}, options.map(([v, l]) => el("option", { value: v, selected: v === value }, [l])));
-    s.addEventListener("change", () => {
-      onChange(s.value);
-      if (unsaved)
-        markDirty();
-      if (rerender)
-        renderPanel();
-    });
-    return el("label", { class: "stt-field" }, [el("span", {}, [label]), s]);
-  }
+  tab.root.replaceChildren(el("div", { class: "stt-panel" }, [settingsHost.element]));
   function editBundle(existing) {
     const modal = ctx.ui.showModal({ title: existing ? "묶음 편집" : "새 묶음으로 저장", width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
-    const source = existing ?? draft;
+    const source = existing ?? current();
     const name = el("input", { type: "text", value: existing?.name ?? "", placeholder: "묶음 이름" });
     const glossary = el("textarea", { value: source.glossary, spellcheck: false, placeholder: "내 언어 용어 = 모델 언어 용어" });
     const freeContext = el("textarea", { value: source.freeContext, spellcheck: false });
@@ -9587,14 +10122,38 @@ ${bundle.freeContext.trim()}` : "",
       ])
     ]));
   }
-  function bundleSection() {
-    const bundles = store?.userBundles ?? [];
-    const selected = bundles.find((b) => b.id === draft.bundleId);
-    const edit = button("묶음 편집", () => {
-      if (selected)
-        editBundle(selected);
-    });
-    const remove = button("삭제", async () => {
+  function lvState() {
+    if (!store) {
+      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeTags: "", excludeRules: "", bundleId: "" }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
+    }
+    const s = current();
+    let bundleId = s.bundleId;
+    if (bundleId && !store.userBundles.some((b) => b.id === bundleId))
+      bundleId = "";
+    const connectionId = effectiveConnectionId(store, chatId);
+    const options = [["", "자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)"], ...connections.map((c) => [c.id, `${c.name} · ${c.model}${c.isDefault ? " (기본)" : ""}`])];
+    if (connectionId && !connections.some((c) => c.id === connectionId))
+      options.push([connectionId, "(삭제된 연결)"]);
+    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), connectionId || undefined, hint);
+    const pickedName = picked ? connections.find((c) => c.id === picked.id)?.name ?? picked.id : "";
+    const note = !connections.length ? { text: "Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요.", kind: "err" } : picked?.staleId ? { text: `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.`, kind: "warn" } : { text: `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? "host"]}). 아래 저장 버튼으로 적용합니다.`, kind: "" };
+    return {
+      ready: true,
+      chatKey: chatId ?? "",
+      hasChat: !!chatId,
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeTags: s.excludeTags, excludeRules: s.excludeRules, bundleId },
+      connections: options,
+      connectionNote: note,
+      linkNote: link === "none" ? "" : link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.",
+      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext }))
+    };
+  }
+  const lvForm = mountLvForm(settingsHost.element, {
+    state: lvState,
+    suggestedTags: SUGGESTED_TAGS,
+    editBundle: (id) => editBundle(id ? store?.userBundles.find((b) => b.id === id) ?? null : null),
+    deleteBundle: async (id) => {
+      const selected = store?.userBundles.find((b) => b.id === id);
       if (!selected)
         return;
       const { confirmed } = await ctx.ui.showConfirm({
@@ -9605,129 +10164,33 @@ ${bundle.freeContext.trim()}` : "",
       });
       if (confirmed)
         toBackend({ type: "delete_bundle", id: selected.id });
-    }, "stt-danger");
-    edit.disabled = remove.disabled = !selected;
-    const preview = selected ? el("details", { class: "stt-bundle-preview" }, [
-      el("summary", {}, [`${selected.name} · 내용 보기 (읽기 전용)`]),
-      ...[
-        ["단어집", selected.glossary],
-        ["추가 지침", selected.freeContext]
-      ].map(([label, value]) => el("label", { class: "stt-field" }, [
-        el("span", {}, [label]),
-        el("textarea", { readOnly: true, value, placeholder: "내용 없음" })
-      ]))
-    ]) : null;
-    return el("div", { class: "stt-section" }, [
-      el("h3", {}, ["번역 지침 묶음"]),
-      select("이 방의 묶음", draft.bundleId, [["", "없음"], ...bundles.map((b) => [b.id, b.name])], (value) => {
-        draft.bundleId = value;
-      }, true, true),
-      el("div", { class: "stt-row" }, [button("새 묶음 만들기", () => editBundle(null), "", "새 묶음 저장"), edit, remove]),
-      el("div", { class: "stt-note" }, ["묶음의 단어집·추가 지침은 **내 메시지 번역**에 더해집니다(응답 번역의 단어장·기타 지침·말투는 아래 원작 설정 화면에서 합니다). 선택은 아래 저장 버튼으로 적용합니다."]),
-      preview
-    ]);
-  }
-  function markDirty() {
-    dirty = true;
-    status = "";
-    tab.setBadge("!");
-    markDirtyUi?.();
-  }
-  function clearDirty() {
-    dirty = false;
-    tab.setBadge(null);
-    markDirtyUi?.();
-  }
-  function save(asDefault) {
-    try {
-      draft.excludeTags = parseTags(draft.excludeTags).join(", ");
-    } catch (e) {
-      toBackend({ type: "notify", kind: "error", text: e instanceof ExcludeRuleError ? e.message : "제외할 태그 이름을 확인해 주세요." });
-      return;
+    },
+    async save(v) {
+      let tags;
+      try {
+        tags = parseTags(v.excludeTags).join(", ");
+      } catch (e) {
+        throw new Error(e instanceof ExcludeRuleError ? e.message : "제외할 태그 이름을 확인해 주세요.");
+      }
+      const settings = {
+        ...current(),
+        modelLanguage: v.modelLanguage,
+        myLanguage: v.myLanguage,
+        batchChars: v.batchChars,
+        autoTranslate: v.autoTranslate,
+        translateMyMessages: v.translateMyMessages,
+        showDraftButton: v.showDraftButton,
+        protectHtml: v.protectHtml,
+        protectCode: v.protectCode,
+        excludeTags: tags,
+        excludeRules: v.excludeRules,
+        bundleId: v.bundleId,
+        connectionId: v.connectionId
+      };
+      await call("lv.save", [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
     }
-    toBackend({ type: "save_settings", chatId, settings: draft, asDefault });
-    clearDirty();
-    status = asDefault ? "저장했습니다. 새 채팅의 기본값으로도 저장했습니다." : "저장했습니다.";
-  }
-  function renderPanel() {
-    if (!store) {
-      panel.replaceChildren(el("div", { class: "stt-note" }, ["불러오는 중…"]));
-      return;
-    }
-    if (!dirty) {
-      draft = { ...current() };
-      draft.connectionId = effectiveConnectionId(store, chatId);
-    }
-    if (draft.bundleId && !store.userBundles.some((b) => b.id === draft.bundleId))
-      draft.bundleId = "";
-    const connectionOptions = [["", "자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)"], ...connections.map((c) => [c.id, `${c.name} · ${c.model}${c.isDefault ? " (기본)" : ""}`])];
-    if (draft.connectionId && !connections.some((c) => c.id === draft.connectionId))
-      connectionOptions.push([draft.connectionId, "(삭제된 연결)"]);
-    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), draft.connectionId || undefined, hint);
-    const pickedName = picked ? connections.find((c) => c.id === picked.id)?.name ?? picked.id : "";
-    const connectionNote = !connections.length ? el("div", { class: "stt-note stt-err" }, ["Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요."]) : el("div", { class: `stt-note${picked?.staleId ? " stt-warn" : ""}` }, [
-      picked?.staleId ? `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.` : `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? "host"]}). 연결은 고르는 즉시 저장됩니다.`
-    ]);
-    const saveNotice = el("span", { class: "stt-unsaved-note", role: "status" }, ["저장하지 않은 변경이 있어요. 저장 버튼을 눌러야 적용됩니다."]);
-    const saveRow = el("div", { class: "stt-row stt-sticky" }, [
-      saveNotice,
-      button("저장", () => save(false), "stt-primary"),
-      chatId ? button("저장 + 새 채팅 기본값으로", () => save(true)) : null,
-      button("되돌리기", () => {
-        clearDirty();
-        renderPanel();
-      }),
-      status ? el("span", { class: "stt-note" }, [status]) : null
-    ]);
-    markDirtyUi = () => {
-      saveRow.classList.toggle("stt-unsaved", dirty);
-      saveNotice.hidden = !dirty;
-    };
-    markDirtyUi();
-    panel.replaceChildren(el("div", { class: "stt-note" }, [chatId ? "지금 열린 채팅의 번역 설정입니다." : "열린 채팅이 없어 새 채팅의 기본값을 편집합니다."]), el("div", { class: "stt-section" }, [
-      el("h3", {}, ["기본 번역"]),
-      select("번역에 쓸 AI 연결", draft.connectionId, connectionOptions, (v) => {
-        draft.connectionId = v;
-        toBackend({ type: "save_connection", chatId, connectionId: v });
-        status = "연결을 저장했습니다.";
-      }, false),
-      connectionNote,
-      link === "none" ? null : el("div", { class: `stt-note${link === "incompatible" ? " stt-warn" : ""}` }, [link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요."]),
-      el("div", { class: "stt-row" }, [text("모델 언어 (내 메시지를 이 언어로)", "modelLanguage"), text("내 언어 (응답을 이 언어로)", "myLanguage")]),
-      check("AI 응답 자동 번역", "autoTranslate"),
-      check("내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)", "translateMyMessages"),
-      check("입력창 옆에 번역 버튼 표시", "showDraftButton")
-    ]), bundleSection(), el("div", { class: "stt-section" }, [
-      el("h3", {}, ["번역하지 않을 부분"]),
-      check("HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역", "protectHtml"),
-      check("코드 블록(```) 은 번역하지 않음", "protectCode"),
-      el("div", { class: "stt-field" }, [
-        text("제외할 HTML 태그 (쉼표·공백으로 구분)", "excludeTags", { placeholder: "choices, status, ui" }),
-        el("div", { class: "stt-row" }, [
-          button("추천 태그 넣기", () => {
-            const have = new Set(parseTagsSafe(draft.excludeTags));
-            for (const t of SUGGESTED_TAGS)
-              have.add(t);
-            draft.excludeTags = [...have].join(", ");
-            markDirty();
-            renderPanel();
-          }, "", `${SUGGESTED_TAGS.join(", ")} 를 목록에 더합니다`)
-        ]),
-        el("div", { class: "stt-note" }, ["이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. <style>·<script> 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다."])
-      ]),
-      text("제외 규칙 (한 줄에 하나)", "excludeRules", { multiline: true, placeholder: `<status>
-/HP: \\d+\\/\\d+/
-[상태창] ... [/상태창]` }),
-      el("div", { class: "stt-note" }, ["<태그> 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다."])
-    ]), saveRow);
-  }
-  const onBeforeUnload = (e) => {
-    if (!dirty)
-      return;
-    e.preventDefault();
-    e.returnValue = "";
-  };
-  window.addEventListener("beforeunload", onBeforeUnload);
+  });
+  const renderPanel = () => lvForm.refresh();
   const action = ctx.ui.registerInputBarAction({ id: "open-translator", label: "번역 설정" });
   const offAction = action.onClick(() => tab.activate());
   const offBackend = ctx.onBackendMessage((raw) => {
@@ -9768,7 +10231,7 @@ ${bundle.freeContext.trim()}` : "",
   return () => {
     clearInterval(routeTimer);
     document.removeEventListener("visibilitychange", onVisible);
-    window.removeEventListener("beforeunload", onBeforeUnload);
+    lvForm.stop();
     visible.destroy();
     original.stop();
     offEvents.forEach((off) => off());

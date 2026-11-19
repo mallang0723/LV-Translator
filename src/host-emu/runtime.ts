@@ -4,6 +4,8 @@
 // Nothing in the original is edited; see scripts/verify-original.mjs.
 
 import { createApiFetch, type HostBridge } from './api';
+import { guardStorage, STORAGE_TIMEOUT_MS } from './guard';
+import { watchOnPrimary } from './on-primary';
 
 export const ACTIVE_CHAT_KEY = 'marinara-active-chat-id';
 export const EXTENSION_ID = 'translation-presets-glossary';
@@ -21,6 +23,8 @@ export interface EmuOptions {
   /** Chat id of the chat on screen (Lumiverse route), or null. */
   activeChatId: () => string | null;
   log?: Pick<Console, 'info' | 'warn' | 'error'>;
+  /** How long a storage call may stay unanswered before the original gets an error instead (default 20 s). */
+  storageTimeoutMs?: number;
 }
 
 export interface EmuHandle {
@@ -77,11 +81,11 @@ export function runOriginal(opts: EmuOptions): EmuHandle {
   const log = opts.log ?? console;
   const api = createApiFetch(opts.bridge, window.fetch.bind(window));
   const win = shadowWindow(api);
-  const cleanups: Array<() => unknown> = [];
+  const cleanups: Array<() => unknown> = [watchOnPrimary()];
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const marinara = {
     extension: { id: EXTENSION_ID },
-    storage: opts.storage,
+    storage: guardStorage(opts.storage, opts.storageTimeoutMs ?? STORAGE_TIMEOUT_MS),
     log: { info: (...a: unknown[]) => log.info(...a), warn: (...a: unknown[]) => log.warn(...a), error: (...a: unknown[]) => log.error(...a) },
     setTimeout: (fn: () => void, ms?: number) => {
       const t = setTimeout(fn, ms);
