@@ -8744,6 +8744,35 @@ function syncContinueButton(view) {
     label.textContent = "이어서 번역";
   bar.prepend(button);
 }
+var AUTO_DELAY_MS = 900;
+var missingCells = (view) => {
+  const roots = [view, ...Array.from(view.querySelectorAll("[data-lumiverse-html-island]")).map((e) => e.shadowRoot).filter((r) => !!r)];
+  return roots.flatMap((r) => Array.from(r.querySelectorAll(".ptx-u.is-missing")).map((c) => c.textContent ?? ""));
+};
+function whenMessageSettled(messageId, timeoutMs = 6000) {
+  if (typeof document === "undefined")
+    return Promise.resolve(true);
+  const started = Date.now();
+  let stableSince = 0;
+  return new Promise((resolve) => {
+    const tick = () => {
+      const el = Array.from(document.querySelectorAll("[data-message-id]")).find((e) => e.getAttribute("data-message-id") === messageId);
+      const host = el?.querySelector(".mari-message-content");
+      const islands = host ? Array.from(host.querySelectorAll("[data-lumiverse-html-island]")) : [];
+      const ready = !!host && islands.every((i) => !!i.shadowRoot && !!i.querySelector(`:scope > [${MIRROR}]`));
+      if (ready)
+        stableSince ||= Date.now();
+      else
+        stableSince = 0;
+      if (ready && Date.now() - stableSince >= 300)
+        return resolve(true);
+      if (Date.now() - started >= timeoutMs)
+        return resolve(false);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
 function onContinueClick(e) {
   const button = e.target?.closest?.('[data-lv-act="continue"]');
   if (!button)
@@ -8754,11 +8783,36 @@ function onContinueClick(e) {
   const native = message?.querySelector(".mari-message-actions button:has(svg.lucide-languages)");
   native?.click();
 }
-function startDomBridge(root = document) {
+function startDomBridge(root = document, options = {}) {
   let timer = null;
   let destroyed = false;
   const added = new Set;
   const shadowObservers = new Map;
+  const autoTimers = new Map;
+  const autoTried = new Map;
+  function autoContinue(view) {
+    const message = view.closest("[data-message-id]");
+    const id = message?.getAttribute("data-message-id");
+    if (!message || !id || autoTimers.has(id) || view.querySelector(".ptx-pill"))
+      return;
+    const signature = missingCells(view).join("\x01");
+    if (!signature || autoTried.get(id) === signature)
+      return;
+    const roots = [view, ...Array.from(view.querySelectorAll("[data-lumiverse-html-island]")).map((e) => e.shadowRoot).filter((r) => !!r)];
+    const used = new Set(roots.flatMap((r) => Array.from(r.querySelectorAll(".ptx-u[data-k]")).map((c) => c.dataset.k ?? "")));
+    if (!options.hasUnusedKeys?.(id, used))
+      return;
+    autoTimers.set(id, setTimeout(() => {
+      autoTimers.delete(id);
+      if (destroyed || !view.isConnected || view.querySelector(".ptx-pill"))
+        return;
+      const now = missingCells(view).join("\x01");
+      if (!now || now !== signature)
+        return;
+      autoTried.set(id, signature);
+      message.querySelector(".mari-message-actions button:has(svg.lucide-languages)")?.click();
+    }, AUTO_DELAY_MS));
+  }
   function tag(message) {
     for (const body of Array.from(message.querySelectorAll('[data-component="MessageContent"]'))) {
       if (body.closest("[data-message-id]") === message && !body.classList.contains("mari-message-content")) {
@@ -8797,6 +8851,7 @@ function startDomBridge(root = document) {
     for (const v of Array.from(root.querySelectorAll(".ptx-view"))) {
       restoreIslands(v);
       syncContinueButton(v);
+      autoContinue(v);
     }
   }
   const queue = () => {
@@ -8822,6 +8877,9 @@ function startDomBridge(root = document) {
         b.remove();
       if (timer)
         clearTimeout(timer);
+      for (const t of autoTimers.values())
+        clearTimeout(t);
+      autoTimers.clear();
       observer.disconnect();
       for (const o of shadowObservers.values())
         o.disconnect();
@@ -9353,7 +9411,13 @@ ${HIDDEN}`;
 // src/host-emu/boot.ts
 function startOriginal(opts) {
   const removeStyle = opts.addStyle(SHIM_CSS);
-  const dom = startDomBridge();
+  const dom = startDomBridge(document, {
+    hasUnusedKeys: (id, used) => {
+      const chat = opts.activeChatId();
+      const map = chat ? opts.cache?.row(chat, id)?.extra?.paraTranslate?.map ?? null : null;
+      return !!map && Object.keys(map).some((k) => !used.has(k));
+    }
+  });
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
   const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
@@ -10206,7 +10270,11 @@ function setup(ctx) {
       const p = payload;
       if (!p?.chatId || !p.generationId || !leased.delete(p.generationId))
         return;
-      driver.ended({ chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType });
+      const ended = { chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType };
+      if (p.messageId && typeof p.content === "string" && !p.error && p.generationType !== "impersonate")
+        whenMessageSettled(p.messageId).then(() => driver.ended(ended));
+      else
+        driver.ended(ended);
     }),
     ctx.events.on("GENERATION_STOPPED", (payload) => {
       const p = payload;
