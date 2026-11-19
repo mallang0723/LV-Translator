@@ -149,3 +149,33 @@ describe('group chat speakers (d)', () => {
     expect((await bridge(x).getChat('solo1')).characterIds).toEqual(['ch1']);
   });
 });
+
+describe('the original\'s content write lands on the message as it is now (double safety)', () => {
+  const C0 = 'Alpha one.\n\nBeta two.\n\nGamma three.';
+  const setup = async () => {
+    const x = host(1);
+    x.messages[0]!.content = C0;
+    const b = bridge(x);
+    await b.listMessages('w1', 10); // the original reads it: this is its copy
+    return { x, b };
+  };
+  test('an edit made after the original read the message is kept; only the paragraphs the original changed are applied', async () => {
+    const { x, b } = await setup();
+    x.messages[0]!.content = 'Alpha one.\n\nBeta two.\n\nGamma three EDITED.'; // edited elsewhere; the original never heard (foreign cache)
+    await b.updateContent('w1', 'm0', 'Alpha one revised.\n\nBeta two.\n\nGamma three.'); // built from its stale copy
+    expect(x.writes.at(-1)!.patch.content).toBe('Alpha one revised.\n\nBeta two.\n\nGamma three EDITED.');
+  });
+  test('nothing changed meanwhile: written as is', async () => {
+    const { x, b } = await setup();
+    await b.updateContent('w1', 'm0', 'Alpha one revised.\n\nBeta two.\n\nGamma three.');
+    expect(x.writes.at(-1)!.patch.content).toBe('Alpha one revised.\n\nBeta two.\n\nGamma three.');
+  });
+  test('a paragraph the original changed was changed meanwhile (or the layout differs): nothing is written and the original shows its failure', async () => {
+    const { x, b } = await setup();
+    x.messages[0]!.content = 'Alpha CHANGED.\n\nBeta two.\n\nGamma three.';
+    await expect(b.updateContent('w1', 'm0', 'Alpha one revised.\n\nBeta two.\n\nGamma three.')).rejects.toThrow('그 사이');
+    x.messages[0]!.content = 'Alpha one.\n\nBeta two.';
+    await expect(b.updateContent('w1', 'm0', 'Alpha one revised.\n\nBeta two.\n\nGamma three.')).rejects.toThrow('그 사이');
+    expect(x.writes).toHaveLength(0);
+  });
+});
