@@ -21,7 +21,7 @@ import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts'
 import type { HostBridge, MessageRow } from './host-emu/api';
 import { MessageCache } from './host-emu/message-cache';
 import { watchVisibleMessages } from './host-emu/visible-messages';
-import { createSettingsHost, nativePrompts, startOriginal } from './host-emu/boot';
+import { createSettingsHost, nativePrompts, startOriginal, whenMessageSettled } from './host-emu/boot';
 import { GenerationDriver, GenerationHub } from './host-emu/generation';
 import type { MarinaraStorage } from './host-emu/runtime';
 import { withBatchLimit } from './host-emu/split';
@@ -237,7 +237,11 @@ export function setup(ctx: SpindleFrontendContext) {
     ctx.events.on('GENERATION_ENDED', (payload) => {
       const p = payload as { generationId?: string; chatId?: string; messageId?: string; content?: string; error?: string; generationType?: string } | null;
       if (!p?.chatId || !p.generationId || !leased.delete(p.generationId)) return;
-      driver.ended({ chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType });
+      const ended = { chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType };
+      // The original reads a message's cells from the screen when it can (an off-screen message is split from its source text, which does not
+      // match the cells the view keys). The reply is on screen now or a moment from now: give it up to a few seconds to draw before replaying the end.
+      if (p.messageId && typeof p.content === 'string' && !p.error && p.generationType !== 'impersonate') void whenMessageSettled(p.messageId).then(() => driver.ended(ended));
+      else driver.ended(ended);
     }),
     ctx.events.on('GENERATION_STOPPED', (payload) => {
       const p = payload as { generationId?: string; chatId?: string } | null;

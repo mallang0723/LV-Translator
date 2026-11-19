@@ -871,6 +871,95 @@ check('0.5.4: showing the original, the islands are the original ones and the mi
   await page2.evaluate(() => { window.__cleanup = window.__LVSetup(window.__ctx); });
 }
 await page2.evaluate(() => { document.querySelector('#pageui')?.remove(); document.querySelector('[data-message-id="m15"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm15'), 1); });
+// ---- 0.5.6: a message translated while NOT on screen (generation end, "translate all", catch-up) is later shown with the same cells ----
+// The original splits an off-screen message from its SOURCE text (fallbackRoot: blank lines only, tags stripped) but the reading view keys the RENDERED
+// cells, so a block tag that touches text with no blank line made one source unit and two cells: the key matched nothing and the English showed.
+const OFFSCREEN = [
+  { id: 'm16', name: 'A5 header + <prose> dialogue', above: 'Opening line directly above.', below: 'Closing line directly below.',
+    src: '[ The Farseer of the north ]\n[ The Stargazer on the hill ]\n<prose>**The Stargazer|** "Head up and look at the sky."</prose>',
+    island: '<div class="hdr">[ The Farseer of the north ]<br>[ The Stargazer on the hill ]</div><div class="prose"><strong>The Stargazer|</strong> "<span style="color:#a8c6df">Head up and look at the sky.</span>"</div>' },
+  { id: 'm17', name: 'A7 pass/fail card', above: 'Before the roll, the dice rattled.', below: 'After the roll, silence returned.',
+    src: 'The ride was smooth, said Mira, <span style="color:#a8c6df">"Bumpy ride."</span></pass>\n<fail>Loose shale gives way under his boots.\n**Farseer|** "Hold on to something solid."</fail>',
+    island: '<div class="pass">The ride was smooth, said Mira, <span style="color:#a8c6df">"Bumpy ride."</span></div><div class="fail">Loose shale gives way under his boots.<br><strong>Farseer|</strong> "<span style="color:#a8c6df">Hold on to something solid.</span>"</div>' },
+  { id: 'm18', name: '<details><summary> block', above: 'The door stood ajar above.', below: 'The hall ran on below.',
+    src: '<details><summary>Action Hints for this scene</summary>\n1. Go left toward the light.\n2. Go right into the dark.</details>',
+    island: '<details class="cyoa"><summary>Action Hints for this scene</summary><div>1. Go left toward the light.<br>2. Go right into the dark.</div></details>' },
+  { id: 'm19', name: 'status window HTML, sentence above and below', above: 'She checked the glowing panel.', below: 'Then she looked up again.',
+    src: '<div class="status"><b>Status Window</b>\n<span>Mood: calm and curious</span>\nLocation: the old lighthouse</div>',
+    island: '<div class="status"><b>Status Window</b><div><span>Mood: calm and curious</span></div><div>Location: the old lighthouse</div></div>' },
+];
+for (const f of OFFSCREEN) {
+  const content = `${f.above}\n${f.src}\n${f.below}`;
+  await page2.evaluate(([f, content]) => {
+    window.__cleanup();
+    window.__auto = true;
+    window.__messages.push({ id: f.id, role: 'assistant', content, swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  }, [f, content]);
+  await page2.waitForTimeout(500);
+  await page2.evaluate(([f, content]) => { window.__emit('GENERATION_STARTED', { generationId: 'g-' + f.id, chatId: 'c1', generationType: 'normal' }); }, [f, content]);
+  await page2.waitForTimeout(300);
+  await page2.evaluate(([f, content]) => { window.__emit('GENERATION_ENDED', { generationId: 'g-' + f.id, chatId: 'c1', messageId: f.id, content, generationType: 'normal' }); }, [f, content]);
+  await page2.waitForFunction((id) => Object.keys(window.__messages.find((x) => x.id === id)?.metadata?.st_translator_tt?.['0']?.map ?? {}).length >= 1, f.id, { timeout: 8000 }).catch(() => {});
+  // now the message comes on screen (a rendered Lumiverse message: paragraphs and an HTML island)
+  await page2.evaluate(([f]) => {
+    const row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', f.id);
+    row.innerHTML = '<div><div data-component="MessageContent"><div class="b"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    const body = row.querySelector('.b');
+    const mk = (text) => { const p = document.createElement('p'); p.textContent = text; return p; };
+    const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = f.island;
+    body.append(mk(f.above), d, mk(f.below));
+    document.querySelector('#chat').append(row);
+  }, [f]);
+  await page2.waitForSelector(`[data-message-id="${f.id}"] .ptx-view`, { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(1500);
+  const shown = await page2.evaluate((id) => {
+    const view = document.querySelector(`[data-message-id="${id}"] .ptx-view`);
+    if (!view) return null;
+    const roots = [view, ...[...view.querySelectorAll('[data-lumiverse-html-island]')].map((e) => e.shadowRoot).filter(Boolean)];
+    const text = roots.map((r) => { const c = document.createElement('div'); c.innerHTML = r === view ? '' : ''; const clone = r === view ? view.cloneNode(true) : (() => { const x = document.createElement('div'); for (const n of r.childNodes) x.append(n.cloneNode(true)); return x; })(); clone.querySelectorAll('.ptx-o, style, [data-lumiverse-html-island], .ptx-bar').forEach((e) => e.remove()); return clone.textContent; }).join(' ');
+    const missing = roots.reduce((n, r) => n + r.querySelectorAll('.ptx-u.is-missing').length, 0);
+    const spans = [...view.querySelectorAll('[data-lumiverse-html-island]')].flatMap((e) => [...(e.shadowRoot?.querySelectorAll('.ptx-t span') ?? [])]).filter((sp) => getComputedStyle(sp).color === 'rgb(168, 198, 223)').length;
+    return { text: text.replace(/\s+/g, ' ').trim(), missing, spans };
+  }, f.id);
+  if (process.env.QA_DEBUG) console.log('DBG', f.id, JSON.stringify(await page2.evaluate((id) => ({ map: Object.keys(window.__messages.find((x) => x.id === id)?.metadata?.st_translator_tt?.['0']?.map ?? {}), sent: window.__quiet.filter((c) => c.messages.some((m) => m.content.includes('<segment'))).slice(-2).map((c) => c.messages.at(-1).content.slice(-400)) }), f.id)));
+  check(`0.5.6 offscreen-then-shown [${f.name}]: a view is drawn`, !!shown);
+  check(`0.5.6 offscreen-then-shown [${f.name}]: every unit shows its translation (no English cell, none missing)`, !!shown && shown.missing === 0 && !/[A-Za-z]{4}/.test(shown.text.replace(/번역/g, '')), JSON.stringify(shown));
+  check(`0.5.6 offscreen-then-shown [${f.name}]: no literal ** markdown`, !!shown && !shown.text.includes('**'), JSON.stringify(shown));
+  if (f.id === 'm16' || f.id === 'm17') check(`0.5.6 offscreen-then-shown [${f.name}]: the dialogue colour span is kept`, !!shown && shown.spans >= 1, JSON.stringify(shown));
+  await page2.screenshot({ path: join(shots, `11-offscreen-${f.id}.png`), fullPage: true });
+}
+await page2.evaluate(() => { for (const id of ['m16', 'm17', 'm18', 'm19']) { document.querySelector(`[data-message-id="${id}"]`)?.remove(); const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); } });
+// the usual case: the reply is on screen when the generation ends -> translated from the cells at once, in one pass, nothing left over to continue
+{
+  const f = OFFSCREEN[0]; const id = 'm20';
+  const content = `${f.above}\n${f.src}\n${f.below}`;
+  await page2.evaluate(([f, id, content]) => {
+    window.__cleanup(); window.__auto = true;
+    window.__messages.push({ id, role: 'assistant', content, swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+    const row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', id);
+    row.innerHTML = '<div><div data-component="MessageContent"><div class="b"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    const mk = (text) => { const p = document.createElement('p'); p.textContent = text; return p; };
+    const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = f.island;
+    row.querySelector('.b').append(mk(f.above), d, mk(f.below));
+    document.querySelector('#chat').append(row);
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  }, [f, id, content]);
+  await page2.waitForTimeout(800);
+  const qn = await page2.evaluate(() => window.__quiet.length);
+  await page2.evaluate(([id, content]) => { window.__emit('GENERATION_STARTED', { generationId: 'g-' + id, chatId: 'c1', generationType: 'normal' }); }, [id, content]);
+  await page2.waitForTimeout(300);
+  await page2.evaluate(([id, content]) => { window.__emit('GENERATION_ENDED', { generationId: 'g-' + id, chatId: 'c1', messageId: id, content, generationType: 'normal' }); }, [id, content]);
+  await page2.waitForSelector(`[data-message-id="${id}"] .ptx-view`, { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(3000);
+  const sentSeg = await page2.evaluate((n) => window.__quiet.slice(n).map((c) => c.messages.find((m) => m.role === 'user').content).filter((u) => /<segment id=/.test(u)), qn);
+  const view = await page2.evaluate((id) => { const v = document.querySelector(`[data-message-id="${id}"] .ptx-view`); const sh = [...(v?.querySelectorAll('[data-lumiverse-html-island]') ?? [])].map((e) => e.shadowRoot).filter(Boolean); return { missing: [v, ...sh].filter(Boolean).reduce((n, r) => n + r.querySelectorAll('.ptx-u.is-missing').length, 0), translated: [v, ...sh].filter(Boolean).reduce((n, r) => n + r.querySelectorAll('.ptx-u[data-k]').length, 0) }; }, id);
+  check('0.5.6 on screen at the end of the generation: translated from the cells in one request, header and dialogue are separate units', sentSeg.length === 1 && (sentSeg[0].match(/<segment id=/g) ?? []).length === 4 && [...sentSeg[0].matchAll(/<segment id="\d+">\n([\s\S]*?)\n<\/segment>/g)].every((m) => !(/Farseer of the north/.test(m[1]) && /Head up/.test(m[1]))), JSON.stringify(sentSeg).slice(0, 400));
+  check('0.5.6 on screen at the end of the generation: all 4 cells translated, none missing, no second pass', view.missing === 0 && view.translated === 4, JSON.stringify(view));
+  await page2.evaluate((id) => { document.querySelector(`[data-message-id="${id}"]`)?.remove(); const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); }, id);
+}
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

@@ -22,7 +22,13 @@ export interface StartOptions {
 
 export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandle } {
   const removeStyle = opts.addStyle(SHIM_CSS);
-  const dom = startDomBridge();
+  const dom = startDomBridge(document, {
+    hasUnusedKeys: (id, used) => {
+      const chat = opts.activeChatId();
+      const map = chat ? ((opts.cache?.row(chat, id)?.extra as { paraTranslate?: { map?: Record<string, unknown> } } | undefined)?.paraTranslate?.map ?? null) : null;
+      return !!map && Object.keys(map).some((k) => !used.has(k));
+    },
+  });
   // Before the original starts: it looks for the cache while it starts.
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
   const emu = runOriginal({ source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
@@ -37,4 +43,4 @@ export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandl
   };
 }
 
-export { createSettingsHost, nativePrompts } from './dom-bridge';
+export { createSettingsHost, nativePrompts, whenMessageSettled } from './dom-bridge';

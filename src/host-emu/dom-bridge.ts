@@ -213,6 +213,41 @@ function syncContinueButton(view: HTMLElement): void {
   bar.prepend(button);
 }
 
+/**
+ * The original splits a message it cannot see on screen (translated at the end of a generation, by "번역 안 된 메시지 모두 번역", or before an
+ * HTML island has its mirror) from its SOURCE text: blank lines only, tags stripped. The reading view keys the RENDERED cells. A block tag that
+ * touches text with no blank line (`[ header ]\n<prose>…`, `</pass>\n<fail>…`) is one source unit but two cells, so no key matches and the whole
+ * message (the sentences above and below included) shows its English. Cells that have no translation are exactly what the original's own
+ * "continue" path (its translate button on a translated message) translates, now from the rendered cells, so the keys match and inline wrappers
+ * (colour spans, bold) are kept. This runs that path once for each distinct set of missing cells of a message that is on screen.
+ */
+const AUTO_DELAY_MS = 900;
+const missingCells = (view: HTMLElement): string[] => {
+  const roots: ParentNode[] = [view, ...Array.from(view.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]')).map((e) => e.shadowRoot).filter((r): r is ShadowRoot => !!r)];
+  return roots.flatMap((r) => Array.from(r.querySelectorAll('.ptx-u.is-missing')).map((c) => c.textContent ?? ''));
+};
+
+/** Resolves when the message is on screen with its HTML islands mirrored (the original can then read what the view will key), or after `timeoutMs`. */
+export function whenMessageSettled(messageId: string, timeoutMs = 6000): Promise<boolean> {
+  if (typeof document === 'undefined') return Promise.resolve(true);
+  const started = Date.now();
+  let stableSince = 0;
+  return new Promise((resolve) => {
+    const tick = () => {
+      const el = Array.from(document.querySelectorAll('[data-message-id]')).find((e) => e.getAttribute('data-message-id') === messageId);
+      const host = el?.querySelector('.mari-message-content');
+      const islands = host ? Array.from(host.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]')) : [];
+      const ready = !!host && islands.every((i) => !!i.shadowRoot && !!i.querySelector(`:scope > [${MIRROR}]`));
+      if (ready) stableSince ||= Date.now();
+      else stableSince = 0;
+      if (ready && Date.now() - stableSince >= 300) return resolve(true);
+      if (Date.now() - started >= timeoutMs) return resolve(false);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
+
 function onContinueClick(e: MouseEvent): void {
   const button = (e.target as Element | null)?.closest?.('[data-lv-act="continue"]');
   if (!button) return;
@@ -229,11 +264,41 @@ export interface DomBridge {
   destroy(): void;
 }
 
-export function startDomBridge(root: ParentNode = document): DomBridge {
+export interface DomBridgeOptions {
+  /**
+   * Whether the stored translation of a message holds keys that none of the cells now on screen uses (a translation made from the message
+   * source while it was off screen). Only then is a message with untranslated cells continued by itself; without this, never.
+   */
+  hasUnusedKeys?: (messageId: string, usedKeys: Set<string>) => boolean;
+}
+
+export function startDomBridge(root: ParentNode = document, options: DomBridgeOptions = {}): DomBridge {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
   const added = new Set<Element>();
   const shadowObservers = new Map<ShadowRoot, MutationObserver>();
+  const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const autoTried = new Map<string, string>();
+
+  /** Presses the original's translate button once for a message whose view has cells without a translation (see AUTO_DELAY_MS above). */
+  function autoContinue(view: HTMLElement): void {
+    const message = view.closest('[data-message-id]');
+    const id = message?.getAttribute('data-message-id');
+    if (!message || !id || autoTimers.has(id) || view.querySelector('.ptx-pill')) return;
+    const signature = missingCells(view).join('\u0001');
+    if (!signature || autoTried.get(id) === signature) return;
+    const roots: ParentNode[] = [view, ...Array.from(view.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]')).map((e) => e.shadowRoot).filter((r): r is ShadowRoot => !!r)];
+    const used = new Set(roots.flatMap((r) => Array.from(r.querySelectorAll<HTMLElement>('.ptx-u[data-k]')).map((c) => c.dataset.k ?? '')));
+    if (!options.hasUnusedKeys?.(id, used)) return;
+    autoTimers.set(id, setTimeout(() => {
+      autoTimers.delete(id);
+      if (destroyed || !view.isConnected || view.querySelector('.ptx-pill')) return;
+      const now = missingCells(view).join('\u0001');
+      if (!now || now !== signature) return;
+      autoTried.set(id, signature);
+      message.querySelector<HTMLElement>('.mari-message-actions button:has(svg.lucide-languages)')?.click();
+    }, AUTO_DELAY_MS));
+  }
 
   function tag(message: Element): void {
     for (const body of Array.from(message.querySelectorAll('[data-component="MessageContent"]'))) {
@@ -270,6 +335,7 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
     for (const v of Array.from(root.querySelectorAll<HTMLElement>('.ptx-view'))) {
       restoreIslands(v);
       syncContinueButton(v);
+      autoContinue(v);
     }
   }
   const queue = () => {
@@ -292,6 +358,8 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
       document.removeEventListener('click', onContinueClick, true);
       for (const b of Array.from(document.querySelectorAll('[data-lv-act="continue"]'))) b.remove();
       if (timer) clearTimeout(timer);
+      for (const t of autoTimers.values()) clearTimeout(t);
+      autoTimers.clear();
       observer.disconnect();
       for (const o of shadowObservers.values()) o.disconnect();
       shadowObservers.clear();
