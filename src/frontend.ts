@@ -256,9 +256,9 @@ export function setup(ctx: SpindleFrontendContext) {
     const connectionId = String(row.metadata?.translationConnectionId ?? '');
     // The chat's own prompts (0.4.0 kept them per chat): the original's "채팅 설정 유지" preset means these.
     settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ''), String(row.metadata?.translationOutputPrompt ?? ''));
-    // The tags the original's 「번역에서 제외할 태그」 holds are excluded from my messages too (the 0.4.0 tag list is read as before).
+    // The tags the original's 「번역에서 제외할 태그」 holds are excluded from my messages too. It is the only tag list now (the 0.4.0 one was moved into it once), so removing a tag there removes it here.
     const keep = await emuStorage.get().then((f) => String((f?.config as { paragraph?: { keepTags?: string } } | undefined)?.paragraph?.keepTags ?? '')).catch(() => '');
-    const held = protect(text, { ...settings, excludeTags: [settings.excludeTags, ...lenientTags(keep.replace(/;/g, ','))].filter(Boolean).join(', ') });
+    const held = protect(text, { ...settings, excludeTags: lenientTags(keep.replace(/;/g, ',')).join(', ') });
     // The prompt lives in the original's field (a hidden one here; in Marinara it is the 유저 입력 번역 프롬프트 field).
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     // LV additions on top of the original's prompt: the shared bundle's glossary / guidance (the bundle's own fields only) and the protection marker rule.

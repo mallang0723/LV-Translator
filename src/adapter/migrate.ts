@@ -52,6 +52,8 @@ export function planGlossaryMigration(file: Record<string, unknown>, store: Stor
 }
 
 export const SCOPE_MARK = 'scope053';
+/** The tag part has its own marker: a file that already ran the scope part (an earlier 0.5.3 build) still gets the tags once. */
+export const TAGS_MARK = 'tags053';
 
 type Fields = Record<string, unknown>;
 interface Group { name: string; keys: string[]; filled(old: Fields): boolean; empty(original: Fields): boolean }
@@ -88,19 +90,21 @@ const pick = (from: Fields, keys: string[]): Fields => Object.fromEntries(keys.f
  */
 export function planScopeMigration(file: Record<string, unknown>, store: Store, at: string): Record<string, unknown> | null {
   const marks = isObject(file[MIGRATIONS_KEY]) ? (file[MIGRATIONS_KEY] as Record<string, unknown>) : {};
-  if (marks[SCOPE_MARK]) return null;
+  const doScope = !marks[SCOPE_MARK];
+  const doTags = !marks[TAGS_MARK];
+  if (!doScope && !doTags) return null;
   const config: Record<string, any> = isObject(file.config) ? structuredClone(file.config) : {};
   let changed = false;
 
   const oldDefault = settingsFor(store, null) as unknown as Fields;
-  for (const g of GROUPS) {
+  for (const g of doScope ? GROUPS : []) {
     if (!g.filled(oldDefault)) continue;
     const have = isObject(config.defaults) ? (config.defaults as Fields) : {};
     if (!g.empty(have)) continue;
     config.defaults = { ...have, ...pick(oldDefault, g.keys) };
     changed = true;
   }
-  for (const chatId of Object.keys(store.chats)) {
+  for (const chatId of doScope ? Object.keys(store.chats) : []) {
     const old = settingsFor(store, chatId) as unknown as Fields;
     for (const g of GROUPS) {
       if (!g.filled(old)) continue;
@@ -132,7 +136,7 @@ export function planScopeMigration(file: Record<string, unknown>, store: Store, 
       if (m) names.add(m[1]!.toLowerCase());
     }
   }
-  if (names.size) {
+  if (doTags && names.size) {
     const para = isObject(config.paragraph) ? (config.paragraph as Fields) : {};
     const have = typeof para.keepTags === 'string' ? para.keepTags : '';
     const haveNames = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, '').toLowerCase()).filter(Boolean));
@@ -142,5 +146,5 @@ export function planScopeMigration(file: Record<string, unknown>, store: Store, 
       changed = true;
     }
   }
-  return { ...file, ...(changed ? { config } : {}), [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: at } };
+  return { ...file, ...(changed ? { config } : {}), [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: marks[SCOPE_MARK] ?? at, [TAGS_MARK]: marks[TAGS_MARK] ?? at } };
 }

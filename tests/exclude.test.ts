@@ -76,3 +76,10 @@ describe('제외 규칙 in the original\'s paragraph translation: not sent, show
     expect(excludedRanges('aa bb cc', parseExcludeRules('/aa bb/\n/bb cc/'))).toEqual([[0, 8]]);
   });
 });
+
+test('a prefill that is a segment tag: the request goes as it is (no rebuilt reply for the original to prepend it to)', async () => {
+  let calls = 0;
+  const req = { ...request(['a b c', 'HP 10 d e']), messages: [...request(['a b c', 'HP 10 d e']).messages, { role: 'assistant', content: '<segment id="1">' }] };
+  await withExclusions(async (r: any) => { calls++; expect(r.messages[1].content).toContain('HP 10'); return { content: 'x' }; }, () => '/HP \\d+/')(req);
+  expect(calls).toBe(1);
+});

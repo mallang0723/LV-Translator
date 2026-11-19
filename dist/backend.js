@@ -2339,6 +2339,7 @@ function planGlossaryMigration(file, store, at) {
   return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [GLOSSARY_MARK]: at } };
 }
 var SCOPE_MARK = "scope053";
+var TAGS_MARK = "tags053";
 var GROUPS = [
   { name: "free", keys: ["freeContext", "freeContextEnabled"], filled: (o) => filled(o.freeContext), empty: (c) => !filled(c.freeContext) },
   { name: "voice", keys: ["incomingVoicePrompt", "incomingVoiceEnabled"], filled: (o) => filled(o.incomingVoicePrompt), empty: (c) => !filled(c.incomingVoicePrompt) },
@@ -2352,12 +2353,14 @@ var GROUPS = [
 var pick = (from, keys) => Object.fromEntries(keys.filter((k) => (k in from)).map((k) => [k, from[k]]));
 function planScopeMigration(file, store, at) {
   const marks = isObject2(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
-  if (marks[SCOPE_MARK])
+  const doScope = !marks[SCOPE_MARK];
+  const doTags = !marks[TAGS_MARK];
+  if (!doScope && !doTags)
     return null;
   const config = isObject2(file.config) ? structuredClone(file.config) : {};
   let changed = false;
   const oldDefault = settingsFor(store, null);
-  for (const g of GROUPS) {
+  for (const g of doScope ? GROUPS : []) {
     if (!g.filled(oldDefault))
       continue;
     const have = isObject2(config.defaults) ? config.defaults : {};
@@ -2366,7 +2369,7 @@ function planScopeMigration(file, store, at) {
     config.defaults = { ...have, ...pick(oldDefault, g.keys) };
     changed = true;
   }
-  for (const chatId of Object.keys(store.chats)) {
+  for (const chatId of doScope ? Object.keys(store.chats) : []) {
     const old = settingsFor(store, chatId);
     for (const g of GROUPS) {
       if (!g.filled(old))
@@ -2400,7 +2403,7 @@ function planScopeMigration(file, store, at) {
         names.add(m[1].toLowerCase());
     }
   }
-  if (names.size) {
+  if (doTags && names.size) {
     const para = isObject2(config.paragraph) ? config.paragraph : {};
     const have = typeof para.keepTags === "string" ? para.keepTags : "";
     const haveNames = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
@@ -2410,7 +2413,7 @@ function planScopeMigration(file, store, at) {
       changed = true;
     }
   }
-  return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: at } };
+  return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: marks[SCOPE_MARK] ?? at, [TAGS_MARK]: marks[TAGS_MARK] ?? at } };
 }
 
 // src/backend.ts

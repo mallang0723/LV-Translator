@@ -42,6 +42,10 @@ export function withExclusions(generate: RawGenerate, rulesText: () => string): 
     const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex]!.content) : null;
     if (!parsed || !rules.length) return generate(req, signal);
 
+    // A prefill that is itself a piece of a segment tag cannot be put in front of a rebuilt reply (see split.ts): the request goes as it is.
+    const lastMsg = req.messages[req.messages.length - 1];
+    if (lastMsg?.role === 'assistant' && /<\/?segment/i.test(lastMsg.content)) return generate(req, signal);
+
     const SEP = '\n\n';
     const joined = parsed.segments.map((s) => s.text).join(SEP);
     const ranges = excludedRanges(joined, rules);
