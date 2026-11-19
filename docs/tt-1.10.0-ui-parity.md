@@ -89,5 +89,5 @@
 | i | "기본 번역 버튼도 최신 프리셋"(원작 README) | **호스트에 없음**: Marinara의 통째 번역 버튼 기능이다. Lumiverse에는 그 버튼이 없고 번역 버튼은 원작의 문단 번역을 연다(항상 지금 고른 프리셋) |
 | b | 번역 공급자 Google/DeepL/DeepLX | **해당 없음(숨길 화면 없음)**: 원작 설정 화면에는 공급자 선택·키 칸이 없다. Marinara 채팅 설정(`translationProvider`·`deeplApiKey`)에 있던 것이라 Lumiverse에 대응 화면이 없다. 항상 AI(`translationProvider:'ai'`)이고 문단 번역만 동작한다(A6) |
 | g | `/swipes`·metadata PATCH·extra의 `translation` | **해당 없음(그 기능을 쓰는 버튼 없음)**: `/swipes`는 원작의 AI 아닌 공급자 경로(통째 번역)에서만 부르고 문단 번역은 그 앞에서 빠져나간다. `PATCH /metadata`는 "채팅 기본 번역 끄기/켜기" 확인 응답일 뿐(A5), `extra.translation`은 A20으로 만든다 |
-| d | 그룹 채팅 화자 이름·말투 자료 | **미해결(호스트 사실 부족)**: 원작은 메시지별 `characterId`와 채팅의 `characterIds`(최대 12)로 화자 이름·말투 자료(최대 6)를 만든다. 스핀들 문서(`lumiverse-spindle-types` 0.6.59)는 채팅의 그룹 구성원 목록과 메시지별 캐릭터 id를 알려 주지 않는다(`ChatDTO`는 `character_id` 하나, 메시지엔 `name`뿐). 추측하지 않고 지금처럼 채팅의 대표 캐릭터 하나로 둔다. 화면 요소가 아니라 문맥 속 이름 표기라 숨길 것이 없다 |
+| d | 그룹 채팅 화자 이름·말투 자료 | **되살림**(0.5.2 후속): Lumiverse 그룹 채팅은 구성원을 채팅 메타데이터(`group: true`, `character_ids`)에, 메시지마다 화자 이름(`name`)을 둔다. `chats.get`으로 구성원 id를 읽어 채팅의 `characterIds`(원작은 최대 12)로 주고, 각 응답은 이름이 구성원 캐릭터 이름과 **정확히 같을 때만** 그 id를 `characterId`로 준다(안 맞으면 대표 캐릭터, 이전과 같음). 원작의 `speakerNames`·말투 자료 경로가 그대로 쓴다. 단독 채팅은 그대로 |
 

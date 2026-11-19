@@ -8,7 +8,7 @@ import { classifyPeer, glossaryText, handshake, PEER_ID, type PeerState, planGlo
 import { buildPubFromTt, keptTagNames } from './adapter/pub';
 import { deleteBundle, saveBundle } from './bundles';
 import { type ConnectionHint, friendlyError, resolveConnection } from './connection';
-import { createEmuBridge, type EmuHost, eventMsg, eventRow, TT_KEY, WideReads } from './host-emu/backend-ops';
+import { createEmuBridge, type EmuHost, eventMsg, eventRow, resolveSpeakers, TT_KEY, WideReads } from './host-emu/backend-ops';
 import { planGlossaryMigration } from './adapter/migrate';
 import {
   type ConnectionSummary,
@@ -243,9 +243,9 @@ const wideReads = new WideReads();
 async function forwardMessage(uid: Uid, chatId: string, raw: Record<string, any>): Promise<void> {
   if (!raw?.id) return;
   wideReads.update(chatId, eventMsg(raw));
-  let character: string | null = null;
+  let character: Awaited<ReturnType<typeof resolveSpeakers>> | null = null;
   try {
-    character = (await spindle.chats.get(chatId, uid))?.character_id ?? null;
+    character = await resolveSpeakers(spindle as unknown as EmuHost, uid, chatId);
   } catch {
     // the speaker is a nicety
   }

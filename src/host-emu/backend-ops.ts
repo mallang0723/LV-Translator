@@ -154,9 +154,54 @@ export function eventMsg(raw: Record<string, any>): Msg {
   return { ...(raw as Msg), role: raw.role ?? (raw.is_user ? 'user' : 'assistant'), extra: rest, ...(metadata ? { metadata } : {}) };
 }
 
-export function eventRow(chatId: string, raw: Record<string, any>, characterId: string | null, kept?: ReadonlySet<string>): MessageRow {
-  return messageRow(chatId, eventMsg(raw), characterId, kept);
+export function eventRow(chatId: string, raw: Record<string, any>, characterId: string | null | Speakers, kept?: ReadonlySet<string>): MessageRow {
+  const m = eventMsg(raw);
+  return messageRow(chatId, m, characterId && typeof characterId === 'object' ? speakerOf(m, characterId) : characterId, kept);
 }
+
+export interface Speakers {
+  /** The chat's main character (what every reply used to be attributed to). */
+  main: string | null;
+  /** Group chat members (`chat.metadata.group` + `character_ids`), in order. A solo chat has just the main character. */
+  members: string[];
+  /** Exact member name -> character id. */
+  byName: Map<string, string>;
+}
+
+const speakerCache = new Map<string, { at: number; value: Speakers }>();
+
+/**
+ * Who can speak in a chat. A Lumiverse group chat keeps its members in chat metadata (`group: true`, `character_ids`); each message
+ * carries the speaker's display name (`name`). A message is attributed to the member whose name matches exactly; no other guessing.
+ */
+export async function resolveSpeakers(host: Pick<EmuHost, 'chats' | 'characters'>, uid: string | undefined, chatId: string): Promise<Speakers> {
+  const hit = speakerCache.get(chatId);
+  if (hit && Date.now() - hit.at < 10_000) return hit.value;
+  const chat = await host.chats.get(chatId, uid);
+  const main = chat?.character_id ?? null;
+  const meta = (chat?.metadata ?? {}) as Record<string, unknown>;
+  const group = meta.group === true || meta.group === 1;
+  const listed = group && Array.isArray(meta.character_ids) ? (meta.character_ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+  const members = [...new Set(listed.length ? listed : main ? [main] : [])];
+  const byName = new Map<string, string>();
+  if (listed.length) {
+    for (const id of members.slice(0, 12)) {
+      try {
+        const name = (await host.characters.get(id, uid))?.name;
+        if (typeof name === 'string' && name && !byName.has(name)) byName.set(name, id);
+      } catch {
+        // a member whose card cannot be read is simply not matched
+      }
+    }
+  }
+  const value = { main, members, byName };
+  speakerCache.set(chatId, { at: Date.now(), value });
+  if (speakerCache.size > 20) speakerCache.delete(speakerCache.keys().next().value as string);
+  return value;
+}
+
+/** The character id for one message: the member whose name equals the message's `name`, else the main character. */
+export const speakerOf = (m: { name?: string }, sp: Speakers): string | null => (m.name ? sp.byName.get(m.name) : undefined) ?? sp.main;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -169,9 +214,7 @@ export function createEmuBridge(d: EmuDeps) {
     return Array.isArray(rows) ? rows.slice(-n) : [];
   }
 
-  async function characterOf(chatId: string): Promise<string | null> {
-    return (await host.chats.get(chatId, uid))?.character_id ?? null;
-  }
+  const speakers = (chatId: string) => resolveSpeakers(host, uid, chatId);
 
   async function findMessage(chatId: string, messageId: string): Promise<Msg> {
     for (const n of FIND_TAILS) {
@@ -289,7 +332,7 @@ export function createEmuBridge(d: EmuDeps) {
         id: chat.id,
         name: chat.name ?? '',
         mode: 'roleplay',
-        characterIds: chat.character_id ? [chat.character_id] : [],
+        characterIds: (await speakers(chatId)).members,
         personaId,
         metadata: {
           ...meta,
@@ -307,11 +350,11 @@ export function createEmuBridge(d: EmuDeps) {
     /** `n` 0 and `auto`: the original's own background read asked for the whole chat; it gets the end of it (AUTO_TAIL). `n` 0 alone is the user's 모두 번역. */
     async listMessages(chatId: string, n: number, auto = false): Promise<MessageRow[]> {
       const want = n > 0 ? n : auto ? AUTO_TAIL : MAX_TAIL;
-      const character = await characterOf(chatId);
+      const sp = await speakers(chatId);
       const rows = await tail(chatId, want);
       await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
       const kept = await d.keptTags?.();
-      return rows.map((m) => messageRow(chatId, m, character, kept));
+      return rows.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     /** Messages on screen that the opening read did not reach: those among the end of the chat (OLD_TAILS), by id. Older ones are absent. */
     async messagesFor(chatId: string, ids: string[]): Promise<MessageRow[]> {
@@ -328,13 +371,13 @@ export function createEmuBridge(d: EmuDeps) {
         if (found.length >= want.size || rows.length < n) break;
       }
       await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
-      const [character, kept] = [await characterOf(chatId), await d.keptTags?.()];
-      return found.map((m) => messageRow(chatId, m, character, kept));
+      const [sp, kept] = [await speakers(chatId), await d.keptTags?.()];
+      return found.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     async getMessage(chatId: string, messageId: string): Promise<MessageRow> {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
-      return messageRow(chatId, row, await characterOf(chatId), await d.keptTags?.());
+      return messageRow(chatId, row, speakerOf(row, await speakers(chatId)), await d.keptTags?.());
     },
     async patchExtra(chatId: string, messageId: string, patch: Record<string, unknown>, swipeIndex?: number): Promise<void> {
       if (!(PT_KEY in patch)) return; // the original only ever writes its own record
