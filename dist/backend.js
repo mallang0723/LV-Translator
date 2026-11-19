@@ -2340,8 +2340,8 @@ var CONTRACT_NAME = "lv-tx";
 var CONTRACT_VERSION = 1;
 var PUB_PARAS_MAX = 400;
 var PROVIDES = ["pub-translation@1", "glossary@1"];
-function handshake(version) {
-  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...PROVIDES] };
+function handshake(version, provides = PROVIDES) {
+  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
 }
 function classifyPeer(value) {
   if (!value || typeof value !== "object")
@@ -2587,6 +2587,154 @@ ${text}`;
   }
 }
 
+// src/host-emu/backend-ops.ts
+var TT_KEY = "st_translator_tt";
+var PT_KEY = "paraTranslate";
+var MAX_TAIL = 1000;
+var ms = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0)
+    return 0;
+  return v < 1000000000000 ? v * 1000 : v;
+};
+function messageRow(chatId, m, characterId) {
+  const swipe = Number.isInteger(m.swipe_id) ? m.swipe_id : 0;
+  const { spindle_metadata: _drop, ...extra } = m.extra ?? {};
+  const tt = m.metadata?.[TT_KEY] ?? null;
+  const rec = tt && typeof tt === "object" ? tt[String(swipe)] : undefined;
+  if (rec)
+    extra[PT_KEY] = rec;
+  if (extra.hidden === true)
+    extra.hiddenFromUser = true;
+  const when = ms(m.swipe_dates?.[swipe]) || ms(m.send_date) || ms(m.created_at);
+  const role = m.role ?? (m.is_user ? "user" : "assistant");
+  return {
+    id: m.id,
+    chatId,
+    role,
+    content: String(m.content ?? ""),
+    characterId: role === "assistant" ? characterId : null,
+    createdAt: when ? new Date(when).toISOString() : "",
+    extra,
+    activeSwipeIndex: swipe
+  };
+}
+function createEmuBridge(d) {
+  const { host, uid } = d;
+  async function tail(chatId, n) {
+    const rows = await host.chat.getMessages(chatId, { tail: Math.min(Math.max(1, n), MAX_TAIL) });
+    return Array.isArray(rows) ? rows.slice(-n) : [];
+  }
+  async function characterOf(chatId) {
+    return (await host.chats.get(chatId, uid))?.character_id ?? null;
+  }
+  async function findMessage(chatId, messageId) {
+    for (const n of [60, MAX_TAIL]) {
+      const hit = (await tail(chatId, n)).find((m) => m.id === messageId);
+      if (hit)
+        return hit;
+    }
+    throw Object.assign(new Error("\uBA54\uC2DC\uC9C0\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."), { status: 404 });
+  }
+  async function writeTt(chatId, m, swipe, value) {
+    const prev = m.metadata?.[TT_KEY] && typeof m.metadata[TT_KEY] === "object" ? m.metadata[TT_KEY] : {};
+    const next = { ...prev };
+    if (value === null || value === undefined)
+      delete next[String(swipe)];
+    else
+      next[String(swipe)] = value;
+    const patch = d.metadataPatch ? { metadata_patch: { [TT_KEY]: next } } : { metadata: { ...m.metadata ?? {}, [TT_KEY]: next } };
+    await host.chat.updateMessage(chatId, m.id, patch);
+    m.metadata = { ...m.metadata ?? {}, [TT_KEY]: next };
+  }
+  return {
+    async getChat(chatId) {
+      const chat = await host.chats.get(chatId, uid);
+      if (!chat)
+        throw Object.assign(new Error("\uCC44\uD305\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."), { status: 404 });
+      const s = await d.chatSettings(chatId);
+      const meta = { ...chat.metadata ?? {} };
+      let personaId = typeof meta.persona_id === "string" ? meta.persona_id : null;
+      if (!personaId)
+        personaId = (await host.personas.getActive?.(uid).catch(() => null))?.id ?? null;
+      const attached = new Set;
+      try {
+        const c = chat.character_id ? await host.characters.get(chat.character_id, uid) : null;
+        for (const id of c?.world_book_ids ?? [])
+          attached.add(String(id));
+        const p = personaId ? await host.personas.get(personaId, uid) : null;
+        if (p?.attached_world_book_id)
+          attached.add(String(p.attached_world_book_id));
+      } catch {}
+      return {
+        id: chat.id,
+        name: chat.name ?? "",
+        mode: "roleplay",
+        characterIds: chat.character_id ? [chat.character_id] : [],
+        personaId,
+        metadata: {
+          ...meta,
+          translationProvider: "ai",
+          translationConnectionId: s.connectionId,
+          translationTargetLang: s.myLanguage,
+          autoTranslate: s.autoTranslate,
+          activeLorebookIds: [...new Set([...Array.isArray(meta.activeLorebookIds) ? meta.activeLorebookIds : [], ...attached])]
+        }
+      };
+    },
+    async listMessages(chatId, n) {
+      const character = await characterOf(chatId);
+      return (await tail(chatId, n || MAX_TAIL)).map((m) => messageRow(chatId, m, character));
+    },
+    async getMessage(chatId, messageId) {
+      return messageRow(chatId, await findMessage(chatId, messageId), await characterOf(chatId));
+    },
+    async patchExtra(chatId, messageId, patch, swipeIndex) {
+      if (!(PT_KEY in patch))
+        return;
+      const m = await findMessage(chatId, messageId);
+      const swipe = swipeIndex ?? (Number.isInteger(m.swipe_id) ? m.swipe_id : 0);
+      await writeTt(chatId, m, swipe, patch[PT_KEY]);
+    },
+    async updateContent(chatId, messageId, content) {
+      await host.chat.updateMessage(chatId, messageId, { content });
+    },
+    async generateRaw(req, requestId) {
+      const signal = requestId ? d.signalFor?.(requestId) : undefined;
+      const res = await host.generate.quiet({
+        type: "quiet",
+        messages: req.messages,
+        ...req.connectionId ? { connection_id: req.connectionId } : {},
+        parameters: { temperature: req.parameters?.temperature ?? 0.3, ...req.parameters?.maxTokens ? { max_tokens: req.parameters.maxTokens } : {} },
+        userId: uid,
+        signal
+      });
+      if (signal?.aborted)
+        return { aborted: true };
+      return { content: typeof res === "string" ? res : typeof res?.content === "string" ? res.content : "" };
+    },
+    async connections() {
+      return (await host.connections.list(uid)).map((c) => ({ id: c.id, name: c.name ?? c.id, model: c.model ?? "" }));
+    },
+    async character(id) {
+      const c = await host.characters.get(id, uid);
+      return { id, data: c ? { name: c.name, description: c.description, personality: c.personality, scenario: c.scenario, first_mes: c.first_mes, mes_example: c.mes_example } : {} };
+    },
+    async persona(id) {
+      const p = await host.personas.get(id, uid);
+      return { id, name: p?.name ?? "", description: p?.description ?? "", personality: "" };
+    },
+    async lorebooks() {
+      const rows = (await host.world_books.list({ limit: 200, userId: uid })).data;
+      return rows.map((b) => ({ id: b.id, name: b.name, enabled: true }));
+    },
+    async lorebookEntries(bookId) {
+      const rows = (await host.world_books.entries.list(bookId, { limit: 500, userId: uid })).data;
+      return rows.map((e) => ({ id: e.id, name: e.comment ?? "", keys: e.key ?? [], content: e.content ?? "", enabled: e.disabled !== true }));
+    }
+  };
+}
+
 // src/message-ui.ts
 function isTranslationHidden(hidden, mode) {
   return mode !== "paragraph" && hidden === true;
@@ -2636,6 +2784,8 @@ function clearTranslation(mt, key) {
 
 // src/backend.ts
 var STORE_PATH = "translator.json";
+var TT_CONFIG_PATH = "tt-config.json";
+var LEGACY_ENGINE = Reflect.get(globalThis, "__LV_TRANSLATOR_LEGACY__") === true;
 var MAX_ENTRIES_PER_MESSAGE = 12;
 var userKey = (uid) => uid ?? "";
 var stores = new Map;
@@ -2669,7 +2819,7 @@ async function sendState(uid) {
   const store = await loadStore(uid);
   send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
 }
-var SELF_VERSION = "0.4.0";
+var SELF_VERSION = "0.5.0";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -2691,7 +2841,7 @@ async function peerState() {
   return state;
 }
 try {
-  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION), { requires: [] });
+  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION, LEGACY_ENGINE ? PROVIDES : []), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
 }
@@ -3308,23 +3458,24 @@ async function refreshPub(uid, chatId, id, snapshot) {
     reprojecting.delete(key);
   }
 }
-spindle.registerMessageContentProcessor(async (ctx) => {
-  if (ctx.origin !== "render" || !ctx.messageId || !ctx.content)
-    return;
-  const chat = await cachedChat(ctx.chatId);
-  const message = chat.messages.get(ctx.messageId);
-  const mt = message ? readTranslations(message) : null;
-  if (!mt)
-    return;
-  const store = await loadStore(ctx.userId);
-  const settings = settingsFor(store, ctx.chatId);
-  if (isTranslationHidden(mt.hidden, settings.displayMode))
-    return;
-  const record = recordFor(mt, ctx.content);
-  if (!record || !record.parts.some((p) => p.trim()))
-    return;
-  return { content: renderMessage(ctx.content, record, settings, store.view) };
-});
+if (LEGACY_ENGINE)
+  spindle.registerMessageContentProcessor(async (ctx) => {
+    if (ctx.origin !== "render" || !ctx.messageId || !ctx.content)
+      return;
+    const chat = await cachedChat(ctx.chatId);
+    const message = chat.messages.get(ctx.messageId);
+    const mt = message ? readTranslations(message) : null;
+    if (!mt)
+      return;
+    const store = await loadStore(ctx.userId);
+    const settings = settingsFor(store, ctx.chatId);
+    if (isTranslationHidden(mt.hidden, settings.displayMode))
+      return;
+    const record = recordFor(mt, ctx.content);
+    if (!record || !record.parts.some((p) => p.trim()))
+      return;
+    return { content: renderMessage(ctx.content, record, settings, store.view) };
+  });
 spindle.on("GENERATION_STARTED", (payload) => {
   if (payload?.chatId)
     generationActive.set(payload.chatId, true);
@@ -3342,6 +3493,8 @@ spindle.on("GENERATION_STOPPED", (payload) => {
 spindle.on("GENERATION_ENDED", (payload, userId) => {
   if (payload?.chatId)
     generationActive.delete(payload.chatId);
+  if (!LEGACY_ENGINE)
+    return;
   const context = { chatId: payload?.chatId, messageId: payload?.messageId, generationId: payload?.generationId, generationType: payload?.generationType };
   if (payload?.generationType === "impersonate")
     return;
@@ -3394,6 +3547,56 @@ for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAG
     }
   });
 }
+var emuAborts = new Map;
+async function emu(uid, msg) {
+  const reply = (r) => send({ type: "emu_result", id: msg.id, ...r }, uid);
+  try {
+    if (msg.op === "storage.get") {
+      reply({ ok: true, data: await spindle.userStorage.getJson(TT_CONFIG_PATH, { fallback: null, userId: uid }) });
+      return;
+    }
+    if (msg.op === "storage.patch") {
+      const prev = await spindle.userStorage.getJson(TT_CONFIG_PATH, { fallback: null, userId: uid }) ?? {};
+      const next = { ...prev, ...msg.args[0] ?? {} };
+      await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
+      reply({ ok: true, data: next });
+      return;
+    }
+    const bridge = createEmuBridge({
+      host: spindle,
+      uid,
+      metadataPatch: hostCaps(spindle).metadataPatch,
+      signalFor: (id) => emuAborts.get(id)?.signal,
+      async chatSettings(chatId) {
+        const store = await loadStore(uid);
+        const settings = settingsFor(store, chatId);
+        let connectionId = "";
+        try {
+          connectionId = (await resolveConnection(spindle, uid, effectiveConnectionId(store, chatId) || undefined, hintFor(uid, chatId))).id ?? "";
+        } catch {}
+        return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate };
+      }
+    });
+    if (msg.op === "generateActive") {
+      reply({ ok: true, data: generationActive.has(String(msg.args[0])) });
+      return;
+    }
+    const fn = bridge[msg.op];
+    if (typeof fn !== "function") {
+      reply({ ok: false, error: `unknown op ${msg.op}`, status: 404 });
+      return;
+    }
+    if (msg.op === "generateRaw")
+      emuAborts.set(msg.id, new AbortController);
+    try {
+      reply({ ok: true, data: await fn(...msg.op === "generateRaw" ? [msg.args[0], msg.id] : msg.args) });
+    } finally {
+      emuAborts.delete(msg.id);
+    }
+  } catch (e) {
+    reply({ ok: false, error: friendlyError(errorText(e)), status: e?.status });
+  }
+}
 async function handle(msg, uid) {
   switch (msg.type) {
     case "hello":
@@ -3410,7 +3613,8 @@ async function handle(msg, uid) {
       }
       hints.set(userKey(uid), h);
       if (msg.open && msg.chatId) {
-        catchUpFor(uid).catchUpLatest(msg.chatId);
+        if (LEGACY_ENGINE)
+          catchUpFor(uid).catchUpLatest(msg.chatId);
         publishGlossary(uid, msg.chatId);
       }
       return;
@@ -3571,6 +3775,12 @@ async function handle(msg, uid) {
         const text = e instanceof ExcludeRuleError ? e.message : errorText(e);
         send({ type: "text_result", reqId: msg.reqId, ok: false, error: text }, uid);
       }
+      return;
+    case "emu":
+      await emu(uid, msg);
+      return;
+    case "emu_cancel":
+      emuAborts.get(msg.id)?.abort();
       return;
     case "notify":
       if (msg.kind === "info" || msg.kind === "warning" || msg.kind === "error")

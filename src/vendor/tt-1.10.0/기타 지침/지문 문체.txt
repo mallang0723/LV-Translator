@@ -1,0 +1,18 @@
+ABSOLUTE WORD BAN: never write 계집 or 계집애 anywhere in the translation, in any scene, tone or viewpoint, even when the source has no word for the woman at all. Do not turn a sentence about her into a label for her: "She didn't have an ounce of fear in her" = 서연에게는 두려움이라곤 눈곱만큼도 없었다 (never ~없는 계집이었다). Only when the source itself uses a crude word for a woman (girl, wench, broad, bitch) choose 여자, 아가씨 as the tone requires. Check the finished translation once for 계집 and rewrite any sentence that has it.
+
+Narration style (all scenes): write the Korean narration as original Korean web-fiction prose in close third person, not as a translated novel.
+- Free indirect style: let the viewpoint character's own judgment and tone run through the narration with endings such as ~할 테다, ~터였다, ~나 다름없었다, ~일 리 없었다, ~기 짝이 없었다, ~였으니까. Keep the source's meaning, but phrase each judgment the way that character would think it.
+- Translate sentence by sentence but not word by word: merge or split English sentences when Korean rhythm needs it, carry clauses with connective endings (~더니, ~자, ~며, ~채, ~는데), and turn English idioms and similes into natural Korean expressions.
+- Avoid translationese: 개인적인 모욕, ~한 양, ~에 대해, ~것이다, ~하는 중이었다 chains, stacked ~의, and literal "그는/그녀는". Use names, 제/제 몸 for reflexives, or omission.
+- Keep blank lines, paragraph breaks and scene dividers (***) exactly where the source has them.
+- Keep the source logic exact even while paraphrasing: contrast and irony, cause and effect, time frame, and who owns or does what. "Ten years of X, and Y happened" means Y happened now despite X, not repeatedly during those years. Write possessives as the right person's name when 제/자기 could point to the wrong one (his office = 도하의 사무실, not the company's). Do not drop images that carry meaning, such as a comparison to a startled deer.
+- Numbers and units stay exact: twenty degrees colder = 20도 더 차가운 (not 스무 배), centuries = 수백 년, millennia = 수천 년. Physical descriptions stay exact: slit-pupiled = 세로 동공의 (not 가늘게 좁아진), purple bruise = 보랏빛 멍.
+- Write spelled-out English numbers as Arabic numerals with Korean units: thirty-two degrees = 32도 (never 서른두 도), five kilos = 5킬로그램, two miles = 2마일, twenty minutes = 20분. Keep native Korean words only for small everyday counts in speech-like narration (한 번, 두 사람, 세 걸음).
+- Do not soften or guess what the source states: "she had jumped off" is 뛰어내렸다, not 떨어졌다; "So that was whose car" means realizing whose car it was, not guessing (~였던 모양이었다).
+- Add nothing the source does not say: no extra modifiers or actions (덜덜 떨리는 손, 능숙한), no invented positions, names or ship names. Paraphrase the wording, never the facts.
+- Distances and sizes stay at the source scale: a fraction of an inch = 거의 닿을 듯한 거리 / 몇 밀리미터, an inch = 2~3센티미터; never turn them into 한 뼘 or other folk units.
+- Terms: keep world terms fixed (consigliere = 콘실리에레, gangplank = 트랩) and write a character's fixed traits the same way every time (slate/storm/blue-gray eyes = 청회색 눈). A chill is 냉기 or 한기, never 온기.
+- 제/자기 always means the subject of its own clause. When "his/her" belongs to someone other than that subject, write the owner's name: "the girl who borrowed his car" = 도하의 차를 빌려 쓰던 서연 (never 제 차).
+- Terms: throat = 목/목울대 (멱살 is a shirt collar you grab, never something you bite); the base of her throat = 목 아래 오목한 곳 (front of the neck, never 목덜미, which is the back); nape = 목덜미; amusement = 재미/흥미/웃음기 (never 유흥 or 조소); effortless(ly) = 아무렇지 않게/힘들이지 않고 (never an invented image such as 숨결 하나 없이, 손짓 하나 없이); faint = 희미한.
+- When two people are in one sentence, do not use 저/제 for both of them; name one of them.
+- 계집/계집애 are banned (see the word ban at the top).

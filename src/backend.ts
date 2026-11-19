@@ -7,7 +7,7 @@ import { BUILTIN_IDS, presetSummaries, promptPresets } from './presets';
 import { CATCH_UP_TAIL, hostCaps, JOB_TAIL } from './adapter/host';
 import { syncSourceFromEdits, type UpstreamRecord } from './adapter/sync-source';
 import { createCatchUp } from './vendor/tt-1.8.0/catch-up';
-import { buildPub, classifyPeer, handshake, glossaryText, PEER_ID, type PeerState, planGlossary, projectPub } from './adapter/contract';
+import { buildPub, classifyPeer, handshake, PROVIDES, glossaryText, PEER_ID, type PeerState, planGlossary, projectPub } from './adapter/contract';
 import { hashText } from './vendor/tt-1.8.0/helpers';
 import { cleanEdit, editablePairs, recordFromMap } from './translate/edit';
 import { personaSectionFor, LIVE_PROMPT_PRESET_IDS } from './translate/prompt';
@@ -36,14 +36,18 @@ import {
   type TranslationRecord,
 } from './shared';
 import { effectiveGuides } from './bundles';
-import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
+import { type ConnectionHint, friendlyError, quietComplete, resolveConnection, SOURCE_LABELS } from './connection';
 import { renderMessage } from './display/render';
+import { createEmuBridge, type EmuHost } from './host-emu/backend-ops';
 import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, skipFresh } from './message-ui';
 import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
 
 const STORE_PATH = 'translator.json';
+const TT_CONFIG_PATH = 'tt-config.json';
+/** 0.4.0 server-side translation and display. Off: the original Translation Tools 1.10.0 screens do both (src/host-emu). */
+const LEGACY_ENGINE = Reflect.get(globalThis, '__LV_TRANSLATOR_LEGACY__') === true;
 const MAX_ENTRIES_PER_MESSAGE = 12;
 
 type Uid = string | undefined;
@@ -103,7 +107,7 @@ async function sendState(uid: Uid): Promise<void> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.4.0';
+const SELF_VERSION = '0.5.0';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -131,7 +135,8 @@ try {
   // Every real host has the pool; the guard only keeps older test doubles quiet.
   // `requires: []`: any extension may read it. Without a policy the host demands that the reader holds every
   // permission this extension has (shared-rpc-pool.service.ts assertRequesterCanReadEndpoint).
-  spindle.rpcPool?.sync('contract', handshake(SELF_VERSION), { requires: [] });
+  // 0.5.0: the translation records are the original's now, so nothing is provided to the memory extension yet.
+  spindle.rpcPool?.sync('contract', handshake(SELF_VERSION, LEGACY_ENGINE ? PROVIDES : []), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
 }
@@ -793,9 +798,11 @@ async function refreshPub(uid: Uid, chatId: string, id: string, snapshot: ChatSn
   }
 }
 
-// ---- display transform ----
+// ---- display transform (0.4.0 engine only) ----
 
-spindle.registerMessageContentProcessor(async (ctx) => {
+// 0.5.0: the original Translation Tools screens draw the translation themselves (src/host-emu); this display transform
+// would show the same message twice, so it is only registered while the legacy engine is switched on.
+if (LEGACY_ENGINE) spindle.registerMessageContentProcessor(async (ctx) => {
   if (ctx.origin !== 'render' || !ctx.messageId || !ctx.content) return;
   const chat = await cachedChat(ctx.chatId);
   const message = chat.messages.get(ctx.messageId);
@@ -828,6 +835,9 @@ spindle.on('GENERATION_STOPPED' as never, ((payload: { chatId?: string; content?
 
 spindle.on('GENERATION_ENDED', (payload, userId) => {
   if (payload?.chatId) generationActive.delete(payload.chatId);
+  // 0.5.0: the original's own auto translation runs in the page (the frontend nudges it); a server translation
+  // here would call the model twice and write records nobody displays.
+  if (!LEGACY_ENGINE) return;
   const context = { chatId: payload?.chatId, messageId: payload?.messageId, generationId: payload?.generationId, generationType: payload?.generationType };
   // Impersonation produces user text (or an unsaved draft), not an AI reply.
   if (payload?.generationType === 'impersonate') return;
@@ -885,6 +895,62 @@ for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAG
   }) as never);
 }
 
+// ---- host stand-in for the original screens ----
+
+const emuAborts = new Map<string, AbortController>();
+
+async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<void> {
+  const reply = (r: { ok: boolean; data?: unknown; error?: string; status?: number }) => send({ type: 'emu_result', id: msg.id, ...r }, uid);
+  try {
+    if (msg.op === 'storage.get') {
+      reply({ ok: true, data: await spindle.userStorage.getJson<unknown>(TT_CONFIG_PATH, { fallback: null, userId: uid }) });
+      return;
+    }
+    if (msg.op === 'storage.patch') {
+      const prev = ((await spindle.userStorage.getJson<unknown>(TT_CONFIG_PATH, { fallback: null, userId: uid })) ?? {}) as Record<string, unknown>;
+      const next = { ...prev, ...((msg.args[0] ?? {}) as Record<string, unknown>) };
+      await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
+      reply({ ok: true, data: next });
+      return;
+    }
+    const bridge = createEmuBridge({
+      host: spindle as unknown as EmuHost,
+      uid,
+      metadataPatch: hostCaps(spindle).metadataPatch,
+      signalFor: (id) => emuAborts.get(id)?.signal,
+      async chatSettings(chatId) {
+        const store = await loadStore(uid);
+        const settings = settingsFor(store, chatId);
+        let connectionId = '';
+        try {
+          connectionId = (await resolveConnection(spindle as never, uid, effectiveConnectionId(store, chatId) || undefined, hintFor(uid, chatId))).id ?? '';
+        } catch {
+          // no connection at all: the original then shows its own "번역 연결을 지정해 주세요" message
+        }
+        return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate };
+      },
+    });
+    if (msg.op === 'generateActive') {
+      // The original asks before translating a missed reply: never translate a half-written one.
+      reply({ ok: true, data: generationActive.has(String(msg.args[0])) });
+      return;
+    }
+    const fn = (bridge as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[msg.op];
+    if (typeof fn !== 'function') {
+      reply({ ok: false, error: `unknown op ${msg.op}`, status: 404 });
+      return;
+    }
+    if (msg.op === 'generateRaw') emuAborts.set(msg.id, new AbortController());
+    try {
+      reply({ ok: true, data: await fn(...(msg.op === 'generateRaw' ? [msg.args[0], msg.id] : msg.args)) });
+    } finally {
+      emuAborts.delete(msg.id);
+    }
+  } catch (e) {
+    reply({ ok: false, error: friendlyError(errorText(e)), status: (e as { status?: number })?.status });
+  }
+}
+
 // ---- frontend messages ----
 
 async function handle(msg: ToBackend, uid: Uid): Promise<void> {
@@ -901,7 +967,7 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
       }
       hints.set(userKey(uid), h);
       if (msg.open && msg.chatId) {
-        catchUpFor(uid).catchUpLatest(msg.chatId);
+        if (LEGACY_ENGINE) catchUpFor(uid).catchUpLatest(msg.chatId);
         void publishGlossary(uid, msg.chatId);
       }
       return;
@@ -1048,6 +1114,12 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
         const text = e instanceof ExcludeRuleError ? e.message : errorText(e);
         send({ type: 'text_result', reqId: msg.reqId, ok: false, error: text }, uid);
       }
+      return;
+    case 'emu':
+      await emu(uid, msg);
+      return;
+    case 'emu_cancel':
+      emuAborts.get(msg.id)?.abort();
       return;
     case 'notify':
       if (msg.kind === 'info' || msg.kind === 'warning' || msg.kind === 'error') spindle.toast[msg.kind](String(msg.text).slice(0, 500), { userId: uid });

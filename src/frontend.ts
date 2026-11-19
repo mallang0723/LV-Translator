@@ -5,18 +5,9 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import {
   type ChatSettings,
-  VIEW_WINDOW,
   type ConnectionSummary,
   DEFAULT_SETTINGS,
-  DEFAULT_VIEW,
-  type DisplayMode,
-  FONT_MAX,
-  FONT_MIN,
-  normalizeView,
-  type ParagraphOrder,
-  type ViewSettings,
   INHERIT_PRESET_ID,
-  type MessageView,
   type PresetSummary,
   settingsFor,
   type Store,
@@ -29,12 +20,11 @@ import { ExcludeRuleError, parseTags } from './translate/protect';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
 import { NARRATION_STYLE_EXAMPLE } from './vendor/tt-1.8.0/example-narration-style';
-import { showsToggle, targetLabel, wantsBar } from './message-ui';
-import { type DecoratorSpec, mountToolbars } from './toolbar';
-import { ViewRequests, visibleMessageIds } from './view-requests';
+import type { HostBridge } from './host-emu/api';
+import { createSettingsHost, startOriginal } from './host-emu/boot';
+import type { MarinaraStorage } from './host-emu/runtime';
 
-const CSS = `
-.stt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; font-size: 0.78em; }
+const PANEL_CSS = `
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
   color: var(--lumiverse-text, inherit); background: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 10%, transparent));
   border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); }
@@ -45,45 +35,8 @@ const CSS = `
 .stt-note { color: var(--lumiverse-text-muted, inherit); opacity: 0.85; }
 .stt-note.stt-warn { color: var(--lumiverse-warning, #c90); opacity: 1; }
 .stt-note.stt-err { color: var(--lumiverse-danger, #d55); opacity: 1; }
-hr.stt-separator { border: 0; border-top: 1px dashed var(--lumiverse-border, rgba(127,127,127,0.4)); margin: 0.8em 0; }
-details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text-muted, inherit); }
 /* Paragraph Reader view (message content) */
-.stt-pr { --stt-accent: var(--lumiverse-primary, currentColor); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.stt-pr-note { font-size: 12px; color: var(--lumiverse-text-muted, inherit); margin-bottom: 12px; white-space: pre-wrap; }
-.stt-pr-pair { margin: 0 0 18px; }
-.stt-pr-pair:last-child { margin-bottom: 0; }
-.stt-pr-label { display: block; margin-bottom: 4px; font-size: 10px; letter-spacing: .06em; color: var(--lumiverse-text-muted, inherit); font-weight: 700; }
-.stt-pr-src { color: var(--lumiverse-text-muted, inherit); font-size: var(--stt-src-size, 16px); line-height: 1.75; }
-.stt-pr-tgt { font-size: var(--stt-tgt-size, 18px); line-height: 1.75; border-left: 3px solid var(--stt-accent); padding-left: 12px; margin-top: 8px; }
-.stt-pr-src > :first-child, .stt-pr-tgt > :first-child { margin-top: 0; }
-.stt-pr-src p, .stt-pr-tgt p { margin: 0 0 .4em; }
-.stt-pr-same { font-size: var(--stt-src-size, 16px); }
-.stt-pr-pending { color: var(--lumiverse-text-muted, inherit); font-style: italic; }
-.stt-pr-tap .stt-pr-tgt { margin-top: 0; }
-.stt-pr-tfirst .stt-pr-tgt { margin-top: 0; margin-bottom: 8px; }
-.stt-pr-tfirst .stt-pr-src { margin-top: 8px; }
-.stt-pr-orig { margin-top: 8px; color: var(--lumiverse-text-muted, inherit); font-size: max(13px, calc(var(--stt-src-size, 16px) * 0.85)); line-height: 1.75; }
-.stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
-.stt-pr-orig[open] { border-left: 4px solid var(--stt-accent); padding: 0.4rem 0.6rem; border-radius: 2px; background-color: color-mix(in srgb, currentColor 7%, var(--lumiverse-bg, transparent)); }
-.stt-pr-orig[open] > summary { color: var(--stt-accent); margin-bottom: 4px; }
-.stt-pr-orig > summary + * { margin-top: 0; }
-.stt-pr-orig p { margin: 0 0 .4em; }
-.stt-pr-orig p:last-child { margin-bottom: 0; }
 /* Message action row buttons (bubble pill and minimal row; the host's own classes are reused where possible) */
-.stt-tb { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 0; cursor: pointer; }
-.stt-tb svg { display: block; pointer-events: none; flex: none; }
-.stt-tb[data-stt-own] { width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: var(--lumiverse-text-dim, inherit); }
-.stt-tb[data-stt-own]:hover { background: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 12%, transparent)); color: var(--lumiverse-text, inherit); }
-.stt-tb.stt-tb-del:hover { color: var(--lumiverse-danger, #ef4444); background: var(--lumiverse-danger-015, color-mix(in srgb, var(--lumiverse-danger, currentColor) 15%, transparent)); }
-.stt-tb.stt-tb-busy { color: var(--lumiverse-primary, currentColor); animation: stt-pulse 1.1s ease-in-out infinite; }
-@keyframes stt-pulse { 50% { opacity: 0.45; } }
-@media (prefers-reduced-motion: reduce) { .stt-tb.stt-tb-busy { animation: none; } }
-.stt-font-row { display: flex; align-items: center; gap: 7px; }
-.stt-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
-.stt-font-label > span { flex: none; min-width: 2.2em; }
-.stt-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--lumiverse-primary, currentColor); }
-.stt-font-row .stt-btn { width: 34px; min-width: 34px; padding: 0; font-size: 18px; }
-.stt-font-row output { min-width: 3em; text-align: center; font-variant-numeric: tabular-nums; }
 .stt-panel { display: flex; flex-direction: column; gap: 12px; padding: 10px; color: var(--lumiverse-text, inherit); font-size: 0.92em; }
 .stt-section { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); border-radius: var(--lumiverse-radius, 8px); padding: 9px; }
 .stt-section > h3 { margin: 0; font-size: 1em; }
@@ -101,10 +54,6 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-sticky { position: sticky; bottom: 0; background: color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
-.stt-edit-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
-.stt-edit-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.25)); }
-.stt-edit-src { white-space: pre-wrap; font-size: 0.85em; opacity: 0.8; }
-.stt-modal .stt-edit-row textarea { min-height: 64px; }
 .stt-badge { font-size: 0.75em; opacity: 0.75; }
 .stt-panel, .stt-section, .stt-field, .stt-modal { min-width: 0; overflow-wrap: anywhere; }
 .stt-row > .stt-field { flex: 1 1 130px; }
@@ -118,9 +67,7 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
 .stt-unsaved-note[hidden] { display: none; }
 /* Phones and touch screens: readable text (15px+) and tap targets of 44px+. */
 @media (max-width: 768px), (pointer: coarse) {
-  .stt-bar, .stt-pr-note, .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
-  .stt-pr-label, .stt-pr-orig > summary { font-size: 15px !important; }
-  .stt-pr-orig { font-size: max(15px, calc(var(--stt-src-size, 16px) * 0.85)); }
+  .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
   .stt-panel textarea.stt-prompt, .stt-modal textarea { font-size: 15px; }
   .stt-field > span, .stt-section > h3 { font-size: 15px; }
   .stt-btn { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
@@ -128,10 +75,6 @@ details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text
   .stt-check { min-height: 44px; }
   .stt-bundle-preview > summary { min-height: 44px; display: flex; align-items: center; }
   .stt-check input { width: 22px; height: 22px; flex: none; }
-  .stt-font-label input[type=range] { min-height: 44px; }
-  .stt-pr-orig > summary, details.stt-translation > summary { min-height: 44px; display: flex; align-items: center; }
-  .stt-font-row .stt-btn { width: 44px; min-width: 44px; }
-  /* .stt-tb is deliberately not enlarged: it follows the host's own action row buttons. */
 }
 `;
 
@@ -164,25 +107,12 @@ const parseTagsSafe = (raw: string): string[] => {
   }
 };
 
-const DISPLAY_LABELS: Record<DisplayMode, string> = {
-  below: '원문 아래에 번역문',
-  above: '번역문 먼저 (번역문 아래에 원문)',
-  only: '번역문만 (원문 숨김)',
-  collapsed: '원문 + 접힌 번역문',
-  'collapsed-source': '번역문 + 접힌 원문',
-  paragraph: '문단 대조 (Paragraph Reader)',
-};
-
 export function setup(ctx: SpindleFrontendContext) {
   let store: Store | null = null;
   let presets: PresetSummary[] = [];
   let connections: ConnectionSummary[] = [];
   let link: 'none' | 'ok' | 'incompatible' = 'none';
   let chatId: string | null = null;
-  const views = new Map<string, MessageView>();
-  const bars = new Map<string, HTMLElement>();
-  const viewRequests = new ViewRequests();
-  const plainMessages = new Set<string>();
   const pending = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void }>();
   let reqCounter = 0;
   let lastDraftTranslation: string | null = null;
@@ -192,7 +122,7 @@ export function setup(ctx: SpindleFrontendContext) {
   const toBackend = (msg: ToBackend) => ctx.sendToBackend(msg);
   const notify = (kind: 'info' | 'warning' | 'error', text: string) => toBackend({ type: 'notify', kind, text });
   const current = (): ChatSettings => (store ? settingsFor(store, chatId) : DEFAULT_SETTINGS);
-  const removeStyle = ctx.dom.addStyle(CSS);
+  const removeStyle = ctx.dom.addStyle(PANEL_CSS);
 
   function chatIdFromLocation(): string | null {
     const m = /^\/chat\/([^/?#]+)/.exec(location.pathname);
@@ -229,206 +159,54 @@ export function setup(ctx: SpindleFrontendContext) {
     });
   }
 
-  // ---- per-message controls ----
+  // ---- the original Translation Tools 1.10.0 screens (src/host-emu) ----
+  // The message view, the bar, the 대조·수정 window, the per-paragraph 다시 번역, the scans and the settings screen are the
+  // original's own code, run whole. Here only the entrance is provided: the host calls it asks for go to the backend.
 
-  const act = (id: string, type: 'translate' | 'continue', force = false) => () => {
-    const forChat = chatId;
-    if (!forChat) return;
-    const run = async () => {
-      await sendHint(forChat);
-      if (type === 'translate') toBackend({ type, chatId: forChat, messageId: id, force });
-      else toBackend({ type, chatId: forChat, messageId: id });
-    };
-    if (!dirty) {
-      void run();
-      return;
-    }
-    // Translation uses the saved settings: do not let unsaved edits be silently ignored.
-    void ctx.ui
-      .showConfirm({ title: '저장하지 않은 변경이 있어요', message: '번역 설정을 바꾼 뒤 저장하지 않았습니다. 저장하지 않은 내용은 번역에 반영되지 않습니다.\n지금 저장하고 번역할까요?', variant: 'warning', confirmLabel: '저장하고 번역' })
-      .then(({ confirmed }) => {
-        if (!confirmed) return;
-        save(false);
-        return run();
-      });
-  };
-
-  const barWanted = (v: MessageView) => wantsBar(v, current().displayMode);
-
-  /**
-   * Slim row under a message (including collapsed-source) for what the toolbar does not cover:
-   * progress, trouble, continue, and (outside the paragraph view) showing or hiding the translation.
-   */
-  function renderBar(bar: HTMLElement, view: MessageView): void {
-    const id = view.messageId;
-    const items: Children = [];
-    if (view.busy) {
-      items.push(el('span', { class: 'stt-note' }, [view.progress ? `번역 중… ${view.progress.done}/${view.progress.total}` : '번역 중…']));
-      items.push(button('취소', () => chatId && toBackend({ type: 'cancel', chatId, messageId: id }), 'stt-danger'));
-    } else {
-      if (view.status === 'error') items.push(el('span', { class: 'stt-note stt-err', title: friendlyError(view.error ?? '') }, [`번역 오류: ${friendlyError(view.error ?? '').slice(0, 260)}`]));
-      if (view.status === 'partial') {
-        const progress = view.progress && view.progress.done < view.progress.total ? ` (${view.progress.done}/${view.progress.total})` : '';
-        items.push(el('span', { class: 'stt-note stt-warn' }, [`번역이 중간에 끊겼습니다${progress}`]));
-      }
-      if (view.hasMore) items.push(button('이어서 번역', act(id, 'continue'), 'stt-primary', '끊긴 곳부터 이어서 번역합니다'));
-      if (showsToggle(view, current().displayMode)) {
-        items.push(button(view.hidden ? '번역 보기' : '번역 숨기기', () => chatId && toBackend({ type: 'set_hidden', chatId, messageId: id, hidden: !view.hidden })));
-      }
-    }
-    bar.replaceChildren(...items.filter((c): c is Node | string => !!c));
-  }
-
-  // ---- panel: paragraph view controls ----
-
-  let fontStatusText = '모든 채팅에 적용 · 자동 저장';
-  let viewSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let localView: ViewSettings = { ...DEFAULT_VIEW };
-  let removeFontStyle: (() => void) | null = null;
-  let fontHost: HTMLElement | null = null;
-
-  function applyFontStyle(): void {
-    removeFontStyle?.();
-    removeFontStyle = ctx.dom.addStyle(`:root { --stt-src-size: ${localView.sourceFontSize}px; --stt-tgt-size: ${localView.translationFontSize}px; }`);
-  }
-
-  function changeFonts(values: Partial<ViewSettings>): void {
-    localView = normalizeView({ ...localView, ...values });
-    applyFontStyle();
-    fontStatusText = '크기 저장 중…';
-    renderFonts();
-    if (viewSaveTimer) clearTimeout(viewSaveTimer);
-    viewSaveTimer = setTimeout(() => {
-      viewSaveTimer = null;
-      toBackend({ type: 'save_view', view: localView });
-      fontStatusText = '크기를 저장했습니다.';
-      renderFonts();
-    }, 300);
-  }
-
-  /** Font sizes for the paragraph view. They apply and save at once (not part of the save button). */
-  function renderFonts(): void {
-    if (!fontHost) return;
-    const rows = ([['sourceFontSize', '원문'], ['translationFontSize', '번역']] as const).map(([key, label]) => {
-      const value = localView[key];
-      const range = el('input', { type: 'range', min: FONT_MIN, max: FONT_MAX, step: 1, value, 'aria-label': `${label} 글자 크기` });
-      range.addEventListener('change', () => changeFonts({ [key]: Number(range.value) }));
-      const minus = button('−', () => changeFonts({ [key]: value - 1 }), '', `${label} 글자 크기 줄이기`);
-      const plus = button('+', () => changeFonts({ [key]: value + 1 }), '', `${label} 글자 크기 키우기`);
-      minus.disabled = value <= FONT_MIN;
-      plus.disabled = value >= FONT_MAX;
-      return el('div', { class: 'stt-font-row' }, [el('label', { class: 'stt-font-label' }, [el('span', {}, [label]), range]), minus, el('output', {}, [`${value}px`]), plus]);
+  const rpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  let rpcCounter = 0;
+  const call = <T,>(op: string, args: unknown[], signal?: AbortSignal): Promise<T> => {
+    const id = `e${++rpcCounter}`;
+    return new Promise<T>((resolve, reject) => {
+      rpc.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      toBackend({ type: 'emu', id, op, args });
+      signal?.addEventListener('abort', () => {
+        rpc.delete(id);
+        toBackend({ type: 'emu_cancel', id });
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      }, { once: true });
     });
-    fontHost.replaceChildren(
-      el('span', {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]),
-      ...rows,
-      el('div', { class: 'stt-row' }, [
-        button('기본 크기', () => changeFonts({ sourceFontSize: DEFAULT_VIEW.sourceFontSize, translationFontSize: DEFAULT_VIEW.translationFontSize })),
-        el('span', { class: 'stt-note' }, [fontStatusText]),
-      ]),
-    );
-  }
-
-  // ---- decorating messages ----
-
-  /** Translate and delete-translation buttons in the host's action row. */
-  const registerDecorator = (ctx.ui as unknown as { registerDomDecorator?: (spec: DecoratorSpec) => unknown }).registerDomDecorator;
-  const toolbars = mountToolbars({
-    registerDecorator: typeof registerDecorator === 'function' ? (spec) => registerDecorator.call(ctx.ui, spec) : null,
-    listMessageElements: () => ctx.dom.listMessageElements(),
-    getView: (id) => views.get(id),
-    canTranslate: (id) => plainMessages.has(id),
-    onTranslate: (id, force) => {
-      act(id, 'translate', force)();
-    },
-    onCancel: (id) => {
-      if (chatId) toBackend({ type: 'cancel', chatId, messageId: id });
-    },
-    onEdit: (id) => {
-      if (chatId) toBackend({ type: 'edit_open', chatId, messageId: id });
-    },
-    onDelete: (id) => {
-      const forChat = chatId;
-      const view = views.get(id);
-      if (!forChat || !view) return;
-      void ctx.ui
-        .showConfirm({ title: '번역 삭제', message: `${targetLabel(view)} 메시지에서 지금 보이는 스와이프의 번역만 지울까요?\n다른 스와이프의 번역과 메시지 원문은 그대로 남습니다.`, variant: 'danger', confirmLabel: '번역 삭제' })
-        .then(({ confirmed }) => {
-          if (confirmed) toBackend({ type: 'delete_translation', chatId: forChat, messageId: id, sourceKey: view.sourceKey });
-        });
-    },
-  });
-
-  function decorate(): void {
-    if (!chatId) return;
-    for (const view of views.values()) {
-      let bar = bars.get(view.messageId);
-      if (!barWanted(view)) {
-        if (bar) {
-          ctx.dom.uninject(bar);
-          bars.delete(view.messageId);
-        }
-        continue;
-      }
-      if (!bar) {
-        const bubble = ctx.dom.findMessageElement(view.messageId);
-        if (!bubble) continue;
-        const slot = bubble.querySelector('[data-spindle-mount="message_footer"]') ?? bubble;
-        // inject() returns the host's wrapper element; style and fill that.
-        bar = ctx.dom.inject(slot, '<div></div>', 'beforeend') as HTMLElement;
-        bar.classList.add('stt-bar');
-        bars.set(view.messageId, bar);
-      }
-      renderBar(bar, view);
-    }
-    toolbars.refresh();
-  }
-
-  function requestVisibleViews(): void {
-    if (!chatId) return;
-    const ids = visibleMessageIds(ctx.dom.listMessageElements(), window.innerHeight);
-    for (const messageIds of viewRequests.take(ids)) {
-      toBackend({ type: 'view_messages', chatId, messageIds });
-    }
-  }
-
-  let decorateTimer: ReturnType<typeof setTimeout> | null = null;
-  const queueDecorate = () => {
-    if (decorateTimer) return;
-    decorateTimer = setTimeout(() => {
-      decorateTimer = null;
-      requestVisibleViews();
-      // Our own controls mutate the DOM too; only decorate missing mounts.
-      if ([...views.values()].some((view) => barWanted(view)
-        && !bars.has(view.messageId) && ctx.dom.findMessageElement(view.messageId))) {
-        decorate();
-      }
-    }, 150);
   };
-  // Rendering and scrolling older history request only the newly visible rows.
-  const observer = new MutationObserver(() => {
-    if (chatId) queueDecorate();
+  const bridge: HostBridge = {
+    getChat: (c) => call('getChat', [c]),
+    listMessages: (c, n) => call('listMessages', [c, n]),
+    getMessage: (c, m) => call('getMessage', [c, m]),
+    updateContent: (c, m, content) => call('updateContent', [c, m, content]),
+    patchExtra: (c, m, patch, swipe) => call('patchExtra', [c, m, patch, swipe]),
+    generateRaw: (req, signal) => call('generateRaw', [req], signal),
+    generateActive: (c) => call('generateActive', [c]),
+    connections: () => call('connections', []),
+    character: (id) => call('character', [id]),
+    persona: (id) => call('persona', [id]),
+    lorebooks: () => call('lorebooks', []),
+    lorebookEntries: (b) => call('lorebookEntries', [b]),
+  };
+  const emuStorage: MarinaraStorage = {
+    get: () => call('storage.get', []),
+    patch: (p) => call('storage.patch', [p]),
+  };
+  const original = startOriginal({
+    bridge,
+    storage: emuStorage,
+    activeChatId: () => chatId,
+    addStyle: (css) => ctx.dom.addStyle(css),
   });
-  observer.observe(document.body, { childList: true, subtree: true });
-  document.addEventListener('scroll', queueDecorate, true);
-  window.addEventListener('resize', queueDecorate);
 
   function resetChat(next: string | null): void {
-    for (const bar of bars.values()) ctx.dom.uninject(bar);
-    bars.clear();
-    views.clear();
-    plainMessages.clear();
-    viewRequests.reset();
     chatId = next;
     renderDraftButton();
     renderPanel();
-    if (next) {
-      void sendHint(next, true);
-      const messageIds = ctx.dom.listMessageElements().slice(-VIEW_WINDOW).map(({ messageId }) => messageId);
-      viewRequests.take(messageIds);
-      toBackend({ type: 'chat', chatId: next, messageIds: messageIds.length ? messageIds : undefined });
-      queueDecorate();
-    }
+    if (next) void sendHint(next, true);
   }
 
   // Back on screen: a reply that finished while the page was away may still be untranslated.
@@ -445,34 +223,12 @@ export function setup(ctx: SpindleFrontendContext) {
     if (next !== chatId) resetChat(next);
   }, 700);
 
-  const refreshViews = () => requestVisibleViews();
-  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  const queueRefresh = () => {
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(refreshViews, 400);
-  };
-  const offEvents = ['MESSAGE_SENT', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAGE_DELETED', 'GENERATION_ENDED'].map((name) =>
+  // The original translates a missed reply when the page comes back into view (its `catchUpLatest`). A finished
+  // generation is the same situation, so the page-visible event is the original's own trigger, sent again.
+  const offEvents = ['GENERATION_ENDED'].map((name) =>
     ctx.events.on(name, (payload) => {
       const p = payload as { chatId?: string } | null;
-      if (!p?.chatId || p.chatId === chatId) {
-        // An offscreen row may already have been requested before it changed.
-        const changed = payload as { messageId?: string; message?: { id?: string } };
-        const changedId = changed?.messageId ?? changed?.message?.id;
-        if (changedId) viewRequests.invalidate([changedId]);
-        else viewRequests.reset();
-        if (name === 'MESSAGE_DELETED') {
-          const deleted = payload as { messageId?: string; message?: { id?: string } };
-          const id = deleted?.messageId ?? deleted?.message?.id;
-          if (id) {
-            views.delete(id);
-            plainMessages.delete(id);
-            const bar = bars.get(id);
-            if (bar) ctx.dom.uninject(bar);
-            bars.delete(id);
-          }
-        }
-        queueRefresh();
-      }
+      if (!p?.chatId || p.chatId === chatId) setTimeout(() => document.dispatchEvent(new Event('visibilitychange')), 1500);
     }),
   );
 
@@ -551,7 +307,12 @@ export function setup(ctx: SpindleFrontendContext) {
     iconSvg: ICON,
   });
   const panel = el('div', { class: 'stt-panel' });
-  tab.root.replaceChildren(panel);
+  // The original's settings screen (its own code) goes below ours; it finds this container by its own selector.
+  const originalSettings = el('div', { class: 'stt-panel' }, [
+    el('div', { class: 'stt-note' }, ['아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답 번역의 프리셋·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·내 메시지 번역에 쓰입니다.']),
+    createSettingsHost(),
+  ]);
+  tab.root.replaceChildren(panel, originalSettings);
   let draft: ChatSettings = { ...DEFAULT_SETTINGS };
   let status = '';
 
@@ -718,62 +479,6 @@ export function setup(ctx: SpindleFrontendContext) {
     ]);
   }
 
-  // ---- 번역 고치기 ----
-
-  const SYNC_PREF = 'stt-sync-source';
-  const readSyncPref = (): boolean => {
-    try { return localStorage.getItem(SYNC_PREF) !== '0'; } catch { return true; }
-  };
-  const writeSyncPref = (on: boolean): void => {
-    try { localStorage.setItem(SYNC_PREF, on ? '1' : '0'); } catch { /* per-browser convenience only */ }
-  };
-  let editorDone: ((r: Extract<ToFrontend, { type: 'edit_result' }>) => void) | null = null;
-
-  function openEditor(forChat: string, messageId: string, sourceKey: string, pairs: Array<{ source: string; translation: string; edited: boolean }>): void {
-    const modal = ctx.ui.showModal({ title: '번역 고치기', width: Math.min(720, window.innerWidth - 32), maxHeight: 820, persistent: true });
-    const areas = pairs.map((pair) => el('textarea', { value: pair.translation, spellcheck: false, rows: 3 }));
-    const list = el('div', { class: 'stt-edit-list' }, pairs.map((pair, i) =>
-      el('div', { class: 'stt-edit-row' }, [
-        el('div', { class: 'stt-edit-src' }, [pair.source]),
-        areas[i]!,
-        pair.edited ? el('span', { class: 'stt-badge' }, ['직접 고침']) : null,
-      ])));
-    // Rewriting the English only makes sense when the translation goes into Korean (the upstream prompt).
-    const korean = /korean|한국|^ko\b/i.test(current().myLanguage);
-    const sync = el('input', { type: 'checkbox', checked: korean && readSyncPref() });
-    sync.disabled = !korean;
-    const saveButton = button('저장', () => {
-      const edits = areas.flatMap((area, index) => (area.value !== pairs[index]!.translation && area.value.trim() ? [{ index, text: area.value }] : []));
-      if (!edits.length) {
-        modal.dismiss();
-        return;
-      }
-      writeSyncPref(sync.checked);
-      saveButton.disabled = true;
-      saveButton.textContent = sync.checked ? '영어 원문 고치는 중…' : '저장 중…';
-      editorDone = (result) => {
-        if (result.messageId !== messageId) return;
-        editorDone = null;
-        if (!result.ok) {
-          saveButton.disabled = false;
-          saveButton.textContent = '저장';
-          notify('error', result.error || '저장하지 못했습니다.');
-          return;
-        }
-        modal.dismiss();
-        if (result.error) notify('warning', result.error);
-        else if (sync.checked) notify('info', result.rewritten ? `영어 원문 ${result.rewritten}문단을 고쳤습니다.` : '고칠 영어 문단을 찾지 못했습니다. 번역만 저장했습니다.');
-      };
-      toBackend({ type: 'edit_save', chatId: forChat, messageId, sourceKey, edits, syncSource: sync.checked });
-    }, 'stt-primary');
-    modal.root.replaceChildren(el('div', { class: 'stt-modal' }, [
-      el('div', { class: 'stt-note' }, ['원문 문단 아래 칸에서 번역을 고칩니다. 문단 안에 빈 줄은 넣을 수 없습니다.']),
-      list,
-      el('label', { class: 'stt-check', title: '직접 고친 번역에 맞춰 영어 원문 문단도 AI로 고쳐서 저장합니다. 되돌리는 기능은 없으니 원문을 따로 보관해 두세요.' }, [sync, '영어 원문도 같이 고치기 (AI 호출, 고친 문단마다 1회)']),
-      el('div', { class: 'stt-row' }, [saveButton, button('취소', () => { editorDone = null; modal.dismiss(); })]),
-    ]));
-  }
-
   // ---- 저장한 기타 지침 ----
 
   let selectedNoteId = '';
@@ -912,24 +617,6 @@ export function setup(ctx: SpindleFrontendContext) {
       draft.longSplitChars = Math.max(0, Number(split.value) || 0);
       markDirty();
     });
-    fontHost = el('div', { class: 'stt-field' });
-    const paragraphMode = draft.displayMode === 'paragraph';
-    const paragraphSection = () => el('div', { class: 'stt-section' }, [
-      el('h3', {}, ['문단 대조 (Paragraph Reader)']),
-      select('보기', localView.paragraphView, [['interleave', '원문·번역 교차'], ['tap', '눌러서 원문 (번역만 보이고, 문단마다 눌러서 원문을 펼침)']], (v) => {
-        localView = { ...localView, paragraphView: v === 'tap' ? 'tap' : 'interleave' };
-        toBackend({ type: 'save_view', view: localView });
-      }, false),
-      localView.paragraphView === 'interleave'
-        ? select('문단 안 순서', localView.paragraphOrder, [['source-first', '원문 → 번역'], ['translation-first', '번역 → 원문']], (v) => {
-            localView = { ...localView, paragraphOrder: (v === 'translation-first' ? 'translation-first' : 'source-first') as ParagraphOrder };
-            toBackend({ type: 'save_view', view: localView });
-          }, false)
-        : null,
-      text('도착 언어 (응답을 번역할 언어, "내 언어"와 같은 설정)', 'myLanguage'),
-      fontHost,
-      el('div', { class: 'stt-note' }, ['보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다.']),
-    ]);
     panel.replaceChildren(
       el('div', { class: 'stt-note' }, [chatId ? '지금 열린 채팅의 번역 설정입니다.' : '열린 채팅이 없어 새 채팅의 기본값을 편집합니다.']),
       el('div', { class: 'stt-section' }, [
@@ -943,16 +630,9 @@ export function setup(ctx: SpindleFrontendContext) {
         link === 'none' ? null : el('div', { class: `stt-note${link === 'incompatible' ? ' stt-warn' : ''}` }, [link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.']),
         el('div', { class: 'stt-row' }, [text('모델 언어 (내 메시지를 이 언어로)', 'modelLanguage'), text('내 언어 (응답을 이 언어로)', 'myLanguage')]),
         check('AI 응답 자동 번역', 'autoTranslate'),
-        check('번역이 끊기면 자동으로 이어서 번역', 'autoContinue'),
-        select('번역문 표시 방식', draft.displayMode, Object.entries(DISPLAY_LABELS) as Array<[string, string]>, (v) => (draft.displayMode = v as DisplayMode), true, true),
-        select('번역 단위', draft.translationUnit, [
-          ['whole', '메시지 통째로 (1회 요청, 문단 수가 같으면 문단별로 맞춰 보여 줌)'],
-          ['paragraph', '문단별 (문단마다 1회 요청, 문단 대조가 정확히 맞음)'],
-        ], (v) => (draft.translationUnit = v === 'paragraph' ? 'paragraph' : 'whole')),
         check('내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)', 'translateMyMessages'),
         check('입력창 옆에 번역 버튼 표시', 'showDraftButton'),
       ]),
-      ...(paragraphMode ? [paragraphSection()] : []),
       el('div', { class: 'stt-section' }, [el('h3', {}, ['프롬프트 프리셋']), promptSection('incoming'), promptSection('outgoing'), presetManager()]),
       bundleSection(),
       el('div', { class: 'stt-section' }, [
@@ -994,7 +674,6 @@ export function setup(ctx: SpindleFrontendContext) {
       ]),
       saveRow,
     );
-    renderFonts();
   }
 
   // Leaving the page with unsaved settings loses them: let the browser ask first.
@@ -1014,64 +693,22 @@ export function setup(ctx: SpindleFrontendContext) {
     const msg = raw as ToFrontend;
     switch (msg?.type) {
       case 'state': {
-        const shape = (st: Store) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView, st.view.paragraphOrder]);
-        const before = store ? shape(store) : null;
         store = msg.store;
         presets = msg.presets;
         connections = msg.connections;
         link = msg.link ?? 'none';
-        if (!viewSaveTimer) {
-          localView = { ...store.view };
-          applyFontStyle();
-        }
-        // Different display settings need the host to render the messages again.
-        if (before !== null && before !== shape(store)) ctx.display?.invalidate?.(['*']);
-        decorate();
         renderPanel();
         renderDraftButton();
         return;
       }
-      case 'views':
-        if (msg.chatId !== chatId) return;
-        if (msg.requestedIds) {
-          // A sparse response also acknowledges untranslated/deleted messages.
-          for (const id of msg.requestedIds) {
-            views.delete(id);
-            plainMessages.delete(id);
-          }
-          for (const id of msg.plainIds ?? []) plainMessages.add(id);
-          viewRequests.take(msg.requestedIds);
-          const keep = new Set(msg.views.map((view) => view.messageId));
-          for (const id of msg.requestedIds) if (!keep.has(id)) {
-            const bar = bars.get(id);
-            if (bar) ctx.dom.uninject(bar);
-            bars.delete(id);
-          }
-        } else if (msg.replace) {
-          const keep = new Set(msg.views.map((v) => v.messageId));
-          for (const [id, bar] of bars) if (!keep.has(id)) {
-            ctx.dom.uninject(bar);
-            bars.delete(id);
-          }
-          views.clear();
-        }
-        for (const v of msg.views) {
-          views.set(v.messageId, v);
-          viewRequests.take([v.messageId]);
-        }
-        decorate();
+      case 'emu_result': {
+        const waiter = rpc.get(msg.id);
+        if (!waiter) return;
+        rpc.delete(msg.id);
+        if (msg.ok) waiter.resolve(msg.data);
+        else waiter.reject(Object.assign(new Error(msg.error || '요청 실패'), { status: msg.status }));
         return;
-      case 'edit_data':
-        if (msg.chatId !== chatId) return;
-        if (!msg.ok || !msg.pairs || !msg.sourceKey) {
-          notify('warning', msg.error || '이 메시지는 고칠 수 없습니다.');
-          return;
-        }
-        openEditor(msg.chatId, msg.messageId, msg.sourceKey, msg.pairs);
-        return;
-      case 'edit_result':
-        editorDone?.(msg);
-        return;
+      }
       case 'note_result':
         if (msg.needsOverwrite && lastNote) {
           const again = lastNote;
@@ -1105,14 +742,7 @@ export function setup(ctx: SpindleFrontendContext) {
     clearInterval(routeTimer);
     document.removeEventListener('visibilitychange', onVisible);
     window.removeEventListener('beforeunload', onBeforeUnload);
-    if (viewSaveTimer) clearTimeout(viewSaveTimer);
-    removeFontStyle?.();
-    observer.disconnect();
-    document.removeEventListener('scroll', queueDecorate, true);
-    window.removeEventListener('resize', queueDecorate);
-    if (refreshTimer) clearTimeout(refreshTimer);
-    if (decorateTimer) clearTimeout(decorateTimer);
-    toolbars.destroy();
+    original.stop();
     offEvents.forEach((off) => off());
     offBackend();
     offAction();
@@ -1120,6 +750,7 @@ export function setup(ctx: SpindleFrontendContext) {
     tab.destroy();
     if ((window.fetch as unknown) === translatingFetch) window.fetch = originalFetch;
     for (const p of pending.values()) p.reject(new Error('확장이 종료되었습니다.'));
+    for (const p of rpc.values()) p.reject(new Error('확장이 종료되었습니다.'));
     removeStyle();
     ctx.dom.cleanup();
   };

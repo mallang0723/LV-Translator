@@ -1,5 +1,16 @@
 # 변경 기록
 
+## 0.5.0 — 2026-11-19
+
+원작 화면 통이식. 0.4.0은 원작 1.8.0의 로직만 옮기고 화면을 LV식으로 다시 짰다. 이번에는 원작 [tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools) **1.10.0**(`0ff1338`)의 `extension.js`를 `src/vendor/tt-1.10.0/`에 바이트 그대로 두고 통째로 실행한다. 호스트 차이는 `src/host-emu/`(어댑터)에서만 흡수한다. `npm run verify:original`이 vendor 파일 전부를 원작과 비교한다(9개, 동일 9, 패치 0).
+
+- 원작 화면 그대로: 번역문 표시, 문단을 누르면 원문, 하단 바, 대조·수정 창(문단별 고치기·**이 문단 다시 번역**·전체 다시 번역·영어 원문도 같이 고치기), 말투·단어·세계관 자동 정리와 검토 창, NPC 자동 수집(화면), 이름표·상태창 이름 번역, 설정 화면 전체(백업·기타 지침 보관함 포함).
+- 새 권한: `characters`, `personas`, `world_books`(자동 정리가 캐릭터 카드·페르소나·로어북을 읽는다). 업데이트 때 재승인이 필요하다.
+- 지움: 0.4.0의 메시지 행동 줄 버튼·슬림 바·번역 고치기 연필 창·문단 대조 보기 설정(글자 크기 포함).
+- 얹은 것: AI 연결·내 언어/모델 언어·응답 자동 번역·내 메시지 번역·입력창 번역 버튼(LV 패널).
+- 옮기지 못한 것과 대역은 [docs/tt-1.10.0-ui-parity.md](docs/tt-1.10.0-ui-parity.md)에 전부 적었다. 가장 큰 것: 0.4.0 서버 엔진(자동 번역·묶음·보호 규칙·이어서 번역)과 기억 서재 연동(lv-tx)은 응답 번역에서 꺼졌다(`LEGACY_ENGINE=false`).
+- 시험: bun 302개, 원작 시험 5개 파일(82 항목), 브라우저 QA(`scripts/qa-original.mjs`).
+
 ## 0.4.0 — 2026-11-15
 
 번역 프리셋·단어장 1.8.0 이식 ([tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools) `807d6a3`, 원작 [minikkuen/Marinara-Translation-Tools](https://github.com/minikkeuen/Marinara-Translation-Tools), 원저작자 허락). 통이식: 원본의 순수 로직을 `src/vendor/tt-1.8.0/`에 그대로 복사하고(SHA-256 고정) 호스트에 묶인 부분만 어댑터로 바꿨습니다.

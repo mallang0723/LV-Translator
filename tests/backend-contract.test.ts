@@ -16,7 +16,7 @@ const mt = (m: Message) => m.metadata?.[METADATA_KEY] as MessageTranslations | u
 test('handshake: the translator publishes name, version and what it provides, readable by any extension', async () => {
   await withHost({ caps: CAPS }, async (h) => {
     expect(h.rpc.policies.get('contract')).toEqual({ requires: [] });
-    expect(h.rpc.synced.get('contract')).toEqual({ name: 'lv-tx', v: 1, ext: 'st_translator', version: '0.4.0', provides: ['pub-translation@1', 'glossary@1'] });
+    expect(h.rpc.synced.get('contract')).toEqual({ name: 'lv-tx', v: 1, ext: 'st_translator', version: '0.5.0', provides: ['pub-translation@1', 'glossary@1'] });
   });
 });
 

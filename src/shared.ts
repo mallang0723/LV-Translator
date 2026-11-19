@@ -386,7 +386,10 @@ export type ToBackend =
   | { type: 'save_view'; view: ViewSettings }
   | { type: 'cancel'; chatId: string; messageId: string }
   | { type: 'translate_text'; reqId: string; chatId: string; text: string }
-  | { type: 'notify'; kind: 'info' | 'warning' | 'error'; text: string };
+  | { type: 'notify'; kind: 'info' | 'warning' | 'error'; text: string }
+  /** Host stand-in for the original Translation Tools screens (src/host-emu): one call of the original's `/api`. */
+  | { type: 'emu'; id: string; op: string; args: unknown[] }
+  | { type: 'emu_cancel'; id: string };
 
 // backend -> frontend
 export type ToFrontend =
@@ -395,4 +398,5 @@ export type ToFrontend =
   | { type: 'text_result'; reqId: string; ok: boolean; text?: string; error?: string }
   | { type: 'edit_data'; chatId: string; messageId: string; ok: boolean; error?: string; sourceKey?: string; pairs?: Array<{ source: string; translation: string; edited: boolean }> }
   | { type: 'edit_result'; chatId: string; messageId: string; ok: boolean; error?: string; rewritten?: number; saved?: boolean }
-  | { type: 'note_result'; ok: boolean; error?: string; needsOverwrite?: string };
+  | { type: 'note_result'; ok: boolean; error?: string; needsOverwrite?: string }
+  | { type: 'emu_result'; id: string; ok: boolean; data?: unknown; error?: string; status?: number };
