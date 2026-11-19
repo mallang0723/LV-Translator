@@ -100,3 +100,20 @@ test('backend: while the original glossary is empty an already published glossar
     expect(h.chatMetadata.writes).toHaveLength(1);
   });
 });
+
+test('backend: a message event never becomes the original\'s base; its stale content write keeps the edit (SYHO-231)', async () => {
+  await withEmu(async (h) => {
+    const C0 = 'Alpha one.\n\nBeta two.\n\nGamma three.';
+    const m = makeMessage('a1', C0, 'assistant', 0);
+    h.messages.push(m);
+    await h.send({ type: 'emu', id: 'l', op: 'listMessages', args: ['chat', 10] }); // the original's copy
+    // the user edits elsewhere; the backend hears the event (the original, with a foreign cache, does not)
+    m.content = 'Alpha one.\n\nBeta two.\n\nGamma three EDITED.';
+    m.swipes[0] = m.content;
+    h.event('MESSAGE_EDITED', { chatId: 'chat', message: { ...structuredClone(m), extra: {} } });
+    await settle();
+    await h.send({ type: 'emu', id: 'u', op: 'updateContent', args: ['chat', 'a1', 'Alpha one revised.\n\nBeta two.\n\nGamma three.'] });
+    expect(result(h, 'u').ok).toBe(true);
+    expect(m.content).toBe('Alpha one revised.\n\nBeta two.\n\nGamma three EDITED.');
+  });
+});

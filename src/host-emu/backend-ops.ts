@@ -111,7 +111,7 @@ export class WideReads {
 
   private served = new Map<string, string>();
 
-  /** The content of a message as the original last saw it (a row it read, an event it was sent, or what it wrote). */
+  /** The content of a message as the original last saw it (a row it read through our API, or what it wrote; never a backend message event, which the original may not have received). */
   see(chatId: string, id: string, content: string): void {
     this.served.set(`${chatId}:${id}`, content);
     if (this.served.size > 2000) this.served.delete(this.served.keys().next().value as string);

@@ -243,7 +243,6 @@ const wideReads = new WideReads();
 async function forwardMessage(uid: Uid, chatId: string, raw: Record<string, any>): Promise<void> {
   if (!raw?.id) return;
   wideReads.update(chatId, eventMsg(raw));
-  if (typeof raw.content === 'string') wideReads.see(chatId, raw.id, raw.content);
   let character: Awaited<ReturnType<typeof resolveSpeakers>> | null = null;
   try {
     character = await resolveSpeakers(spindle as unknown as EmuHost, uid, chatId);
