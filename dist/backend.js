@@ -2348,19 +2348,30 @@ ${body}
 
 </div>`;
 }
+var CLOSE_REASONING = /<\/(think|thinking|reasoning)>/i;
 var UNCLOSED_REASONING = /<(think|thinking|reasoning)>/i;
 function stripPairs(pairs) {
   const out = [];
   let open = false;
   for (const pair of pairs) {
-    if (open)
-      continue;
-    const source = stripReasoning(pair.source);
-    if (UNCLOSED_REASONING.test(pair.source.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "")))
+    let { source: rawSource, translation: rawTranslation } = pair;
+    if (open) {
+      const closeAt = rawSource.search(CLOSE_REASONING);
+      if (closeAt < 0)
+        continue;
+      open = false;
+      rawSource = rawSource.slice(closeAt).replace(CLOSE_REASONING, "");
+      if (rawTranslation !== null) {
+        const t = rawTranslation.search(CLOSE_REASONING);
+        rawTranslation = t < 0 ? null : rawTranslation.slice(t).replace(CLOSE_REASONING, "");
+      }
+    }
+    const source = stripReasoning(rawSource);
+    if (UNCLOSED_REASONING.test(rawSource.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "")))
       open = true;
     if (!source)
       continue;
-    const translation = pair.translation === null ? null : stripReasoning(pair.translation);
+    const translation = rawTranslation === null ? null : stripReasoning(rawTranslation);
     out.push({ source, translation: translation === "" ? null : translation });
   }
   return out;
@@ -2701,7 +2712,7 @@ async function sendState(uid) {
   const store = await loadStore(uid);
   send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
 }
-var SELF_VERSION = "0.4.2";
+var SELF_VERSION = "0.4.3";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;

@@ -116,3 +116,21 @@ for (const unit of ['whole', 'paragraph'] as const) {
     });
   }
 }
+
+// ---- 0.4.3: a <think> spanning several paragraphs (blank line inside) must not wipe the pairs after it ----
+
+for (const unit of ['paragraph', 'whole'] as const) {
+  test(`Auto-parse + multi-paragraph <think> [paragraph view/${unit}]: pairs after the closing tag survive`, async () => {
+    const full = '<think>\nStep one.\n\nStep two.\n</think>\n\n*He smiles.* Hello there.\n\nBye now.';
+    const tr = '⟦1⟧\n첫째.\n\n둘째.\n⟦2⟧\n\n*그가 웃는다.* 안녕하세요.\n\n잘 가요.';
+    const out = await renderIn('paragraph', unit, full, '*He smiles.* Hello there.\n\nBye now.', tr);
+    expect(out.match(/stt-pr-src/g)?.length).toBe(2);
+    expect(out.match(/stt-pr-tgt/g)?.length).toBe(2);
+    expect(out).toContain('*He smiles.* Hello there.');
+    expect(out).toContain('Bye now.');
+    expect(out).toContain('안녕하세요.');
+    expect(out).toContain('잘 가요.');
+    expect(out).not.toMatch(/think|Step|첫째|둘째/);
+    expect(out.match(/<div/g)?.length).toBe(out.match(/<\/div>/g)?.length);
+  });
+}

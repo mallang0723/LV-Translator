@@ -84,6 +84,7 @@ function block(cls: string, label: string, body: string): string {
   return `<div class="${cls}"><div class="stt-pr-label">${label}</div>\n\n${body}\n\n</div>`;
 }
 
+const CLOSE_REASONING = /<\/(think|thinking|reasoning)>/i;
 const UNCLOSED_REASONING = /<(think|thinking|reasoning)>/i;
 
 /**
@@ -94,11 +95,22 @@ function stripPairs(pairs: Pair[]): Pair[] {
   const out: Pair[] = [];
   let open = false;
   for (const pair of pairs) {
-    if (open) continue;
-    const source = stripReasoning(pair.source);
-    if (UNCLOSED_REASONING.test(pair.source.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, ''))) open = true;
+    let { source: rawSource, translation: rawTranslation } = pair;
+    if (open) {
+      // A block opened in an earlier pair: everything up to its closing tag goes, the rest of this pair lives on.
+      const closeAt = rawSource.search(CLOSE_REASONING);
+      if (closeAt < 0) continue;
+      open = false;
+      rawSource = rawSource.slice(closeAt).replace(CLOSE_REASONING, '');
+      if (rawTranslation !== null) {
+        const t = rawTranslation.search(CLOSE_REASONING);
+        rawTranslation = t < 0 ? null : rawTranslation.slice(t).replace(CLOSE_REASONING, '');
+      }
+    }
+    const source = stripReasoning(rawSource);
+    if (UNCLOSED_REASONING.test(rawSource.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, ''))) open = true;
     if (!source) continue;
-    const translation = pair.translation === null ? null : stripReasoning(pair.translation);
+    const translation = rawTranslation === null ? null : stripReasoning(rawTranslation);
     out.push({ source, translation: translation === '' ? null : translation });
   }
   return out;
