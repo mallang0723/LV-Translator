@@ -3,12 +3,15 @@
 // swipe under its own metadata key, separate from the 0.4.0 `st_translator` records.
 
 import type { ChatRow, MessageRow } from './api';
+import { buildPubFromTt, convertLegacyRecord } from '../adapter/pub';
+import { type ChatSettings, METADATA_KEY, type MessageTranslations } from '../shared';
+import { recordFor } from '../message-ui';
 
 export const TT_KEY = 'st_translator_tt';
 export const PT_KEY = 'paraTranslate';
 const MAX_TAIL = 1000;
 
-interface Msg {
+export interface Msg {
   id: string;
   role?: string;
   is_user?: boolean;
@@ -55,8 +58,15 @@ export interface EmuDeps {
   chatSettings(chatId: string): Promise<ChatTranslationSettings>;
   /** Whether the host supports `metadata_patch` (chat-metadata-patch-v1). */
   metadataPatch: boolean;
-  /** Raw generation for the original's `/generate/raw`; defaults to host.generate.quiet. */
   signalFor?(requestId: string): AbortSignal | undefined;
+  /** LV-only guidance (the shared guide bundle) added to the system prompt of "translate my message". '' = none. */
+  extraSystem?(chatId: string): Promise<string>;
+  /** The memory extension's side of the record (src/adapter/pub.ts): whether `pub` is wanted, its language, the original's kept tags. */
+  projection?(chatId: string): Promise<{ publish: boolean; language: string; kept: ReadonlySet<string> }>;
+  /** A 0.4.0 record is turned into the original's once, when its message is read (src/adapter/pub.ts convertLegacyRecord). */
+  legacy?(chatId: string): Promise<{ settings: ChatSettings; kept: ReadonlySet<string> } | null>;
+  /** Count of 0.4.0 records that could not be converted exactly (whole-message or partial translations). */
+  onLegacySkipped?(messageId: string): void;
 }
 
 const ms = (n: unknown): number => {
@@ -106,16 +116,79 @@ export function createEmuBridge(d: EmuDeps) {
     throw Object.assign(new Error('메시지를 찾지 못했습니다.'), { status: 404 });
   }
 
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
   async function writeTt(chatId: string, m: Msg, swipe: number, value: unknown): Promise<void> {
-    const prev = (m.metadata?.[TT_KEY] && typeof m.metadata[TT_KEY] === 'object' ? m.metadata[TT_KEY] : {}) as Record<string, unknown>;
+    const prev = (isObj(m.metadata?.[TT_KEY]) ? m.metadata![TT_KEY] : {}) as Record<string, unknown>;
     const next = { ...prev };
     if (value === null || value === undefined) delete next[String(swipe)];
     else next[String(swipe)] = value;
-    const patch: Record<string, unknown> = d.metadataPatch
-      ? { metadata_patch: { [TT_KEY]: next } }
-      : { metadata: { ...(m.metadata ?? {}), [TT_KEY]: next } };
+    const changed: Record<string, unknown> = { [TT_KEY]: next };
+    // The memory extension's `pub` follows the visible swipe's record; it lives under the 0.4.0 key (`st_translator`).
+    const visible = Number.isInteger(m.swipe_id) ? (m.swipe_id as number) : 0;
+    const proj = swipe === visible ? await d.projection?.(chatId) : undefined;
+    if (proj?.publish) {
+      const st = isObj(m.metadata?.[METADATA_KEY]) ? (m.metadata![METADATA_KEY] as Record<string, unknown>) : {};
+      const pub = buildPubFromTt(String(m.content ?? ''), next[String(swipe)], proj.language, proj.kept, Date.now());
+      if (pub || st.pub !== undefined) {
+        const merged = { v: 1, entries: {}, ...st } as Record<string, unknown>;
+        if (pub) merged.pub = pub;
+        else delete merged.pub;
+        changed[METADATA_KEY] = merged;
+      }
+    }
+    const patch: Record<string, unknown> = d.metadataPatch ? { metadata_patch: changed } : { metadata: { ...(m.metadata ?? {}), ...changed } };
     await host.chat.updateMessage(chatId, m.id, patch);
-    m.metadata = { ...(m.metadata ?? {}), [TT_KEY]: next };
+    m.metadata = { ...(m.metadata ?? {}), ...changed };
+  }
+
+  const converting = new Set<string>();
+
+  /** N8: a message the original has no record for, but 0.4.0 translated paragraph by paragraph, shows that translation. */
+  async function convertLegacy(chatId: string, rows: Msg[]): Promise<void> {
+    if (!d.legacy) return;
+    let ctx: Awaited<ReturnType<NonNullable<EmuDeps['legacy']>>> | undefined;
+    for (const m of rows) {
+      const old = m.metadata?.[METADATA_KEY] as MessageTranslations | undefined;
+      if (!old || !isObj(old.entries) || !Object.keys(old.entries).length) continue;
+      const swipe = Number.isInteger(m.swipe_id) ? (m.swipe_id as number) : 0;
+      const tt = isObj(m.metadata?.[TT_KEY]) ? (m.metadata![TT_KEY] as Record<string, unknown>) : {};
+      if (tt[String(swipe)] !== undefined) continue;
+      const legacy = recordFor(old, String(m.content ?? ''));
+      if (!legacy) continue;
+      ctx ??= await d.legacy(chatId);
+      if (!ctx) return;
+      const converted = convertLegacyRecord(String(m.content ?? ''), legacy, ctx.settings, ctx.kept, Date.now());
+      if (!converted) {
+        d.onLegacySkipped?.(m.id);
+        continue;
+      }
+      const key = `${m.id}:${swipe}`;
+      m.metadata = { ...(m.metadata ?? {}), [TT_KEY]: { ...tt, [swipe]: converted } };
+      if (converting.has(key)) continue;
+      converting.add(key);
+      // Saved once, next to (never over) the 0.4.0 record, so the original's later saves start from it.
+      void host.chat
+        .updateMessage(chatId, m.id, d.metadataPatch ? { metadata_patch: { [TT_KEY]: { ...tt, [swipe]: converted } } } : { metadata: m.metadata })
+        .catch(() => converting.delete(key));
+    }
+  }
+
+  async function generateRaw(
+    req: { connectionId: string; messages: Array<{ role: string; content: string }>; parameters?: { maxTokens?: number; temperature?: number } },
+    requestId?: string,
+  ): Promise<{ content?: string; aborted?: boolean }> {
+    const signal = requestId ? d.signalFor?.(requestId) : undefined;
+    const res = (await host.generate.quiet({
+      type: 'quiet',
+      messages: req.messages,
+      ...(req.connectionId ? { connection_id: req.connectionId } : {}),
+      parameters: { temperature: req.parameters?.temperature ?? 0.3, ...(req.parameters?.maxTokens ? { max_tokens: req.parameters.maxTokens } : {}) },
+      userId: uid,
+      signal,
+    })) as { content?: unknown } | string | null;
+    if (signal?.aborted) return { aborted: true };
+    return { content: typeof res === 'string' ? res : typeof res?.content === 'string' ? res.content : '' };
   }
 
   return {
@@ -155,10 +228,14 @@ export function createEmuBridge(d: EmuDeps) {
     },
     async listMessages(chatId: string, n: number): Promise<MessageRow[]> {
       const character = await characterOf(chatId);
-      return (await tail(chatId, n || MAX_TAIL)).map((m) => messageRow(chatId, m, character));
+      const rows = await tail(chatId, n || MAX_TAIL);
+      await convertLegacy(chatId, rows);
+      return rows.map((m) => messageRow(chatId, m, character));
     },
     async getMessage(chatId: string, messageId: string): Promise<MessageRow> {
-      return messageRow(chatId, await findMessage(chatId, messageId), await characterOf(chatId));
+      const row = await findMessage(chatId, messageId);
+      await convertLegacy(chatId, [row]);
+      return messageRow(chatId, row, await characterOf(chatId));
     },
     async patchExtra(chatId: string, messageId: string, patch: Record<string, unknown>, swipeIndex?: number): Promise<void> {
       if (!(PT_KEY in patch)) return; // the original only ever writes its own record
@@ -169,21 +246,24 @@ export function createEmuBridge(d: EmuDeps) {
     async updateContent(chatId: string, messageId: string, content: string): Promise<void> {
       await host.chat.updateMessage(chatId, messageId, { content });
     },
-    async generateRaw(
-      req: { connectionId: string; messages: Array<{ role: string; content: string }>; parameters?: { maxTokens?: number; temperature?: number } },
+    generateRaw,
+    /** The original's `POST /api/translate` after it has put the glossary, notes and context in (what Marinara's translate endpoint does with it). */
+    async translate(
+      req: { text: string; targetLanguage: string; systemPrompt?: string; connectionId?: string; chatId?: string },
       requestId?: string,
-    ): Promise<{ content?: string; aborted?: boolean }> {
-      const signal = requestId ? d.signalFor?.(requestId) : undefined;
-      const res = (await host.generate.quiet({
-        type: 'quiet',
-        messages: req.messages,
-        ...(req.connectionId ? { connection_id: req.connectionId } : {}),
-        parameters: { temperature: req.parameters?.temperature ?? 0.3, ...(req.parameters?.maxTokens ? { max_tokens: req.parameters.maxTokens } : {}) },
-        userId: uid,
-        signal,
-      })) as { content?: unknown } | string | null;
-      if (signal?.aborted) return { aborted: true };
-      return { content: typeof res === 'string' ? res : typeof res?.content === 'string' ? res.content : '' };
+    ): Promise<{ translatedText: string }> {
+      const lang = req.targetLanguage.trim();
+      let system = String(req.systemPrompt ?? '').replaceAll('{{targetLanguage}}', lang);
+      const extra = req.chatId ? await d.extraSystem?.(req.chatId) : '';
+      if (extra) system = [system, extra].filter(Boolean).join('\n\n');
+      const connectionId = req.connectionId || (req.chatId ? (await d.chatSettings(req.chatId)).connectionId : '');
+      const messages: Array<{ role: string; content: string }> = [];
+      if (system.trim()) messages.push({ role: 'system', content: system });
+      messages.push({ role: 'user', content: `Translate the following text to ${lang}:\n\n${req.text}` });
+      const res = await generateRaw({ connectionId, messages, parameters: { temperature: 0.3, maxTokens: 8192 } }, requestId);
+      const text = String(res.content ?? '').trim();
+      if (!text) throw Object.assign(new Error('번역 결과가 비어 있습니다.'), { status: 502 });
+      return { translatedText: text };
     },
     async connections() {
       return (await host.connections.list(uid)).map((c) => ({ id: c.id, name: c.name ?? c.id, model: c.model ?? '' }));

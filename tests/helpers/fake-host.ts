@@ -30,6 +30,8 @@ export interface HostOptions {
   chatMetadata?: Record<string, unknown>;
   /** What spindle.chats.get throws when set (permission missing). */
   chatsDenied?: boolean;
+  /** The original's own settings file (tt-config.json). */
+  ttConfig?: Record<string, unknown>;
 }
 
 let instance = 0;
@@ -51,6 +53,7 @@ export async function fakeHost(options: HostOptions = {}) {
   const uid = 'owner';
   const chatId = 'chat';
   let store = normalizeStore(options.store ?? { defaults: { autoTranslate: false }, chats: { [chatId]: { autoTranslate: true } } });
+  let ttConfig: Record<string, unknown> | null = options.ttConfig ? structuredClone(options.ttConfig) : null;
   const messages: Message[] = [];
   const chats = new Map<string, Message[]>([[chatId, messages]]);
   const counts = { fullReads: 0, tailReads: 0, writes: 0 };
@@ -78,8 +81,8 @@ export async function fakeHost(options: HostOptions = {}) {
     log: { warn(text: string) { warnings.push(text); }, error(text: string) { errors.push(text); }, info() {} },
     toast: { info() {}, warning() {}, error(text: string) { errors.push(text); } },
     userStorage: {
-      async getJson() { return structuredClone(store); },
-      async setJson(_path: string, value: Store) { store = structuredClone(value); },
+      async getJson(path: string) { return structuredClone(path === 'tt-config.json' ? ttConfig : store); },
+      async setJson(path: string, value: Store) { if (path === 'tt-config.json') ttConfig = structuredClone(value) as never; else store = structuredClone(value); },
     },
     connections: { async list() { return [{ id: 'connection', is_default: true }]; } },
     generate: { async quiet(input: Record<string, any>) { calls.push(input); return complete(input); } },
@@ -103,6 +106,7 @@ export async function fakeHost(options: HostOptions = {}) {
         if (!message) throw new Error('Message not found');
         if (typeof patch.content === 'string') { message.content = patch.content; message.swipes[message.swipe_id] = patch.content; }
         if (patch.metadata !== undefined) message.metadata = structuredClone(patch.metadata);
+        if (patch.metadata_patch !== undefined && options.caps?.['chat-metadata-patch-v1']) message.metadata = { ...(message.metadata ?? {}), ...structuredClone(patch.metadata_patch) };
         if (patch.ownMetadata !== undefined && options.caps?.['chat-lean-messages-v1']) message.metadata = { ...(message.metadata ?? {}), [METADATA_KEY]: structuredClone(patch.ownMetadata) };
         handlers.get('MESSAGE_EDITED')?.({ chatId: id, message: wire(message) }, uid);
       },
@@ -136,6 +140,7 @@ export async function fakeHost(options: HostOptions = {}) {
     async send(payload: ToBackend) { receive(payload, uid); await settle(); },
     async emit(payload: Record<string, unknown>) { handlers.get('GENERATION_ENDED')!({ generationId: 'generation', chatId, ...payload }, uid); await settle(); },
     store: (): any => store,
+    ttConfig: (): any => ttConfig,
     record(message: Message, source = message.content) {
       return (message.metadata?.[METADATA_KEY] as MessageTranslations | undefined)?.entries[sourceHash(source)];
     },

@@ -120,7 +120,7 @@ describe('host stand-in: /api router', () => {
     expect(await raw.json()).toEqual({ ok: 'generateRaw' });
   });
   test('unknown /api routes are 404 and non-API urls reach the real fetch', async () => {
-    expect((await fetcher('/api/translate', { method: 'POST', body: '{}' })).status).toBe(404);
+    expect((await fetcher('/api/not-a-route', { method: 'POST', body: '{}' })).status).toBe(404);
     expect(await (await fetcher('/elsewhere')).text()).toBe('real');
   });
 });

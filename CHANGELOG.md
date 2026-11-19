@@ -1,5 +1,18 @@
 # 변경 기록
 
+## 0.5.1 — 2026-11-19
+
+0.5.0의 빈칸을 메우고 라이선스를 AGPL-3.0으로 바꿨다. 원작 `extension.js`는 그대로다(`verify:original` 9개 동일, 패치 0).
+
+- **응답 자동 번역·NPC 자동 수집(N1·N5):** Lumiverse의 생성 시작·끝·중지를 원작이 보는 `POST /api/generate` 스트림으로 재생한다(`src/host-emu/generation.ts`). 번역과 NPC 수집, 사용자 Stop·impersonate 건너뛰기, 재생성·이어쓰기 표시 보호는 원작 코드가 한다. 0.5.0의 "화면 복귀 이벤트를 다시 보내기"는 없앴다. 열린 페이지가 여럿이면 한 페이지만 재생한다.
+- **내 메시지 번역(N6):** 원작의 `/api/translate` 처리(유저 입력 번역 프롬프트·단어장·기타 지침·이전 대화)로 바뀌었다. 제외 규칙·HTML/코드 보호·묶음은 그 위에 얹었다.
+- **기억 서재 연동(N7):** `metadata.st_translator.pub`을 원작 기록에서 만든다(기억 서재 시험 픽스처와 같은 값을 시험으로 고정). 단어장은 원작 설정의 채팅 단어장을 공개한다. 계약 `provides`는 0.4.0대로 돌려놨다.
+- **0.4.0 번역 변환(N8):** 문단 단위·완료 기록만 원작 기록으로 한 번 옮긴다(원본은 그대로).
+- **지움:** 0.4.0 서버 번역 엔진과 표시(`LEGACY_ENGINE`, 번역 작업·고치기·보충·`display/render.ts`·`translate/edit.ts`·`adapter/sync-source.ts`·`vendor/tt-1.8.0`의 `catch-up`·`sync-source`·예시 파일)와 그것만 보던 시험, LV 패널의 프롬프트 프리셋·단어장·참고 정보·긴 지문 구역(원작 화면과 겹쳤다). 채팅 전체를 읽던 캐시(`cachedChat`)도 없앴다.
+- **못 한 것:** 브라우저가 닫혀 있어도 번역하는 서버 워커 보조(DOM 구현 의존성이 필요해 멈춤). [docs/tt-1.10.0-ui-parity.md](docs/tt-1.10.0-ui-parity.md)의 N9a.
+- **라이선스:** MIT에서 **AGPL-3.0**(`AGPL-3.0-only`)으로 바꿨다. `LICENSE`는 gnu.org 전문, `package.json`, README, `THIRD_PARTY_NOTICES.md`에 반영.
+- 시험: bun 226개(0 실패), 원작 시험 82항목 통과, 브라우저 QA 통과, `verify:original` ok.
+
 ## 0.5.0 — 2026-11-19
 
 원작 화면 통이식. 0.4.0은 원작 1.8.0의 로직만 옮기고 화면을 LV식으로 다시 짰다. 이번에는 원작 [tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools) **1.10.0**(`0ff1338`)의 `extension.js`를 `src/vendor/tt-1.10.0/`에 바이트 그대로 두고 통째로 실행한다. 호스트 차이는 `src/host-emu/`(어댑터)에서만 흡수한다. `npm run verify:original`이 vendor 파일 전부를 원작과 비교한다(9개, 동일 9, 패치 0).

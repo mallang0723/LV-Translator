@@ -1,4 +1,244 @@
 // @bun
+// src/adapter/host.ts
+function hostCaps(api) {
+  const caps = api?.host?.capabilities ?? {};
+  const on = (name) => caps[name] === 1 || typeof caps[name] === "number" && caps[name] >= 1;
+  return { leanMessages: on("chat-lean-messages-v1"), metadataPatch: on("chat-metadata-patch-v1"), conditionalMetadata: on("chat-conditional-metadata-v1") };
+}
+
+// src/translate/glossary.ts
+function parseGlossary(raw) {
+  const pairs = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator < 1)
+      continue;
+    const left = line.slice(0, separator).trim();
+    const right = line.slice(separator + 1).trim();
+    if (left && right)
+      pairs.push({ left, right });
+  }
+  return pairs;
+}
+
+// src/adapter/keys.ts
+function hashText(str) {
+  let h = 2166136261;
+  const s = String(str ?? "");
+  for (let i = 0;i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+function normalizeForKey(s) {
+  return String(s ?? "").replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB\uFF02]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[*_~`#>]/g, "").replace(/\s+/g, " ").trim();
+}
+function blockKey(block) {
+  return hashText(normalizeForKey(block));
+}
+
+// src/adapter/contract.ts
+var PEER_ID = "anon_memory_lv";
+var SELF_ID = "st_translator";
+var CONTRACT_NAME = "lv-tx";
+var CONTRACT_VERSION = 1;
+var PUB_PARAS_MAX = 400;
+var PROVIDES = ["pub-translation@1", "glossary@1"];
+function handshake(version, provides = PROVIDES) {
+  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
+}
+function classifyPeer(value) {
+  if (!value || typeof value !== "object")
+    return "none";
+  const v = value;
+  if (v.name !== CONTRACT_NAME || typeof v.v !== "number")
+    return "incompatible";
+  return v.v === CONTRACT_VERSION ? "ok" : "incompatible";
+}
+function langCode(language) {
+  const l = String(language ?? "").trim();
+  if (/^(ko|kor|korean)$/i.test(l) || /\uD55C\uAD6D|\uC870\uC120/.test(l))
+    return "ko";
+  if (/^(en|eng|english)$/i.test(l) || /\uC601\uC5B4/.test(l))
+    return "en";
+  if (/^(ja|jpn|japanese)$/i.test(l) || /\uC77C\uBCF8|\u65E5\u672C/.test(l))
+    return "ja";
+  if (/^(zh|chinese)$/i.test(l) || /\uC911\uAD6D|\u4E2D\u6587/.test(l))
+    return "zh";
+  return l.toLowerCase();
+}
+function glossaryText(raw) {
+  return parseGlossary(raw).map((p) => `${p.left} = ${p.right}`).join(`
+`);
+}
+var isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function planGlossary(meta, text, now) {
+  const own = isObject(meta[SELF_ID]) ? meta[SELF_ID] : {};
+  const published = isObject(own.glossary) ? own.glossary : null;
+  const hash = hashText(text);
+  if (!published && !text)
+    return null;
+  if (published?.hash === hash)
+    return null;
+  const entry = { text, hash, at: now };
+  return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };
+}
+
+// src/illustrations.ts
+var MALFORMED_ANNOTATION = "\u27E6\uC0BD\uD654\uAC00: \uADF8\uB9BC \uD0DC\uADF8 \uD615\uC2DD \uC624\uB958 \u2014 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uC2DC\uB3C4\uB429\uB2C8\uB2E4\u27E7";
+var START = /<pic(?=[\s/>]|$)|<pic\u27E6\uC0BD\uD654\uAC00:|!\[\uADF8\uB9BC:|\[\u26A0\uFE0F \uADF8\uB9BC \uC0DD\uC131 \uC2E4\uD328\(|\[\uD55C \uB2F5\uBCC0\uB2F9 \uADF8\uB9BC \uC0C1\uD55C\(|<pic-(?:failed|skipped)\b/g;
+var TAG = /^<pic(?:\u27E6\uC0BD\uD654\uAC00: \uADF8\uB9BC \uD0DC\uADF8 \uD615\uC2DD \uC624\uB958 \u2014 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uC2DC\uB3C4\uB429\uB2C8\uB2E4\u27E7)?(?=[\s/>]|$)(?:[^<>"']|"[^"<]*"|'[^'<]*')*>/;
+var STATUS = /^\[(?:\u26A0\uFE0F \uADF8\uB9BC \uC0DD\uC131 \uC2E4\uD328\(|\uD55C \uB2F5\uBCC0\uB2F9 \uADF8\uB9BC \uC0C1\uD55C\()[\s\S]*?<pic-(?:failed|skipped) id="[a-z0-9]+">\]/;
+var SENTINEL = /^<pic-(?:failed|skipped)\s+id="[a-z0-9]+"\s*\/?>/;
+function imageLength(text) {
+  const alt = /^!\[\uADF8\uB9BC:[^\]\n]*\]\(/.exec(text);
+  if (!alt)
+    return 0;
+  let depth = 1;
+  for (let i = alt[0].length;i < text.length; i++) {
+    if (text[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (text[i] === "(")
+      depth++;
+    if (text[i] === ")" && --depth === 0)
+      return i + 1;
+  }
+  return 0;
+}
+function replaceIllustrations(text, replace) {
+  const scan = new RegExp(START);
+  let out = "", cursor = 0, count = 0;
+  for (let match;match = scan.exec(text); ) {
+    const start = match.index;
+    const rest = text.slice(start);
+    let length = 0;
+    if (rest.startsWith("!["))
+      length = imageLength(rest);
+    else if (rest.startsWith("["))
+      length = STATUS.exec(rest)?.[0].length ?? 0;
+    else if (rest.startsWith("<pic-"))
+      length = SENTINEL.exec(rest)?.[0].length ?? 0;
+    else {
+      length = TAG.exec(rest)?.[0].length ?? 0;
+      if (!length) {
+        const offset = rest.startsWith(`<pic${MALFORMED_ANNOTATION}`) ? 4 + MALFORMED_ANNOTATION.length : 4;
+        const stop = /[<>\r\n]/.exec(rest.slice(offset));
+        length = stop ? offset + stop.index + (stop[0] === ">" ? 1 : 0) : rest.length;
+      }
+    }
+    if (!length)
+      continue;
+    length += /^\s*<\/pic\s*>/.exec(rest.slice(length))?.[0].length ?? 0;
+    out += text.slice(cursor, start) + replace(text.slice(start, start + length), count++);
+    cursor = start + length;
+    scan.lastIndex = cursor;
+  }
+  return out + text.slice(cursor);
+}
+function normalizeIllustrations(text) {
+  return replaceIllustrations(text, (_markup, index) => `\u27EAlv-illustration:${index + 1}\u27EB`);
+}
+function currentIllustrations(content) {
+  const pieces = [];
+  replaceIllustrations(content, (piece) => {
+    pieces.push(piece);
+    return piece;
+  });
+  let index = 0;
+  return {
+    replace(text) {
+      return replaceIllustrations(text, () => pieces[index++] ?? "");
+    },
+    remaining() {
+      return pieces.slice(index).join(`
+
+`);
+    }
+  };
+}
+function restoreCurrentIllustrations(translated, content) {
+  const current = currentIllustrations(content);
+  const text = current.replace(translated);
+  const rest = current.remaining();
+  return rest ? `${text}
+
+${rest}` : text;
+}
+
+// src/translate/chunk.ts
+var TRANSLATION_CHUNK_CHARS = 3200;
+var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
+function findCut(text, from, limit) {
+  const end = from + limit;
+  const span = text.slice(from, end + 1);
+  let best = -1;
+  for (const m of span.matchAll(SENTENCE_BREAK)) {
+    const at = m.index + m[0].length;
+    if (at <= limit)
+      best = Math.max(best, at);
+  }
+  const newline = span.lastIndexOf(`
+`, limit);
+  if (newline > 0)
+    best = Math.max(best, newline);
+  if (best <= 0) {
+    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
+      if (/\s/.test(span[i])) {
+        best = i;
+        break;
+      }
+    }
+  }
+  let cut = best > 0 ? from + best : end;
+  const open = text.lastIndexOf("\u27E6", cut - 1);
+  if (open >= from) {
+    const close = text.indexOf("\u27E7", open);
+    if (close >= cut)
+      cut = open > from ? open : close + 1;
+  }
+  return cut;
+}
+function cutParagraph(paragraph, limit) {
+  const pieces = [];
+  let from = 0;
+  while (paragraph.length - from > limit) {
+    const cut = findCut(paragraph, from, limit);
+    pieces.push(paragraph.slice(from, cut));
+    from = cut;
+    while (from < paragraph.length && /\s/.test(paragraph[from]))
+      from++;
+  }
+  pieces.push(paragraph.slice(from));
+  return pieces;
+}
+function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
+  const max = Math.max(1, Math.floor(limit));
+  const pieces = String(text).replace(/\r\n?/g, `
+`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
+  const parts = [];
+  for (const raw of pieces) {
+    const piece = raw.trim();
+    if (!piece)
+      continue;
+    const last = parts.length - 1;
+    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
+      parts[last] += `
+
+${piece}`;
+    else
+      parts.push(piece);
+  }
+  return parts;
+}
+
+// src/translate/clean-reply.ts
+function cleanReply(text) {
+  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
+}
+
 // src/vendor/tt-1.8.0/prompts.ts
 var MARINARA_TRANSLATION_GENERAL_PROMPTS = Object.freeze({
   base: `You are a translator. Translate the given text accurately into {{targetLanguage}}, preserving formatting, markdown, and any special characters like *asterisks* for actions. Output ONLY the translated text, nothing else -- no explanations, no extra commentary.
@@ -870,399 +1110,6 @@ var BUILTIN_PRESET_ORDER = new Map([
   "builtin-bilingual-dialogue-korean",
   "builtin-bilingual-dialogue-korean-v2"
 ].map((id, index) => [id, index]));
-// src/presets/index.ts
-var BUILTINS = [...BUILTIN_PRESETS, ...V2_PRESETS, ...ADDITIONAL_BUILTIN_PRESETS].map((p) => ({ id: p.id, name: p.name, prompt: p.prompt, replace: p.replace })).sort((a, b) => (BUILTIN_PRESET_ORDER.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (BUILTIN_PRESET_ORDER.get(b.id) ?? Number.MAX_SAFE_INTEGER));
-var BUILTIN_IDS = new Set(BUILTINS.map((p) => p.id));
-function promptPresets(userPresets) {
-  return [
-    ...BUILTINS.map((p) => ({ id: p.id, prompt: p.prompt, replace: p.replace })),
-    ...userPresets.map((p) => ({ id: p.id, prompt: p.prompt, replace: true }))
-  ];
-}
-function presetSummaries(userPresets) {
-  return [
-    ...BUILTINS.map((p) => ({ id: p.id, name: p.name, prompt: p.replace ? p.prompt : "", builtin: true })),
-    ...userPresets.map((p) => ({ id: p.id, name: p.name, prompt: p.prompt, builtin: false }))
-  ];
-}
-
-// src/adapter/host.ts
-function hostCaps(api) {
-  const caps = api?.host?.capabilities ?? {};
-  const on = (name) => caps[name] === 1 || typeof caps[name] === "number" && caps[name] >= 1;
-  return { leanMessages: on("chat-lean-messages-v1"), metadataPatch: on("chat-metadata-patch-v1"), conditionalMetadata: on("chat-conditional-metadata-v1") };
-}
-var JOB_TAIL = 12;
-
-// src/vendor/tt-1.8.0/helpers.ts
-function hashText(str) {
-  let h = 2166136261;
-  const s = String(str ?? "");
-  for (let i = 0;i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0).toString(36);
-}
-function langScript(lang) {
-  const l = String(lang || "").toLowerCase();
-  if (/korean|\uD55C\uAD6D|\uC870\uC120/.test(l))
-    return /[\uAC00-\uD7A3]/g;
-  if (/japan|\u65E5\u672C|\uC77C\uBCF8/.test(l))
-    return /[\u3040-\u30FF]/g;
-  if (/chinese|\u4E2D\u6587|\uC911\uAD6D/.test(l))
-    return /[\u4E00-\u9FFF]/g;
-  if (/russian|\uB7EC\uC2DC\uC544|\u0440\u0443\u0441/.test(l))
-    return /[\u0400-\u04FF]/g;
-  if (/thai|\uD0DC\uAD6D/.test(l))
-    return /[\u0E00-\u0E7F]/g;
-  if (/arabic|\uC544\uB78D/.test(l))
-    return /[\u0600-\u06FF]/g;
-  return null;
-}
-function normalizeForKey(s) {
-  return String(s ?? "").replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB\uFF02]/g, '"').replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[*_~`#>]/g, "").replace(/\s+/g, " ").trim();
-}
-function blockKey(block) {
-  return hashText(normalizeForKey(block));
-}
-function stripMarks(s) {
-  return String(s ?? "").replace(/<\/?x\d+>/g, "").replace(/\u27EA\d+\u27EB/g, "");
-}
-var PAIRED_QUOTE_RE = /("[^"\n]+"|\u201C[^\u201D\n]+\u201D|\u00AB[^\u00BB\n]+\u00BB)\s*\(([^()\n]+)\)/g;
-function isPairedDialogue(text, lang) {
-  const script = langScript(lang);
-  if (!script || !/korean|\uD55C\uAD6D|\uC870\uC120/i.test(String(lang)))
-    return false;
-  let paired = 0;
-  const rest = String(text).replace(/<[^<>]*>/g, "").replace(PAIRED_QUOTE_RE, (m, quote, gloss) => {
-    if (!/[\uAC00-\uD7A3]/.test(gloss))
-      return m;
-    paired++;
-    return "";
-  }).replace(/^[ \t]*[^\n|"\u201C\u00AB]{1,40}\|/gm, "");
-  return paired > 0 && !/\p{L}/u.test(rest);
-}
-
-// src/vendor/tt-1.8.0/sync-source.ts
-function createSyncSource(deps) {
-  const { currentMessage, messageCache, blockKey, stripMarks, llm, api, setCachedContent, getRecord, saveRecord } = deps;
-  const SYNC_SOURCE_SYSTEM = `You revise one English narration paragraph of a roleplay story so that it matches a Korean translation the user corrected by hand.
-Compare the previous Korean translation with the corrected one. Change the English only where the correction changed meaning, facts, names, numbers, who does what, or tone. Keep every other word, the sentence order, markdown (*, _, **), quotation marks and any tags exactly as in the original English. Write natural English in the same style and voice.
-Output only the revised English paragraph, with no notes, quotation marks around it, or code fences.`;
-  async function syncSourceToEdits(chatId, messageId, edits, oldTranslations) {
-    const msg = currentMessage(chatId, messageId) || messageCache.get(messageId);
-    if (!msg || typeof msg.content !== "string")
-      throw new Error("\uBA54\uC2DC\uC9C0\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
-    const parts = msg.content.split(/(\n[ \t]*\n)/);
-    const rewritten = [];
-    for (const [key, corrected] of Object.entries(edits)) {
-      const index = parts.findIndex((part, i) => i % 2 === 0 && part.trim() && blockKey(part) === key);
-      if (index < 0)
-        continue;
-      const original = parts[index];
-      const lead = /^\s*/.exec(original)[0];
-      const trail = /\s*$/.exec(original)[0];
-      const user = `[Original English]
-${original.trim()}
-
-[Previous Korean translation]
-${stripMarks(oldTranslations[key] ?? "") || "(none)"}
-
-[Corrected Korean translation]
-${corrected}`;
-      let revised = (await llm(SYNC_SOURCE_SYSTEM, user, { chatId, prefill: "", temperature: 0.3 })).trim();
-      revised = revised.replace(/^```[a-z]*\n?|\n?```$/g, "").trim();
-      if (!revised || revised === original.trim())
-        continue;
-      parts[index] = `${lead}${revised}${trail}`;
-      rewritten.push({ oldKey: key, newKey: blockKey(revised), corrected });
-    }
-    if (!rewritten.length)
-      return 0;
-    const content = parts.join("");
-    await api(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, { method: "PATCH", body: { content } });
-    messageCache.set(messageId, { ...msg, content });
-    setCachedContent(chatId, messageId, content);
-    const base = getRecord(messageId) || { v: 1, map: {}, edited: {}, view: "", at: 0 };
-    const rec = { ...base, map: { ...base.map }, edited: { ...base.edited } };
-    for (const { oldKey, newKey, corrected } of rewritten) {
-      delete rec.map[oldKey];
-      delete rec.edited[oldKey];
-      rec.map[newKey] = corrected;
-      rec.edited[newKey] = 1;
-    }
-    await saveRecord(chatId, messageId, rec);
-    return rewritten.length;
-  }
-  return { SYNC_SOURCE_SYSTEM, syncSourceToEdits };
-}
-
-// src/adapter/sync-source.ts
-async function syncSourceFromEdits(input) {
-  let content = null;
-  let record = input.record;
-  const { syncSourceToEdits } = createSyncSource({
-    currentMessage: () => ({ id: "message", content: input.content }),
-    messageCache: new Map,
-    blockKey,
-    stripMarks,
-    llm: (system, user) => input.llm(system, user),
-    api: async (_path, options) => {
-      content = options.body?.content ?? null;
-      return {};
-    },
-    setCachedContent: () => {},
-    getRecord: () => record,
-    saveRecord: async (_chatId, _messageId, next) => {
-      record = next;
-    }
-  });
-  const count = await syncSourceToEdits("chat", "message", input.edits, input.oldTranslations);
-  return { count, content, record };
-}
-
-// src/vendor/tt-1.8.0/catch-up.ts
-function createCatchUp(deps) {
-  const { getChat, handlesRow, api, listMessages, rememberMessage, getRecord, hashText, translateMessage, generationActive, marinara, PT_KEY } = deps;
-  let disposed = false;
-  const CATCH_UP_WINDOW_MS = 30 * 60 * 1000;
-  const caughtUp = new Set;
-  let catchUpTimer = 0;
-  function catchUpLatest(chatId) {
-    if (!chatId || disposed)
-      return;
-    clearTimeout(catchUpTimer);
-    catchUpTimer = setTimeout(async () => {
-      if (disposed || generationActive.has(chatId))
-        return;
-      try {
-        const chat = await getChat(chatId, true);
-        if (!handlesRow(chat) || chat.metadata.autoTranslate !== true)
-          return;
-        const status = await api(`/generate/status/${encodeURIComponent(chatId)}`).catch(() => null);
-        if (status?.active)
-          return;
-        const list = await listMessages(chatId, 4);
-        list.forEach(rememberMessage);
-        const latest = [...list].reverse().find((m) => m.role === "assistant");
-        if (!latest || !latest.content.trim() || latest.extra?.hiddenFromUser === true)
-          return;
-        if (getRecord(latest.id) || latest.extra?.[PT_KEY])
-          return;
-        const age = Date.now() - Date.parse(latest.createdAt);
-        if (!(age >= 0 && age < CATCH_UP_WINDOW_MS))
-          return;
-        const attempt = `${latest.id}:${hashText(latest.content)}`;
-        if (caughtUp.has(attempt))
-          return;
-        caughtUp.add(attempt);
-        await translateMessage(chatId, latest.id, { quiet: true }).catch(() => {});
-      } catch (e) {
-        marinara.log.warn("\uB193\uCE5C \uC790\uB3D9 \uBC88\uC5ED \uBCF4\uCDA9 \uC2E4\uD328", e);
-      }
-    }, 1500);
-  }
-  return { catchUpLatest, caughtUp, CATCH_UP_WINDOW_MS, dispose: () => {
-    disposed = true;
-    clearTimeout(catchUpTimer);
-  } };
-}
-
-// src/illustrations.ts
-var MALFORMED_ANNOTATION = "\u27E6\uC0BD\uD654\uAC00: \uADF8\uB9BC \uD0DC\uADF8 \uD615\uC2DD \uC624\uB958 \u2014 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uC2DC\uB3C4\uB429\uB2C8\uB2E4\u27E7";
-var START = /<pic(?=[\s/>]|$)|<pic\u27E6\uC0BD\uD654\uAC00:|!\[\uADF8\uB9BC:|\[\u26A0\uFE0F \uADF8\uB9BC \uC0DD\uC131 \uC2E4\uD328\(|\[\uD55C \uB2F5\uBCC0\uB2F9 \uADF8\uB9BC \uC0C1\uD55C\(|<pic-(?:failed|skipped)\b/g;
-var TAG = /^<pic(?:\u27E6\uC0BD\uD654\uAC00: \uADF8\uB9BC \uD0DC\uADF8 \uD615\uC2DD \uC624\uB958 \u2014 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uC2DC\uB3C4\uB429\uB2C8\uB2E4\u27E7)?(?=[\s/>]|$)(?:[^<>"']|"[^"<]*"|'[^'<]*')*>/;
-var STATUS = /^\[(?:\u26A0\uFE0F \uADF8\uB9BC \uC0DD\uC131 \uC2E4\uD328\(|\uD55C \uB2F5\uBCC0\uB2F9 \uADF8\uB9BC \uC0C1\uD55C\()[\s\S]*?<pic-(?:failed|skipped) id="[a-z0-9]+">\]/;
-var SENTINEL = /^<pic-(?:failed|skipped)\s+id="[a-z0-9]+"\s*\/?>/;
-function imageLength(text) {
-  const alt = /^!\[\uADF8\uB9BC:[^\]\n]*\]\(/.exec(text);
-  if (!alt)
-    return 0;
-  let depth = 1;
-  for (let i = alt[0].length;i < text.length; i++) {
-    if (text[i] === "\\") {
-      i++;
-      continue;
-    }
-    if (text[i] === "(")
-      depth++;
-    if (text[i] === ")" && --depth === 0)
-      return i + 1;
-  }
-  return 0;
-}
-function replaceIllustrations(text, replace) {
-  const scan = new RegExp(START);
-  let out = "", cursor = 0, count = 0;
-  for (let match;match = scan.exec(text); ) {
-    const start = match.index;
-    const rest = text.slice(start);
-    let length = 0;
-    if (rest.startsWith("!["))
-      length = imageLength(rest);
-    else if (rest.startsWith("["))
-      length = STATUS.exec(rest)?.[0].length ?? 0;
-    else if (rest.startsWith("<pic-"))
-      length = SENTINEL.exec(rest)?.[0].length ?? 0;
-    else {
-      length = TAG.exec(rest)?.[0].length ?? 0;
-      if (!length) {
-        const offset = rest.startsWith(`<pic${MALFORMED_ANNOTATION}`) ? 4 + MALFORMED_ANNOTATION.length : 4;
-        const stop = /[<>\r\n]/.exec(rest.slice(offset));
-        length = stop ? offset + stop.index + (stop[0] === ">" ? 1 : 0) : rest.length;
-      }
-    }
-    if (!length)
-      continue;
-    length += /^\s*<\/pic\s*>/.exec(rest.slice(length))?.[0].length ?? 0;
-    out += text.slice(cursor, start) + replace(text.slice(start, start + length), count++);
-    cursor = start + length;
-    scan.lastIndex = cursor;
-  }
-  return out + text.slice(cursor);
-}
-function normalizeIllustrations(text) {
-  return replaceIllustrations(text, (_markup, index) => `\u27EAlv-illustration:${index + 1}\u27EB`);
-}
-function currentIllustrations(content) {
-  const pieces = [];
-  replaceIllustrations(content, (piece) => {
-    pieces.push(piece);
-    return piece;
-  });
-  let index = 0;
-  return {
-    replace(text) {
-      return replaceIllustrations(text, () => pieces[index++] ?? "");
-    },
-    remaining() {
-      return pieces.slice(index).join(`
-
-`);
-    }
-  };
-}
-function restoreCurrentIllustrations(translated, content) {
-  const current = currentIllustrations(content);
-  const text = current.replace(translated);
-  const rest = current.remaining();
-  return rest ? `${text}
-
-${rest}` : text;
-}
-
-// src/translate/chunk.ts
-var TRANSLATION_CHUNK_CHARS = 3200;
-var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
-function findCut(text, from, limit) {
-  const end = from + limit;
-  const span = text.slice(from, end + 1);
-  let best = -1;
-  for (const m of span.matchAll(SENTENCE_BREAK)) {
-    const at = m.index + m[0].length;
-    if (at <= limit)
-      best = Math.max(best, at);
-  }
-  const newline = span.lastIndexOf(`
-`, limit);
-  if (newline > 0)
-    best = Math.max(best, newline);
-  if (best <= 0) {
-    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
-      if (/\s/.test(span[i])) {
-        best = i;
-        break;
-      }
-    }
-  }
-  let cut = best > 0 ? from + best : end;
-  const open = text.lastIndexOf("\u27E6", cut - 1);
-  if (open >= from) {
-    const close = text.indexOf("\u27E7", open);
-    if (close >= cut)
-      cut = open > from ? open : close + 1;
-  }
-  return cut;
-}
-function cutParagraph(paragraph, limit) {
-  const pieces = [];
-  let from = 0;
-  while (paragraph.length - from > limit) {
-    const cut = findCut(paragraph, from, limit);
-    pieces.push(paragraph.slice(from, cut));
-    from = cut;
-    while (from < paragraph.length && /\s/.test(paragraph[from]))
-      from++;
-  }
-  pieces.push(paragraph.slice(from));
-  return pieces;
-}
-function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
-  const max = Math.max(1, Math.floor(limit));
-  const pieces = String(text).replace(/\r\n?/g, `
-`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
-  const parts = [];
-  for (const raw of pieces) {
-    const piece = raw.trim();
-    if (!piece)
-      continue;
-    const last = parts.length - 1;
-    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
-      parts[last] += `
-
-${piece}`;
-    else
-      parts.push(piece);
-  }
-  return parts;
-}
-var SENTENCE_END = /[.!?\u3002\uFF01\uFF1F\u2026"\u201D\u2019'\u300D\u300F)\]]$/;
-function joinContinuation(partial, continuation) {
-  let cont = continuation.replace(/^\s*\n/, `
-`);
-  if (!cont.trim())
-    return partial;
-  const tail = partial.slice(-200);
-  for (let k = Math.min(tail.length, cont.length);k >= 8; k--) {
-    if (tail.endsWith(cont.slice(0, k))) {
-      cont = cont.slice(k);
-      break;
-    }
-  }
-  if (!cont.trim())
-    return partial;
-  if (/\s$/.test(partial) || /^\s/.test(cont))
-    return partial + cont;
-  return SENTENCE_END.test(partial) ? `${partial} ${cont}` : partial + cont;
-}
-function isTruncatedFinish(reason) {
-  if (typeof reason !== "string")
-    return false;
-  const r = reason.toLowerCase();
-  return r === "length" || r.includes("max_tokens") || r.includes("max_output") || r === "max_tokens";
-}
-
-// src/translate/clean-reply.ts
-function cleanReply(text) {
-  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
-}
-
-// src/translate/glossary.ts
-function parseGlossary(raw) {
-  const pairs = [];
-  for (const line of raw.split(/\r?\n/u)) {
-    const separator = line.indexOf("=");
-    if (separator < 1)
-      continue;
-    const left = line.slice(0, separator).trim();
-    const right = line.slice(separator + 1).trim();
-    if (left && right)
-      pairs.push({ left, right });
-  }
-  return pairs;
-}
-
 // src/bundles.ts
 function effectiveGuides(store, settings) {
   const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
@@ -1454,26 +1301,6 @@ function protect(source, options) {
   }
   text = text.replace(/\{\{[\s\S]*?\}\}/g, (m) => hold(m));
   return { text, pieces };
-}
-function markersIn(text) {
-  return [...text.matchAll(MARKER)].map((m) => Number(m[1]));
-}
-function checkMarkers(sourceText, translated) {
-  const expected = markersIn(sourceText).sort((a, b) => a - b);
-  const got = markersIn(translated).sort((a, b) => a - b);
-  if (expected.join(",") === got.join(","))
-    return null;
-  const missing = expected.filter((n) => !got.includes(n));
-  const extra = got.filter((n) => !expected.includes(n));
-  const dup = got.filter((n, i) => got.indexOf(n) !== i);
-  const parts = [];
-  if (missing.length)
-    parts.push(`\uBE60\uC9D0 ${missing.map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
-  if (extra.length)
-    parts.push(`\uC5C6\uB358 \uD45C\uC2DC ${extra.map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
-  if (dup.length)
-    parts.push(`\uC911\uBCF5 ${[...new Set(dup)].map((n) => `\u27E6${n}\u27E7`).join(" ")}`);
-  return `\uBC88\uC5ED\uBB38\uC5D0\uC11C \uBCF4\uD638 \uD45C\uC2DC\uAC00 \uC5B4\uAE0B\uB0AC\uC2B5\uB2C8\uB2E4 (${parts.join(", ")}).`;
 }
 function restore(text, pieces) {
   return text.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m);
@@ -1684,10 +1511,8 @@ ${glossary}` : "");
 }
 
 // src/shared.ts
-var VIEW_WINDOW = 30;
 var notesTools = createAssembly({ currentScope: () => ({}), storedConfig: { presets: [] }, paragraph: {} });
 var NOTE_LIMITS = { count: notesTools.NOTES_MAX, name: notesTools.NOTE_NAME_MAX, text: FREE_CONTEXT_MAX };
-var newNoteId = () => notesTools.newNoteId();
 var DISPLAY_MODES = ["below", "above", "only", "collapsed", "collapsed-source", "paragraph"];
 var FONT_MIN = 12;
 var FONT_MAX = 32;
@@ -1833,145 +1658,11 @@ function rawSourceHash(text) {
   return `${(hash >>> 0).toString(16)}-${text.length.toString(36)}`;
 }
 var METADATA_KEY = "st_translator";
-function recordHasMore(r) {
-  return r.truncatedPart >= 0 || r.parts.length < r.total;
-}
-
 // src/translate/prompt.ts
-var SYSTEM_PROMPT_MAX = 200000;
-var TRANSLATION_TEXT_MAX = 50000;
-
-class TranslationLimitError extends Error {
-  field;
-  length;
-  limit;
-  constructor(field, length, limit) {
-    const label = field === "systemPrompt" ? "\uC2DC\uC2A4\uD15C \uD504\uB86C\uD504\uD2B8" : "\uBC88\uC5ED \uBCF8\uBB38\uACFC \uCC38\uACE0 \uBE14\uB85D";
-    super(`${label} ${length.toLocaleString("en-US")}\uC790\uAC00 ${limit.toLocaleString("en-US")}\uC790 \uC81C\uD55C\uC744 \uCD08\uACFC\uD558\uC5EC \uBC88\uC5ED\uC744 \uC911\uB2E8\uD588\uC2B5\uB2C8\uB2E4. \uC9C0\uCE68\uC774\uB098 \uCC38\uACE0 \uC815\uBCF4\uC758 \uAE38\uC774\uB97C \uC904\uC5EC \uC8FC\uC138\uC694. \uB0B4\uC6A9\uC740 \uC798\uB77C\uB0B4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.`);
-    this.field = field;
-    this.length = length;
-    this.limit = limit;
-    this.name = "TranslationLimitError";
-  }
-}
 var pure = createAssembly({ currentScope: () => ({}), storedConfig: { presets: [] }, paragraph: {} });
 var glossarySection = pure.glossarySection;
 var escapeContextValue = pure.escapeContextValue;
 var LIVE_PROMPT_PRESET_IDS = pure.LIVE_PROMPT_PRESET_IDS;
-function directionPrompt(settings, direction, presets) {
-  const presetId = direction === "incoming" ? settings.incomingPresetId : settings.outgoingPresetId;
-  const preset = presets.find((p) => p.id === presetId) ?? presets.find((p) => p.id === INHERIT_PRESET_ID);
-  const own = (direction === "incoming" ? settings.incomingPrompt : settings.outgoingPrompt).trim();
-  if (preset?.replace)
-    return preset.prompt.trim();
-  return own || BASE_PROMPT;
-}
-function formatContextMessage(message, settings) {
-  const parts = [];
-  if (settings.contextIncludeOriginal && message.content)
-    parts.push(`<original>${escapeContextValue(normalizeIllustrations(message.content))}</original>`);
-  if (settings.contextIncludeTranslation && message.translation)
-    parts.push(`<translation>${escapeContextValue(normalizeIllustrations(message.translation))}</translation>`);
-  if (!parts.length)
-    return "";
-  return `<message role="${message.role}">
-${parts.join(`
-`)}
-</message>`;
-}
-function scopeOf(settings, direction, guides) {
-  return {
-    ...settings,
-    glossary: guides.glossary,
-    freeContext: guides.freeContext,
-    incomingVoicePrompt: guides.incomingVoicePrompt,
-    incomingPresetId: direction === "incoming" ? settings.incomingPresetId : settings.outgoingPresetId
-  };
-}
-function assemblyFor(settings, direction, presets, guides, persona) {
-  const scope = scopeOf(settings, direction, guides);
-  return {
-    scope,
-    ...createAssembly({ currentScope: () => scope, storedConfig: { presets }, paragraph: persona ?? { getChat: async () => ({}), getPersona: async () => null } })
-  };
-}
-async function personaSectionFor(settings, presets, name) {
-  const guides = effectiveGuides({ userBundles: [] }, settings);
-  const a = assemblyFor(settings, "incoming", presets, guides, { getChat: async () => ({ personaId: "persona" }), getPersona: async () => ({ name }) });
-  return a.personaSection(a.scope, "chat");
-}
-function buildTranslationRequest(input) {
-  const { direction, text, settings } = input;
-  const guides = effectiveGuides(input.store ?? { userBundles: [] }, settings);
-  const targetLanguage = direction === "incoming" ? settings.myLanguage : settings.modelLanguage;
-  const assembly = assemblyFor(settings, direction, input.presets, guides);
-  const incoming = direction === "incoming";
-  const glossary = assembly.glossarySection(guides.glossary, text, targetLanguage);
-  const systemPrompt = directionPrompt(settings, direction, input.presets);
-  const usesVocab = assembly.VOCAB_MACRO_TEST.test(incoming && assembly.livePresetPrompt(assembly.scope) || systemPrompt);
-  const glossaryPrefix = glossary && !usesVocab ? `${glossary}
-
-` : "";
-  const referenceText = glossaryPrefix ? `${glossaryPrefix}[Text to Translate]
-${text}
-[End Text]` : text;
-  if (referenceText.length > TRANSLATION_TEXT_MAX)
-    throw new TranslationLimitError("text", referenceText.length, TRANSLATION_TEXT_MAX);
-  let body = referenceText;
-  let hasContext = false;
-  const wantsContext = settings.contextEnabled && (settings.contextIncludeOriginal || settings.contextIncludeTranslation) && (direction === "incoming" || settings.contextIncludeUserInput);
-  if (wantsContext) {
-    const previous = input.previous.slice(-settings.contextMessageCount);
-    const prefix = `${glossaryPrefix}[Previous Context \u2014 Reference Only]
-
-`;
-    const suffix = `
-
-[Text to Translate]
-${text}
-[End Text]`;
-    let remaining = TRANSLATION_TEXT_MAX - prefix.length - suffix.length;
-    const formatted = [];
-    for (let index = previous.length - 1;index >= 0; index--) {
-      const block = formatContextMessage(previous[index], settings);
-      if (!block)
-        continue;
-      const cost = block.length + (formatted.length ? 2 : 0);
-      if (cost > remaining)
-        continue;
-      formatted.unshift(block);
-      remaining -= cost;
-    }
-    if (formatted.length) {
-      body = `${prefix}${formatted.join(`
-
-`)}${suffix}`;
-      hasContext = true;
-    }
-  }
-  let system = assembly.buildSystemPrompt({ systemPrompt }, hasContext, assembly.scope, glossary, incoming, "", incoming ? input.persona ?? "" : "");
-  if (input.hasMarkers)
-    system = [system, MARKER_INSTRUCTION].filter(Boolean).join(`
-
-`);
-  system = system.replaceAll("{{targetLanguage}}", targetLanguage.trim());
-  if (system.length > SYSTEM_PROMPT_MAX)
-    throw new TranslationLimitError("systemPrompt", system.length, SYSTEM_PROMPT_MAX);
-  return { system, user: `Translate the following text to ${targetLanguage}:
-
-${body}`, hasContext };
-}
-function buildContinuationRequest(base, partial, targetLanguage) {
-  const system = `${base.system}
-
-The earlier translation of this text into ${targetLanguage} stopped before the end. ` + "Continue it: output only the remaining translation, starting exactly where [Translation So Far] stops. " + "If it stops in the middle of a word, start with the rest of that word. " + "Do not repeat anything already translated and do not add any commentary. " + "If nothing remains to be translated, output nothing.";
-  const user = `${base.user}
-
-[Translation So Far]
-${partial}
-[End Translation So Far]`;
-  return { system, user, hasContext: base.hasContext };
-}
 
 // src/translate/paragraphs.ts
 function splitParagraphs(text) {
@@ -2009,47 +1700,11 @@ function splitParagraphs(text) {
   flush();
   return blocks;
 }
-var HTML_TAG = /<\/?(?:div|span|p|br|hr|b|strong|i|em|u|s|small|sub|sup|mark|h[1-6]|ul|ol|li|table|thead|tbody|tfoot|tr|td|th|caption|colgroup|col|blockquote|pre|code|figure|figcaption|details|summary|img|a|center|font|section|article|header|footer|main|aside|nav|del|svg|g|path|circle|ellipse|line|polyline|polygon|rect|text|tspan|defs|style)(?:\s+[\w:-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*\s*\/?>/g;
-function hasNoText(text) {
-  return !/[\p{L}\p{N}]/u.test(String(text).replace(/\u27E6\s*\d+\s*\u27E7/g, "").replace(HTML_TAG, ""));
-}
 var BLOCK = "div|svg|table|ul|ol|details|blockquote|figure|pre|section|article|header|footer|main|aside|nav";
 var OPEN = new RegExp(`<(?:${BLOCK})(?:\\s[^<>]*)?>`, "gi");
 var CLOSE = new RegExp(`<\\/(?:${BLOCK})\\s*>`, "gi");
-function blockDepth(text) {
-  const opens = (text.match(OPEN) || []).filter((t) => !t.endsWith("/>")).length;
-  const closes = (text.match(CLOSE) || []).length;
-  return opens - closes;
-}
-function htmlGroups(sources) {
-  const groups = [];
-  for (let i = 0;i < sources.length; ) {
-    const group = [];
-    let open = 0;
-    let j = i;
-    do {
-      group.push(j);
-      open += blockDepth(sources[j]);
-      j++;
-    } while (open > 0 && j < sources.length);
-    groups.push(group);
-    i = j;
-  }
-  return groups;
-}
 
 // src/translate/engine.ts
-var MAX_AUTO_CONTINUE = 4;
-var MAX_FALLBACK_SEGMENTS = 40;
-
-class TranslationError extends Error {
-  record;
-  constructor(message, record) {
-    super(message);
-    this.record = record;
-    this.name = "TranslationError";
-  }
-}
 function recordToText(r, currentContent) {
   const text = restore(r.parts.map(cleanReply).filter((p) => p.trim()).join(`
 
@@ -2064,170 +1719,9 @@ function partSources(protectedText, settings) {
   const long = settings.longSplitChars > 0 && protectedText.length >= settings.longSplitChars;
   return long ? splitForTranslation(protectedText, TRANSLATION_CHUNK_CHARS) : [protectedText];
 }
-function resumable(record, pieces, total, settings) {
-  return !!record && sameArray(record.pieces, pieces) && record.total === total && (record.unit ?? "whole") === settings.translationUnit;
-}
-function skipsRequest(part, settings, targetLanguage) {
-  return hasNoText(part) || settings.translationUnit === "paragraph" && isPairedDialogue(part, targetLanguage);
-}
-function sameArray(a, b) {
-  return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]));
-}
-async function translate(job, deps) {
-  const { settings } = job;
-  const complete = async (request) => {
-    const result = await deps.complete(request);
-    return { ...result, text: cleanReply(result.text) };
-  };
-  const prot = protect(job.source, settings);
-  const sources = partSources(prot.text, settings);
-  const targetLanguage = job.direction === "incoming" ? settings.myLanguage : settings.modelLanguage;
-  const aborted = () => {
-    if (deps.signal?.aborted)
-      throw new TranslationError("\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.", record);
-  };
-  const resume = resumable(job.resume, prot.pieces, sources.length, settings) ? job.resume : null;
-  const record = resume ? { ...resume, pieces: prot.pieces, parts: [...resume.parts], status: "partial", error: undefined, updatedAt: Date.now() } : { parts: [], pieces: prot.pieces, unit: settings.translationUnit, total: sources.length, truncatedPart: -1, status: "partial", updatedAt: Date.now() };
-  const requestFor = (part) => buildTranslationRequest({
-    direction: job.direction,
-    text: part,
-    settings,
-    store: job.store,
-    presets: job.presets,
-    previous: job.previous,
-    hasMarkers: /\u27E6\d+\u27E7/.test(part),
-    persona: job.persona
-  });
-  const save = async () => {
-    record.updatedAt = Date.now();
-    await deps.onProgress?.({ ...record, parts: [...record.parts] });
-  };
-  const continuePart = async (i, rounds) => {
-    const base = requestFor(sources[i]);
-    for (let round = 0;round < rounds; round++) {
-      aborted();
-      const result = await complete(buildContinuationRequest(base, record.parts[i], targetLanguage));
-      const before = record.parts[i];
-      record.parts[i] = joinContinuation(before, result.text);
-      const truncated = isTruncatedFinish(result.finishReason);
-      record.truncatedPart = truncated ? i : -1;
-      await save();
-      if (!truncated)
-        return true;
-      if (record.parts[i] === before)
-        return false;
-    }
-    return record.truncatedPart !== i;
-  };
-  const translateBySegments = async (part) => {
-    const segments = part.split(/(\u27E6\s*\d+\s*\u27E7)/);
-    const todo = segments.filter((seg, k) => k % 2 === 0 && !hasNoText(seg)).length;
-    if (todo > MAX_FALLBACK_SEGMENTS)
-      return null;
-    const out = [];
-    for (let k = 0;k < segments.length; k++) {
-      const seg = segments[k];
-      if (k % 2 === 1 || hasNoText(seg)) {
-        out.push(seg);
-        continue;
-      }
-      aborted();
-      const lead = /^\s*/.exec(seg)[0];
-      const trail = /\s*$/.exec(seg)[0];
-      const result = await complete(requestFor(seg.trim()));
-      const text = result.text.trim();
-      if (!text || isTruncatedFinish(result.finishReason) || /\u27E6\s*\d+\s*\u27E7/.test(text))
-        return null;
-      out.push(lead + text + trail);
-    }
-    return out.join("");
-  };
-  const translatePart = async (i) => {
-    if (skipsRequest(sources[i], settings, targetLanguage)) {
-      record.parts[i] = sources[i];
-      await save();
-      return true;
-    }
-    const request = requestFor(sources[i]);
-    for (let attempt = 0;attempt < 2; attempt++) {
-      aborted();
-      const result = await complete(request);
-      record.parts[i] = result.text.trim();
-      if (isTruncatedFinish(result.finishReason)) {
-        record.truncatedPart = i;
-        await save();
-        if (!settings.autoContinue)
-          return false;
-        if (!await continuePart(i, MAX_AUTO_CONTINUE))
-          return false;
-      } else {
-        record.truncatedPart = -1;
-      }
-      const problem = checkMarkers(sources[i], record.parts[i]);
-      if (!problem) {
-        await save();
-        return true;
-      }
-      if (attempt === 1) {
-        const pieces = await translateBySegments(sources[i]);
-        if (pieces === null) {
-          record.parts.length = i;
-          throw new TranslationError(`${problem} HTML\uC774 \uAE68\uC9C0\uC9C0 \uC54A\uB3C4\uB85D \uC774 \uBD80\uBD84\uC740 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uBC88\uC5ED\uD574 \uC8FC\uC138\uC694.`, record);
-        }
-        record.parts[i] = pieces;
-        record.truncatedPart = -1;
-        await save();
-        return true;
-      }
-    }
-    return false;
-  };
-  try {
-    if (resume) {
-      if (record.truncatedPart >= 0) {
-        const i = record.truncatedPart;
-        if (!await continuePart(i, settings.autoContinue ? MAX_AUTO_CONTINUE : 1))
-          return finish();
-        const problem = checkMarkers(sources[i], record.parts[i]);
-        if (problem)
-          throw new TranslationError(`${problem} \uC774\uC5B4\uC11C \uBC88\uC5ED\uD55C \uBD80\uBD84\uC758 HTML \uBCF4\uD638 \uD45C\uC2DC\uAC00 \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uBC88\uC5ED\uD574 \uC8FC\uC138\uC694.`, record);
-      } else if (record.parts.length >= record.total) {
-        const i = record.total - 1;
-        const before = record.parts[i];
-        record.truncatedPart = i;
-        const complete = await continuePart(i, 1);
-        const problem = checkMarkers(sources[i], record.parts[i]);
-        if (problem) {
-          record.parts[i] = before;
-          record.truncatedPart = -1;
-          throw new TranslationError(`${problem} \uC774\uC5B4\uC11C \uBC88\uC5ED\uD55C \uB0B4\uC6A9\uC740 \uBC84\uB838\uC2B5\uB2C8\uB2E4.`, record);
-        }
-        if (!complete)
-          return finish();
-        record.truncatedPart = -1;
-      }
-    }
-    for (let i = record.parts.length;i < sources.length; i++) {
-      if (!await translatePart(i))
-        return finish();
-    }
-    return finish();
-  } catch (e) {
-    if (e instanceof TranslationError)
-      throw e;
-    record.status = "error";
-    throw new TranslationError(e instanceof Error ? e.message : String(e), { ...record, parts: [...record.parts] });
-  }
-  function finish() {
-    record.status = record.truncatedPart >= 0 || record.parts.length < record.total ? "partial" : "done";
-    record.updatedAt = Date.now();
-    return { ...record, parts: [...record.parts] };
-  }
-}
 
 // src/display/paragraph-view.ts
-var PENDING_TEXT = "\uC544\uC9C1 \uBC88\uC5ED\uD558\uC9C0 \uC54A\uC740 \uBB38\uB2E8\uC785\uB2C8\uB2E4.";
-function sameArray2(a, b) {
+function sameArray(a, b) {
   return a.length === b.length && a.every((v, i) => normalizeIllustrations(v) === normalizeIllustrations(b[i]));
 }
 function pairParagraphs(content, record, settings) {
@@ -2235,7 +1729,7 @@ function pairParagraphs(content, record, settings) {
     try {
       const prot = protect(content, settings);
       const sources = partSources(prot.text, { ...settings, translationUnit: "paragraph" });
-      if (sameArray2(prot.pieces, record.pieces) && sources.length === record.total) {
+      if (sameArray(prot.pieces, record.pieces) && sources.length === record.total) {
         const current = currentIllustrations(content);
         const pairs = sources.map((s, i) => {
           const text = cleanReply(record.parts[i] ?? "");
@@ -2261,216 +1755,84 @@ ${rest}`;
   }
   return { kind: "whole", pairs: [{ source: content.trim(), translation: recordToText(record, content).trim() || null }] };
 }
-function groupPairs(pairs) {
-  return htmlGroups(pairs.map((p) => p.source)).map((group) => {
-    if (group.length === 1)
-      return pairs[group[0]];
-    const items = group.map((i) => pairs[i]);
-    return {
-      source: items.map((p) => p.source).join(`
+
+// src/adapter/pub.ts
+var isRecord = (v) => !!v && typeof v === "object" && typeof v.map === "object" && v.map !== null;
+function keptTagNames(raw) {
+  return new Set(String(raw ?? "").split(/[\s,;]+/).map((part) => {
+    const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);
+    return m ? (m[1] || m[2] || "").toLowerCase() : "";
+  }).filter(Boolean));
+}
+function contentUnits(content, kept = new Set) {
+  const source = String(content ?? "").replace(/\r\n?/g, `
+`).replace(/<[^>]*>/g, (tag) => {
+    const name = /^<\/?\s*([a-z][\w:-]*)/i.exec(tag)?.[1]?.toLowerCase();
+    return name && kept.has(name) ? tag : "";
+  });
+  return source.split(/\n[ \t]*\n/).map((block) => block.trim()).filter((block) => block && /\p{L}/u.test(block));
+}
+function buildPubFromTt(content, record, language, kept, now) {
+  if (!isRecord(record))
+    return null;
+  const units = contentUnits(content, kept);
+  const rows = [];
+  const seen = new Set;
+  for (const source of units) {
+    const key = blockKey(source);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    const t = record.map[key];
+    rows.push({ key, source, translation: typeof t === "string" && t.trim() ? t : null });
+  }
+  const translated = rows.filter((r) => r.translation !== null);
+  if (!translated.length)
+    return null;
+  const pub = {
+    v: 1,
+    h: hashText(content),
+    lang: langCode(language),
+    text: rows.map((r) => r.translation ?? r.source).join(`
 
 `),
-      translation: items.some((p) => p.translation === null) ? null : items.map((p) => p.translation).join(`
-
-`)
-    };
-  });
-}
-var NOTES = {
-  paragraph: "",
-  matched: "\uBA54\uC2DC\uC9C0 \uC804\uCCB4 \uBC88\uC5ED\uC744 \uBB38\uB2E8 \uC218\uC640 \uC21C\uC11C\uB85C \uB9DE\uCDB0 \uBCF4\uC5EC \uC90D\uB2C8\uB2E4.",
-  whole: '\uC6D0\uBB38\uACFC \uBC88\uC5ED\uC758 \uBB38\uB2E8 \uC218\uAC00 \uB2EC\uB77C \uC804\uCCB4 \uB300\uC870\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4. \uBB38\uB2E8\uBCC4\uB85C \uB9DE\uCD94\uB824\uBA74 \uBC88\uC5ED \uB2E8\uC704\uB97C "\uBB38\uB2E8\uBCC4"\uB85C \uBC14\uAFD4 \uB2E4\uC2DC \uBC88\uC5ED\uD558\uC138\uC694.'
-};
-function block(cls, label, body) {
-  return `<div class="${cls}"><div class="stt-pr-label">${label}</div>
-
-${body}
-
-</div>`;
-}
-function buildParagraphView(content, record, settings, view, order = "source-first") {
-  const pairing = pairParagraphs(content, record, settings);
-  const pairs = groupPairs(pairing.pairs);
-  const whole = pairing.kind === "whole";
-  const out = [`<div class="stt-pr${view === "tap" ? " stt-pr-tap" : ""}${view !== "tap" && order === "translation-first" ? " stt-pr-tfirst" : ""}">`];
-  if (NOTES[pairing.kind])
-    out.push(`<div class="stt-pr-note">${NOTES[pairing.kind]}</div>`);
-  let n = 0;
-  pairs.forEach((pair) => {
-    if (pair.translation !== null && pair.translation === pair.source) {
-      out.push(`<div class="stt-pr-pair stt-pr-same">
-
-${pair.source}
-
-</div>`);
-      return;
-    }
-    n++;
-    const sourceLabel = whole ? "\uC6D0\uBB38 \uC804\uCCB4" : `\uC6D0\uBB38 ${n}`;
-    const targetLabel = whole ? "\uBC88\uC5ED \uC804\uCCB4" : `\uBC88\uC5ED ${n}`;
-    const target = pair.translation ?? `<span class="stt-pr-pending">${PENDING_TEXT}</span>`;
-    if (view === "tap" && pair.translation !== null) {
-      out.push(`<div class="stt-pr-pair">
-${block("stt-pr-tgt", targetLabel, target)}
-` + `<details class="stt-pr-orig"><summary>${sourceLabel} \xB7 \uB20C\uB7EC\uC11C \uC6D0\uBB38 \uC5F4\uAE30 / \uB2EB\uAE30</summary>
-
-${pair.source}
-
-</details>
-</div>`);
-    } else {
-      const src = block("stt-pr-src", sourceLabel, pair.source);
-      const tgt = block("stt-pr-tgt", targetLabel, target);
-      out.push(`<div class="stt-pr-pair">
-${order === "translation-first" ? `${tgt}
-${src}` : `${src}
-${tgt}`}
-</div>`);
-    }
-  });
-  out.push("</div>");
-  return out.join(`
-`);
-}
-
-// src/adapter/contract.ts
-var PEER_ID = "anon_memory_lv";
-var SELF_ID = "st_translator";
-var CONTRACT_NAME = "lv-tx";
-var CONTRACT_VERSION = 1;
-var PUB_PARAS_MAX = 400;
-var PROVIDES = ["pub-translation@1", "glossary@1"];
-function handshake(version, provides = PROVIDES) {
-  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
-}
-function classifyPeer(value) {
-  if (!value || typeof value !== "object")
-    return "none";
-  const v = value;
-  if (v.name !== CONTRACT_NAME || typeof v.v !== "number")
-    return "incompatible";
-  return v.v === CONTRACT_VERSION ? "ok" : "incompatible";
-}
-function langCode(language) {
-  const l = String(language ?? "").trim();
-  if (/^(ko|kor|korean)$/i.test(l) || /\uD55C\uAD6D|\uC870\uC120/.test(l))
-    return "ko";
-  if (/^(en|eng|english)$/i.test(l) || /\uC601\uC5B4/.test(l))
-    return "en";
-  if (/^(ja|jpn|japanese)$/i.test(l) || /\uC77C\uBCF8|\u65E5\u672C/.test(l))
-    return "ja";
-  if (/^(zh|chinese)$/i.test(l) || /\uC911\uAD6D|\u4E2D\u6587/.test(l))
-    return "zh";
-  return l.toLowerCase();
-}
-function buildPub(content, record, settings, now) {
-  if (!record || record.status !== "done" || !record.parts.some((p) => p.trim()))
-    return null;
-  const text = recordToText(record, content);
-  if (!text.trim())
-    return null;
-  const pub = { v: 1, h: hashText(content), lang: langCode(settings.myLanguage), text, at: now };
-  if (record.unit === "paragraph") {
-    try {
-      const pairing = pairParagraphs(content, record, settings);
-      if (pairing.kind !== "whole") {
-        const edited = new Set(record.edited ?? []);
-        const entries = [];
-        pairing.pairs.forEach((pair, i) => {
-          if (pair.translation === null || !pair.translation.trim())
-            return;
-          entries.push([blockKey(pair.source), pair.translation, edited.has(i)]);
-        });
-        const kept = entries.slice(-PUB_PARAS_MAX);
-        if (kept.length) {
-          pub.paras = Object.fromEntries(kept.map(([key, translation]) => [key, translation]));
-          const marks = kept.filter(([, , wasEdited]) => wasEdited).map(([key]) => [key, 1]);
-          if (marks.length)
-            pub.edited = Object.fromEntries(marks);
-        }
-      }
-    } catch {}
-  }
+    at: now
+  };
+  const kept400 = translated.slice(-PUB_PARAS_MAX);
+  pub.paras = Object.fromEntries(kept400.map((r) => [r.key, r.translation]));
+  const marks = kept400.filter((r) => record.edited?.[r.key]).map((r) => [r.key, 1]);
+  if (marks.length)
+    pub.edited = Object.fromEntries(marks);
   return pub;
 }
-function projectPub(mt, content, key, settings, publish, now) {
-  const record = key ? mt.entries[key] : undefined;
-  const pub = publish ? buildPub(content, record, settings, now) : null;
-  if (pub) {
-    mt.pub = pub;
-    return true;
+function convertLegacyRecord(content, legacy, settings, kept, now) {
+  if (!legacy || legacy.status !== "done" || legacy.unit !== "paragraph")
+    return null;
+  let pairing;
+  try {
+    pairing = pairParagraphs(content, legacy, settings);
+  } catch {
+    return null;
   }
-  delete mt.pub;
-  return false;
-}
-function glossaryText(raw) {
-  return parseGlossary(raw).map((p) => `${p.left} = ${p.right}`).join(`
-`);
-}
-var isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-function planGlossary(meta, text, now) {
-  const own = isObject(meta[SELF_ID]) ? meta[SELF_ID] : {};
-  const published = isObject(own.glossary) ? own.glossary : null;
-  const hash = hashText(text);
-  if (!published && !text)
+  if (pairing.kind !== "paragraph")
     return null;
-  if (published?.hash === hash)
-    return null;
-  const entry = { text, hash, at: now };
-  return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };
-}
-
-// src/translate/edit.ts
-function editablePairs(content, record, settings) {
-  if (record.status !== "done")
-    return null;
-  const pairing = pairParagraphs(content, record, settings);
-  if (pairing.kind === "whole")
-    return null;
-  const edited = new Set(record.edited ?? []);
-  const pairs = [];
-  for (const [index, pair] of pairing.pairs.entries()) {
+  const edited = new Set(legacy.edited ?? []);
+  const map = {};
+  const marks = {};
+  const units = new Set(contentUnits(content, kept).map(blockKey));
+  pairing.pairs.forEach((pair, i) => {
     if (pair.translation === null || !pair.translation.trim())
-      return null;
-    pairs.push({ index, source: pair.source, translation: pair.translation, edited: edited.has(index), key: blockKey(pair.source) });
-  }
-  return pairs.length ? pairs : null;
-}
-function cleanEdit(text) {
-  return String(text).replace(/\r\n?/g, `
-`).replace(/\n[ \t]*\n+/g, `
-`).trim();
-}
-function recordFromMap(content, map, editedKeys) {
-  const sources = splitParagraphs(content);
-  const edited = new Set(editedKeys);
-  const parts = [];
-  const marked = [];
-  let missing = 0;
-  sources.forEach((source, i) => {
-    const key = blockKey(source);
-    const text = map[key];
-    if (text !== undefined && text.trim())
-      parts.push(text);
-    else if (hasNoText(source))
-      parts.push(source);
-    else {
-      parts.push("");
-      missing++;
-    }
-    if (edited.has(key))
-      marked.push(i);
+      return;
+    const key = blockKey(pair.source);
+    if (!units.has(key))
+      return;
+    map[key] = pair.translation.trim();
+    if (edited.has(i))
+      marks[key] = 1;
   });
-  return {
-    parts,
-    pieces: [],
-    unit: "paragraph",
-    total: sources.length,
-    ...marked.length ? { edited: marked } : {},
-    truncatedPart: -1,
-    status: missing ? "partial" : "done",
-    updatedAt: Date.now()
-  };
+  if (!Object.keys(map).length)
+    return null;
+  return { v: 1, map, edited: marks, view: "", at: legacy.updatedAt || now };
 }
 
 // src/connection.ts
@@ -2511,14 +1873,6 @@ async function resolveConnection(host, uid, chosen, hint = {}) {
     throw new NoConnectionError;
   return picked;
 }
-var SOURCE_LABELS = {
-  chosen: "\uC124\uC815\uC5D0\uC11C \uACE0\uB978 \uC5F0\uACB0",
-  chat: "\uC774 \uCC44\uD305\uC5D0 \uC9C0\uC815\uB41C \uC5F0\uACB0",
-  active: "\uC9C0\uAE08 \uC4F0\uB294(\uD65C\uC131) \uC5F0\uACB0",
-  default: "\uAE30\uBCF8 \uC5F0\uACB0",
-  first: "\uCCAB \uBC88\uC9F8 \uC5F0\uACB0",
-  host: "Lumiverse\uAC00 \uC815\uD558\uB294 \uC5F0\uACB0"
-};
 function friendlyError(message) {
   if (/No connection profile found/i.test(message))
     return CONNECTION_HINT;
@@ -2526,65 +1880,40 @@ function friendlyError(message) {
     return "\uC774 \uD655\uC7A5\uC740 \uC0AC\uC6A9\uC790 \uC815\uBCF4\uB97C \uBC1B\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD398\uC774\uC9C0\uB97C \uC0C8\uB85C\uACE0\uCE68\uD55C \uB4A4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
   return message;
 }
-async function quietComplete(host, args) {
-  const conn = await resolveConnection(host, args.uid, args.chosen, args.hint);
-  if (conn.staleId)
-    args.onStale?.(conn.staleId, conn);
-  const result = await host.generate.quiet({
-    type: "quiet",
-    messages: [
-      { role: "system", content: args.system },
-      { role: "user", content: args.user }
-    ],
-    ...conn.id ? { connection_id: conn.id } : {},
-    parameters: { temperature: 0.3 },
-    userId: args.uid,
-    signal: args.signal
-  });
-  if (typeof result === "string")
-    return { text: result };
-  return { text: typeof result?.content === "string" ? result.content : "", finishReason: result?.finish_reason };
+
+// src/message-ui.ts
+function recordFor(mt, content) {
+  const key = recordKeyFor(mt, content);
+  return key ? mt?.entries?.[key] ?? null : null;
 }
-
-// src/display/render.ts
-function renderMessage(content, record, settings, view) {
-  if (!record || !record.parts.some((p) => cleanReply(p).trim()))
-    return content;
-  if (settings.displayMode === "paragraph")
-    return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
-  const text = recordToText(record, content);
-  switch (settings.displayMode) {
-    case "above":
-      return `${text}
-
-<hr class="stt-separator">
-
-${content}`;
-    case "only":
-      return text;
-    case "collapsed":
-      return `${content}
-
-<details class="stt-translation"><summary>\uBC88\uC5ED</summary>
-
-${text}
-
-</details>`;
-    case "collapsed-source":
-      return `${text}
-
-<details class="stt-translation"><summary>\uC6D0\uBB38</summary>
-
-${content}
-
-</details>`;
-    default:
-      return `${content}
-
-<hr class="stt-separator">
-
-${text}`;
+function recordKeyFor(mt, content) {
+  for (const key of [sourceHash(content), rawSourceHash(content)]) {
+    if (mt?.entries?.[key])
+      return key;
   }
+  const current = [];
+  replaceIllustrations(content, (piece) => {
+    current.push(piece);
+    return piece;
+  });
+  if (current.length) {
+    const entries = Object.entries(mt?.entries ?? {}).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+    for (const [key, record] of entries) {
+      const original = [];
+      replaceIllustrations(restore(record.parts.join(`
+
+`), record.pieces), (piece) => {
+        original.push(piece);
+        return piece;
+      });
+      if (original.length !== current.length)
+        continue;
+      const candidate = replaceIllustrations(content, (_piece, index) => original[index]);
+      if (rawSourceHash(candidate) === key)
+        return key;
+    }
+  }
+  return null;
 }
 
 // src/host-emu/backend-ops.ts
@@ -2636,16 +1965,78 @@ function createEmuBridge(d) {
     }
     throw Object.assign(new Error("\uBA54\uC2DC\uC9C0\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."), { status: 404 });
   }
+  const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
   async function writeTt(chatId, m, swipe, value) {
-    const prev = m.metadata?.[TT_KEY] && typeof m.metadata[TT_KEY] === "object" ? m.metadata[TT_KEY] : {};
+    const prev = isObj(m.metadata?.[TT_KEY]) ? m.metadata[TT_KEY] : {};
     const next = { ...prev };
     if (value === null || value === undefined)
       delete next[String(swipe)];
     else
       next[String(swipe)] = value;
-    const patch = d.metadataPatch ? { metadata_patch: { [TT_KEY]: next } } : { metadata: { ...m.metadata ?? {}, [TT_KEY]: next } };
+    const changed = { [TT_KEY]: next };
+    const visible = Number.isInteger(m.swipe_id) ? m.swipe_id : 0;
+    const proj = swipe === visible ? await d.projection?.(chatId) : undefined;
+    if (proj?.publish) {
+      const st = isObj(m.metadata?.[METADATA_KEY]) ? m.metadata[METADATA_KEY] : {};
+      const pub = buildPubFromTt(String(m.content ?? ""), next[String(swipe)], proj.language, proj.kept, Date.now());
+      if (pub || st.pub !== undefined) {
+        const merged = { v: 1, entries: {}, ...st };
+        if (pub)
+          merged.pub = pub;
+        else
+          delete merged.pub;
+        changed[METADATA_KEY] = merged;
+      }
+    }
+    const patch = d.metadataPatch ? { metadata_patch: changed } : { metadata: { ...m.metadata ?? {}, ...changed } };
     await host.chat.updateMessage(chatId, m.id, patch);
-    m.metadata = { ...m.metadata ?? {}, [TT_KEY]: next };
+    m.metadata = { ...m.metadata ?? {}, ...changed };
+  }
+  const converting = new Set;
+  async function convertLegacy(chatId, rows) {
+    if (!d.legacy)
+      return;
+    let ctx;
+    for (const m of rows) {
+      const old = m.metadata?.[METADATA_KEY];
+      if (!old || !isObj(old.entries) || !Object.keys(old.entries).length)
+        continue;
+      const swipe = Number.isInteger(m.swipe_id) ? m.swipe_id : 0;
+      const tt = isObj(m.metadata?.[TT_KEY]) ? m.metadata[TT_KEY] : {};
+      if (tt[String(swipe)] !== undefined)
+        continue;
+      const legacy = recordFor(old, String(m.content ?? ""));
+      if (!legacy)
+        continue;
+      ctx ??= await d.legacy(chatId);
+      if (!ctx)
+        return;
+      const converted = convertLegacyRecord(String(m.content ?? ""), legacy, ctx.settings, ctx.kept, Date.now());
+      if (!converted) {
+        d.onLegacySkipped?.(m.id);
+        continue;
+      }
+      const key = `${m.id}:${swipe}`;
+      m.metadata = { ...m.metadata ?? {}, [TT_KEY]: { ...tt, [swipe]: converted } };
+      if (converting.has(key))
+        continue;
+      converting.add(key);
+      host.chat.updateMessage(chatId, m.id, d.metadataPatch ? { metadata_patch: { [TT_KEY]: { ...tt, [swipe]: converted } } } : { metadata: m.metadata }).catch(() => converting.delete(key));
+    }
+  }
+  async function generateRaw(req, requestId) {
+    const signal = requestId ? d.signalFor?.(requestId) : undefined;
+    const res = await host.generate.quiet({
+      type: "quiet",
+      messages: req.messages,
+      ...req.connectionId ? { connection_id: req.connectionId } : {},
+      parameters: { temperature: req.parameters?.temperature ?? 0.3, ...req.parameters?.maxTokens ? { max_tokens: req.parameters.maxTokens } : {} },
+      userId: uid,
+      signal
+    });
+    if (signal?.aborted)
+      return { aborted: true };
+    return { content: typeof res === "string" ? res : typeof res?.content === "string" ? res.content : "" };
   }
   return {
     async getChat(chatId) {
@@ -2684,10 +2075,14 @@ function createEmuBridge(d) {
     },
     async listMessages(chatId, n) {
       const character = await characterOf(chatId);
-      return (await tail(chatId, n || MAX_TAIL)).map((m) => messageRow(chatId, m, character));
+      const rows = await tail(chatId, n || MAX_TAIL);
+      await convertLegacy(chatId, rows);
+      return rows.map((m) => messageRow(chatId, m, character));
     },
     async getMessage(chatId, messageId) {
-      return messageRow(chatId, await findMessage(chatId, messageId), await characterOf(chatId));
+      const row = await findMessage(chatId, messageId);
+      await convertLegacy(chatId, [row]);
+      return messageRow(chatId, row, await characterOf(chatId));
     },
     async patchExtra(chatId, messageId, patch, swipeIndex) {
       if (!(PT_KEY in patch))
@@ -2699,19 +2094,27 @@ function createEmuBridge(d) {
     async updateContent(chatId, messageId, content) {
       await host.chat.updateMessage(chatId, messageId, { content });
     },
-    async generateRaw(req, requestId) {
-      const signal = requestId ? d.signalFor?.(requestId) : undefined;
-      const res = await host.generate.quiet({
-        type: "quiet",
-        messages: req.messages,
-        ...req.connectionId ? { connection_id: req.connectionId } : {},
-        parameters: { temperature: req.parameters?.temperature ?? 0.3, ...req.parameters?.maxTokens ? { max_tokens: req.parameters.maxTokens } : {} },
-        userId: uid,
-        signal
-      });
-      if (signal?.aborted)
-        return { aborted: true };
-      return { content: typeof res === "string" ? res : typeof res?.content === "string" ? res.content : "" };
+    generateRaw,
+    async translate(req, requestId) {
+      const lang = req.targetLanguage.trim();
+      let system = String(req.systemPrompt ?? "").replaceAll("{{targetLanguage}}", lang);
+      const extra = req.chatId ? await d.extraSystem?.(req.chatId) : "";
+      if (extra)
+        system = [system, extra].filter(Boolean).join(`
+
+`);
+      const connectionId = req.connectionId || (req.chatId ? (await d.chatSettings(req.chatId)).connectionId : "");
+      const messages = [];
+      if (system.trim())
+        messages.push({ role: "system", content: system });
+      messages.push({ role: "user", content: `Translate the following text to ${lang}:
+
+${req.text}` });
+      const res = await generateRaw({ connectionId, messages, parameters: { temperature: 0.3, maxTokens: 8192 } }, requestId);
+      const text = String(res.content ?? "").trim();
+      if (!text)
+        throw Object.assign(new Error("\uBC88\uC5ED \uACB0\uACFC\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4."), { status: 502 });
+      return { translatedText: text };
     },
     async connections() {
       return (await host.connections.list(uid)).map((c) => ({ id: c.id, name: c.name ?? c.id, model: c.model ?? "" }));
@@ -2735,58 +2138,9 @@ function createEmuBridge(d) {
   };
 }
 
-// src/message-ui.ts
-function isTranslationHidden(hidden, mode) {
-  return mode !== "paragraph" && hidden === true;
-}
-function skipFresh(mode, existing, force) {
-  const status = existing?.status;
-  return mode === "fresh" && status === "done" && !force;
-}
-function recordFor(mt, content) {
-  const key = recordKeyFor(mt, content);
-  return key ? mt?.entries?.[key] ?? null : null;
-}
-function recordKeyFor(mt, content) {
-  for (const key of [sourceHash(content), rawSourceHash(content)]) {
-    if (mt?.entries?.[key])
-      return key;
-  }
-  const current = [];
-  replaceIllustrations(content, (piece) => {
-    current.push(piece);
-    return piece;
-  });
-  if (current.length) {
-    const entries = Object.entries(mt?.entries ?? {}).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
-    for (const [key, record] of entries) {
-      const original = [];
-      replaceIllustrations(restore(record.parts.join(`
-
-`), record.pieces), (piece) => {
-        original.push(piece);
-        return piece;
-      });
-      if (original.length !== current.length)
-        continue;
-      const candidate = replaceIllustrations(content, (_piece, index) => original[index]);
-      if (rawSourceHash(candidate) === key)
-        return key;
-    }
-  }
-  return null;
-}
-function clearTranslation(mt, key) {
-  delete mt.entries[key];
-  if (Object.keys(mt.entries).length === 0)
-    mt.hidden = false;
-}
-
 // src/backend.ts
 var STORE_PATH = "translator.json";
 var TT_CONFIG_PATH = "tt-config.json";
-var LEGACY_ENGINE = Reflect.get(globalThis, "__LV_TRANSLATOR_LEGACY__") === true;
-var MAX_ENTRIES_PER_MESSAGE = 12;
 var userKey = (uid) => uid ?? "";
 var stores = new Map;
 async function loadStore(uid) {
@@ -2817,9 +2171,23 @@ async function connections(uid) {
 }
 async function sendState(uid) {
   const store = await loadStore(uid);
-  send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
+  send({ type: "state", store, connections: await connections(uid), link: await peerState() }, uid);
 }
-var SELF_VERSION = "0.5.0";
+function errorText(e) {
+  if (e instanceof Error && (e.name === "AbortError" || /aborted/i.test(e.message)))
+    return "\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.";
+  return friendlyError(e instanceof Error ? e.message : String(e));
+}
+var configCache = new Map;
+async function readTtConfig(uid, fresh = false) {
+  const cached = configCache.get(userKey(uid));
+  if (!fresh && cached && Date.now() - cached.at < 3000)
+    return cached.value;
+  const value = await spindle.userStorage.getJson(TT_CONFIG_PATH, { fallback: null, userId: uid }) ?? {};
+  configCache.set(userKey(uid), { at: Date.now(), value });
+  return value;
+}
+var SELF_VERSION = "0.5.1";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -2841,17 +2209,22 @@ async function peerState() {
   return state;
 }
 try {
-  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION, LEGACY_ENGINE ? PROVIDES : []), { requires: [] });
+  spindle.rpcPool?.sync("contract", handshake(SELF_VERSION, PROVIDES), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
 }
 var warnedGlossary = false;
+var lastChat = new Map;
+async function chatGlossary(uid, chatId) {
+  const cfg = (await readTtConfig(uid, true)).config;
+  const scope = cfg?.chats?.[chatId] ?? cfg?.defaults;
+  return typeof scope?.glossary === "string" ? scope.glossary : "";
+}
 async function publishGlossary(uid, chatId) {
   try {
     if (!hostCaps(spindle).conditionalMetadata || await peerState() !== "ok")
       return;
-    const store = await loadStore(uid);
-    const text = glossaryText(effectiveGuides(store, settingsFor(store, chatId)).glossary);
+    const text = glossaryText(await chatGlossary(uid, chatId));
     const chats = spindle.chats;
     for (let attempt = 0;attempt < 2; attempt++) {
       const chat = await chats.get(chatId, uid);
@@ -2870,696 +2243,91 @@ async function publishGlossary(uid, chatId) {
     }
   }
 }
-function readTranslations(message) {
-  const raw = message.metadata?.[METADATA_KEY];
-  if (!raw || typeof raw !== "object")
-    return null;
-  const mt = raw;
-  if (!mt.entries || typeof mt.entries !== "object")
-    return null;
-  return mt;
-}
-var chatCache = new Map;
-function snapshotFor(chatId) {
-  let snapshot = chatCache.get(chatId);
-  if (!snapshot) {
-    snapshot = { messages: new Map, loaded: false, reading: false, invalidations: 0, changes: new Map };
-    chatCache.set(chatId, snapshot);
-  }
-  return snapshot;
-}
-function mergeTranslations(current, incoming) {
-  if (!current)
-    return incoming;
-  const entries = { ...incoming.entries };
-  let keptCurrent = false;
-  for (const [key, mine] of Object.entries(current.entries)) {
-    const theirs = incoming.entries[key];
-    if (!theirs)
-      continue;
-    const a = mine.updatedAt ?? 0;
-    const b = theirs.updatedAt ?? 0;
-    if (a > b || a === b && theirs.status === "partial" && mine.status !== "partial") {
-      entries[key] = mine;
-      keptCurrent = true;
-    }
-  }
-  if (!keptCurrent)
-    return incoming;
-  return { ...incoming, entries, hidden: current.hidden, pub: current.pub };
-}
-function cacheMessage(snapshot, message) {
-  const current = snapshot.messages.get(message.id);
-  if (current) {
-    const mine = readTranslations(current);
-    const theirs = readTranslations(message);
-    if (mine && theirs)
-      message = { ...message, metadata: { ...message.metadata, [METADATA_KEY]: mergeTranslations(mine, theirs) } };
-    Object.assign(current, message);
-  } else
-    snapshot.messages.set(message.id, message);
-  if (snapshot.reading)
-    snapshot.changes.set(message.id, snapshot.messages.get(message.id));
-}
-async function cachedChat(chatId, refresh = false) {
-  const snapshot = snapshotFor(chatId);
-  if (snapshot.load)
-    return snapshot.load;
-  if (snapshot.loaded && !refresh)
-    return snapshot;
-  snapshot.changes.clear();
-  snapshot.reading = true;
-  const invalidations = snapshot.invalidations;
-  snapshot.load = (async () => {
-    const messages = await spindle.chat.getMessages(chatId);
-    const changes = new Map(snapshot.changes);
-    const present = new Set(messages.map((message) => message.id));
-    for (const id of snapshot.messages.keys())
-      if (!present.has(id))
-        snapshot.messages.delete(id);
-    for (const message of messages) {
-      const changed = changes.get(message.id);
-      if (changed)
-        changed.role = message.role;
-      if (!changes.has(message.id))
-        cacheMessage(snapshot, message);
-    }
-    for (const [id, message] of changes) {
-      if (message)
-        cacheMessage(snapshot, message);
-      else
-        snapshot.messages.delete(id);
-    }
-    snapshot.loaded = snapshot.invalidations === invalidations;
-    return snapshot;
-  })().finally(() => {
-    snapshot.load = undefined;
-    snapshot.reading = false;
-    snapshot.changes.clear();
-  });
-  return snapshot.load;
-}
-async function refreshForJob(chatId, messageId) {
-  const snapshot = snapshotFor(chatId);
-  if (!snapshot.loaded || snapshot.load || !hostCaps(spindle).leanMessages)
-    return cachedChat(chatId, true);
-  const invalidations = snapshot.invalidations;
-  snapshot.changes.clear();
-  snapshot.reading = true;
-  let rows;
-  try {
-    rows = await spindle.chat.getMessages(chatId, { tail: JOB_TAIL });
-  } finally {
-    snapshot.reading = false;
-  }
-  const changes = new Map(snapshot.changes);
-  snapshot.changes.clear();
-  if (snapshot.invalidations !== invalidations || !rows.some((row) => row.id === messageId))
-    return cachedChat(chatId, true);
-  for (const row of rows) {
-    const changed = changes.get(row.id);
-    if (changed)
-      changed.role = row.role;
-    else
-      cacheMessage(snapshot, row);
-  }
-  for (const [id, message] of changes)
-    if (!message)
-      snapshot.messages.delete(id);
-  return snapshot;
-}
-function orderedMessages(snapshot) {
-  return [...snapshot.messages.values()].sort((a, b) => (a.index_in_chat ?? 0) - (b.index_in_chat ?? 0));
-}
-async function writeTranslations(uid, chatId, messageId, change, snapshot, options = {}) {
-  snapshot ??= await cachedChat(chatId);
-  const message = snapshot.messages.get(messageId);
-  if (!message)
-    return null;
-  const mt = structuredClone(readTranslations(message) ?? { v: 1, entries: {} });
-  change(mt, message);
-  const keys = Object.keys(mt.entries).sort((a, b) => (mt.entries[b].updatedAt ?? 0) - (mt.entries[a].updatedAt ?? 0));
-  for (const k of keys.slice(MAX_ENTRIES_PER_MESSAGE))
-    delete mt.entries[k];
-  const contentNow = options.content ?? message.content ?? "";
-  projectPub(mt, contentNow, recordKeyFor(mt, contentNow), settingsFor(await loadStore(uid), chatId), await peerState() === "ok", Date.now());
-  const metadata = { ...message.metadata ?? {}, [METADATA_KEY]: mt };
-  const previousMetadata = message.metadata;
-  const patch = hostCaps(spindle).leanMessages ? { ownMetadata: mt } : { metadata };
-  if (options.content !== undefined)
-    patch.content = options.content;
-  await spindle.chat.updateMessage(chatId, messageId, patch);
-  if (options.content !== undefined) {
-    message.content = options.content;
-    if (Array.isArray(message.swipes))
-      message.swipes[message.swipe_id ?? 0] = options.content;
-  }
-  if (!snapshot.messages.has(messageId))
-    return null;
-  if (message.metadata === previousMetadata)
-    message.metadata = metadata;
-  else
-    message.metadata = { ...message.metadata ?? {}, [METADATA_KEY]: mergeTranslations(readTranslations(message), mt) };
-  if (snapshot.reading)
-    snapshot.changes.set(messageId, message);
-  return message;
-}
-var jobs = new Map;
-var reprojecting = new Set;
-var jobKey = (chatId, messageId) => `${chatId}:${messageId}`;
-function viewOf(chatId, message, settings, overrideRecord, position = 0) {
-  const mt = readTranslations(message);
-  const record = overrideRecord !== undefined ? overrideRecord : recordFor(mt, message.content);
-  return {
-    messageId: message.id,
-    sourceKey: recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? ""),
-    role: message.role,
-    text: record && record.parts.some((p) => p.trim()) ? recordToText(record, message.content) : null,
-    status: record?.status ?? null,
-    hasMore: record ? recordHasMore(record) : false,
-    progress: record && record.total > 1 ? { done: record.parts.length, total: record.total } : null,
-    error: record?.error ?? null,
-    hidden: mt?.hidden === true,
-    busy: jobs.has(jobKey(chatId, message.id)),
-    index: typeof message.index_in_chat === "number" ? message.index_in_chat : position,
-    name: typeof message.name === "string" ? message.name : ""
-  };
-}
-async function sendChatViews(uid, chatId, messageIds, replace = true) {
-  const settings = settingsFor(await loadStore(uid), chatId);
-  const snapshot = await cachedChat(chatId);
-  const ids = messageIds ? [...new Set(messageIds.filter((id) => typeof id === "string"))].slice(0, VIEW_WINDOW) : orderedMessages(snapshot).slice(-VIEW_WINDOW).map((message) => message.id);
-  const views = ids.flatMap((id) => {
-    const message = snapshot.messages.get(id);
-    if (!message || !readTranslations(message) && !jobs.has(jobKey(chatId, id)))
-      return [];
-    return [viewOf(chatId, message, settings)];
-  });
-  const plainIds = ids.filter((id) => {
-    const message = snapshot.messages.get(id);
-    return message && message.role !== "system" && !readTranslations(message) && !jobs.has(jobKey(chatId, id));
-  });
-  send({ type: "views", chatId, views, replace, requestedIds: ids, plainIds }, uid);
-}
-async function sendView(uid, chatId, message, record) {
-  const settings = settingsFor(await loadStore(uid), chatId);
-  send({ type: "views", chatId, views: [viewOf(chatId, message, settings, record)], replace: false }, uid);
-}
-function isHidden(m) {
-  return m.extra?.hidden === true;
-}
-function contextBefore(messages, end) {
-  return messages.slice(0, end).filter((m) => (m.role === "user" || m.role === "assistant") && !isHidden(m) && typeof m.content === "string").map((m) => {
-    const entry = recordFor(readTranslations(m), m.content);
-    return { role: m.role, content: m.content, translation: entry && entry.parts.length ? recordToText(entry) : null };
-  });
-}
 var hints = new Map;
 function hintFor(uid, chatId) {
   const h = hints.get(userKey(uid));
   return { activeId: h?.activeId, chatId: h?.chats.get(chatId) };
 }
-var warnedStale = new Set;
-function completer(uid, chatId, chosen, signal) {
-  return async (req) => quietComplete(spindle, {
-    uid,
-    chosen: chosen || undefined,
-    hint: hintFor(uid, chatId),
-    system: req.system,
-    user: req.user,
-    signal,
-    onStale: (staleId, used) => {
-      const key = `${userKey(uid)}:${staleId}`;
-      if (warnedStale.has(key))
-        return;
-      warnedStale.add(key);
-      spindle.toast.warning(`\uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uACE0\uB978 \uC5F0\uACB0\uC774 \uC5C6\uC5B4\uC84C\uC2B5\uB2C8\uB2E4. \uB300\uC2E0 ${SOURCE_LABELS[used.source]}\uC73C\uB85C \uBC88\uC5ED\uD569\uB2C8\uB2E4. \uBC88\uC5ED \uC124\uC815\uC5D0\uC11C \uC5F0\uACB0\uC744 \uB2E4\uC2DC \uACE8\uB77C \uC8FC\uC138\uC694.`, { userId: uid });
-    }
-  });
-}
-function errorText(e) {
-  if (e instanceof Error && (e.name === "AbortError" || /aborted/i.test(e.message)))
-    return "\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.";
-  return friendlyError(e instanceof Error ? e.message : String(e));
-}
-function warnAutomatic(reason, context) {
-  spindle.log.warn(`[translator] auto translate: ${reason} ${JSON.stringify(context)}`);
-}
-async function translateMessage(uid, chatId, messageId, mode, options) {
-  const key = jobKey(chatId, messageId);
-  const context = { chatId, messageId, generationId: options.generationId, generationType: options.generationType };
-  const warn = (reason, details = {}) => {
-    if (options.automatic)
-      warnAutomatic(reason, { ...context, ...details });
-  };
-  while (jobs.has(key)) {
-    if (!options.automatic) {
-      spindle.toast.info("\uC774 \uBA54\uC2DC\uC9C0\uB294 \uC774\uBBF8 \uBC88\uC5ED \uC911\uC785\uB2C8\uB2E4.", { userId: uid });
-      return;
-    }
-    warn("in-flight: waiting for the current translation");
-    await jobs.get(key).finished;
-  }
-  const controller = new AbortController;
-  let finish;
-  const finished = new Promise((resolve) => {
-    finish = resolve;
-  });
-  jobs.set(key, { controller, finished });
-  let message;
-  let source;
-  let finalRecord;
-  let snapshot;
-  try {
-    const store = await loadStore(uid);
-    const settings = settingsFor(store, chatId);
-    if (options.automatic && !settings.autoTranslate)
-      return;
-    snapshot = await refreshForJob(chatId, messageId);
-    const messages = orderedMessages(snapshot);
-    const index = messages.findIndex((m) => m.id === messageId);
-    message = messages[index];
-    if (!message) {
-      warn("message-not-found");
-      return;
-    }
-    if (options.automatic && message.role !== "assistant") {
-      warn("unexpected-role", { role: message.role });
-      return;
-    }
-    source = options.generatedContent ?? message.content;
-    if (sourceHash(source) !== sourceHash(message.content) && !message.swipes?.some((swipe) => sourceHash(swipe) === sourceHash(source))) {
-      warn("generated-content-not-found", { sourceKey: sourceHash(source) });
-      source = undefined;
-      return;
-    }
-    if (!source.trim()) {
-      warn("empty-content");
-      return;
-    }
-    const hash = sourceHash(source);
-    const existingKey = recordKeyFor(readTranslations(message), source);
-    const existing = existingKey ? readTranslations(message)?.entries[existingKey] : undefined;
-    if (skipFresh(mode, existing, options.force)) {
-      warn("already-translated", { sourceKey: hash, status: existing?.status });
-      return;
-    }
-    await sendView(uid, chatId, message);
-    let lastProgressSave = -Infinity;
-    const record = await translate({
-      direction: "incoming",
-      source,
-      settings,
-      store,
-      presets: promptPresets(store.userPresets),
-      previous: contextBefore(messages, index),
-      resume: mode === "continue" ? existing : undefined,
-      persona: await personaFor(settings, store, messages, index)
-    }, {
-      complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal),
-      signal: controller.signal,
-      onProgress: async (progress) => {
-        if (Date.now() - lastProgressSave < 1000)
-          return;
-        lastProgressSave = Date.now();
-        const updated = await writeTranslations(uid, chatId, messageId, (mt) => {
-          if (existingKey)
-            delete mt.entries[existingKey];
-          delete mt.entries[rawSourceHash(source)];
-          mt.entries[hash] = progress;
-          mt.hidden = false;
-        }, snapshot);
-        if (!updated)
-          throw new Error("Message disappeared while saving translation progress");
-        await sendView(uid, chatId, updated);
-      }
-    });
-    const saved = await writeTranslations(uid, chatId, messageId, (mt) => {
-      if (existingKey)
-        delete mt.entries[existingKey];
-      delete mt.entries[rawSourceHash(source)];
-      mt.entries[hash] = record;
-      mt.hidden = false;
-    }, snapshot);
-    if (!saved)
-      throw new Error("Message disappeared while saving translation");
-    if (record.status === "partial") {
-      warn("partial-translation", { sourceKey: hash });
-      if (!options.automatic)
-        spindle.toast.info('\uBC88\uC5ED\uC774 \uC911\uAC04\uC5D0 \uB04A\uACBC\uC2B5\uB2C8\uB2E4. "\uC774\uC5B4\uC11C \uBC88\uC5ED"\uC744 \uB204\uB974\uBA74 \uC774\uC5B4\uC11C \uBC88\uC5ED\uD569\uB2C8\uB2E4.', { userId: uid });
-    }
-    if (saved)
-      message = saved;
-    finalRecord = record;
-  } catch (e) {
-    const text = errorText(e);
-    warn("translation-failed", { error: text });
-    const partial = e instanceof TranslationError ? e.record : null;
-    if (message && source !== undefined) {
-      const hash = sourceHash(source);
-      const updated = await writeTranslations(uid, chatId, messageId, (mt) => {
-        const prev = mt.entries[hash];
-        const base = partial ?? prev ?? { parts: [], pieces: [], total: 1, truncatedPart: -1, status: "error", updatedAt: 0 };
-        mt.entries[hash] = { ...base, status: "error", error: text, updatedAt: Date.now() };
-      }, snapshot).catch(() => null);
-      if (updated) {
-        message = updated;
-        finalRecord = readTranslations(updated)?.entries[hash];
-      }
-    }
-    spindle.toast.error(`\uBC88\uC5ED \uC2E4\uD328: ${text}`, { userId: uid });
-  } finally {
-    try {
-      jobs.delete(key);
-      message = snapshot?.messages.get(messageId);
-      const override = message && finalRecord && source !== undefined && message.content === source ? finalRecord : undefined;
-      if (message)
-        await sendView(uid, chatId, message, override).catch((e) => warn("view-update-failed", { error: errorText(e) }));
-    } finally {
-      finish();
-    }
-  }
-}
-async function translateOutgoing(uid, chatId, text) {
-  const store = await loadStore(uid);
-  const settings = { ...settingsFor(store, chatId), autoContinue: true };
-  const messages = settings.contextEnabled && settings.contextIncludeUserInput ? orderedMessages(await cachedChat(chatId)) : [];
-  const controller = new AbortController;
-  const timer = setTimeout(() => controller.abort(), 180000);
-  try {
-    const record = await translate({ direction: "outgoing", source: text, settings, store, presets: promptPresets(store.userPresets), previous: contextBefore(messages, messages.length) }, { complete: completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal), signal: controller.signal });
-    if (record.status !== "done")
-      throw new Error("\uBC88\uC5ED\uC774 \uB05D\uAE4C\uC9C0 \uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
-    const out = recordToText(record).trim();
-    if (!out)
-      throw new Error("\uBC88\uC5ED \uACB0\uACFC\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
-    return out;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function personaFor(settings, store, messages, index) {
-  if (!LIVE_PROMPT_PRESET_IDS.has(settings.incomingPresetId))
-    return "";
-  const named = (m) => m.role === "user" && typeof m.name === "string" && m.name.trim() !== "";
-  const user = messages.slice(0, Math.max(index, 0)).findLast(named) ?? messages.findLast(named);
-  if (!user)
-    return "";
-  return personaSectionFor(settings, promptPresets(store.userPresets), user.name.trim());
-}
-async function openEdit(uid, chatId, messageId) {
-  const fail = (error) => send({ type: "edit_data", chatId, messageId, ok: false, error }, uid);
-  const snapshot = await cachedChat(chatId);
-  const message = snapshot.messages.get(messageId);
-  const mt = message ? readTranslations(message) : null;
-  const key = message ? recordKeyFor(mt, message.content ?? "") : null;
-  const record = key ? mt?.entries[key] : undefined;
-  if (!message || !record)
-    return fail("\uC774 \uBA54\uC2DC\uC9C0\uC5D0\uB294 \uACE0\uCE60 \uBC88\uC5ED\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
-  if (jobs.has(jobKey(chatId, messageId)))
-    return fail("\uBC88\uC5ED \uC911\uC778 \uBA54\uC2DC\uC9C0\uB294 \uACE0\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-  const pairs = editablePairs(message.content, record, settingsFor(await loadStore(uid), chatId));
-  if (!pairs)
-    return fail("\uBB38\uB2E8 \uB2E8\uC704\uB85C \uB05D\uAE4C\uC9C0 \uBC88\uC5ED\uB41C \uBA54\uC2DC\uC9C0\uB9CC \uACE0\uCE60 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uBB38\uB2E8 \uB2E8\uC704\uB85C \uB2E4\uC2DC \uBC88\uC5ED\uD574 \uC8FC\uC138\uC694.");
-  send({ type: "edit_data", chatId, messageId, ok: true, sourceKey: key, pairs: pairs.map((p) => ({ source: p.source, translation: p.translation, edited: p.edited })) }, uid);
-}
-async function saveEdit(uid, msg) {
-  const { chatId, messageId } = msg;
-  const result = (r) => send({ type: "edit_result", chatId, messageId, ...r }, uid);
-  const key = jobKey(chatId, messageId);
-  if (jobs.has(key))
-    return result({ ok: false, error: "\uBC88\uC5ED \uC911\uC778 \uBA54\uC2DC\uC9C0\uB294 \uACE0\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4." });
-  const controller = new AbortController;
-  let finish;
-  jobs.set(key, { controller, finished: new Promise((resolve) => {
-    finish = resolve;
-  }) });
-  let message;
-  try {
-    const store = await loadStore(uid);
-    const settings = settingsFor(store, chatId);
-    const snapshot = await cachedChat(chatId);
-    message = snapshot.messages.get(messageId);
-    const mt = message ? readTranslations(message) : null;
-    const oldKey = message ? recordKeyFor(mt, message.content ?? "") : null;
-    const record = oldKey ? mt?.entries[oldKey] : undefined;
-    if (!message || !record || oldKey !== msg.sourceKey)
-      return result({ ok: false, error: "\uADF8 \uC0AC\uC774 \uBA54\uC2DC\uC9C0\uAC00 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uCC3D\uC744 \uB2EB\uACE0 \uB2E4\uC2DC \uC5F4\uC5B4 \uC8FC\uC138\uC694." });
-    const original = message.content;
-    const pairs = editablePairs(original, record, settings);
-    if (!pairs)
-      return result({ ok: false, error: "\uBB38\uB2E8 \uB2E8\uC704\uB85C \uB05D\uAE4C\uC9C0 \uBC88\uC5ED\uB41C \uBA54\uC2DC\uC9C0\uB9CC \uACE0\uCE60 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
-    const oldTranslations = {};
-    for (const pair of pairs)
-      oldTranslations[pair.key] = pair.translation;
-    const edits = {};
-    for (const { index, text } of Array.isArray(msg.edits) ? msg.edits : []) {
-      const pair = Number.isInteger(index) ? pairs[index] : undefined;
-      const corrected = cleanEdit(typeof text === "string" ? text : "");
-      if (pair && corrected && corrected !== pair.translation.trim())
-        edits[pair.key] = corrected;
-    }
-    if (!Object.keys(edits).length)
-      return result({ ok: true, rewritten: 0, saved: false });
-    const edited = {};
-    for (const pair of pairs)
-      if (pair.edited)
-        edited[pair.key] = 1;
-    for (const k of Object.keys(edits))
-      edited[k] = 1;
-    const corrected = { v: 1, map: { ...oldTranslations, ...edits }, edited: { ...edited }, view: "", at: Date.now() };
-    let state = structuredClone(corrected);
-    let newContent;
-    let rewritten = 0;
-    let sourceError = "";
-    if (msg.syncSource) {
-      try {
-        const complete = completer(uid, chatId, effectiveConnectionId(store, chatId), controller.signal);
-        const synced = await syncSourceFromEdits({
-          content: original,
-          record: state,
-          edits,
-          oldTranslations,
-          llm: async (system, user) => (await complete({ system, user, hasContext: false })).text
-        });
-        if (synced.count && synced.content !== null) {
-          newContent = synced.content;
-          state = synced.record;
-          rewritten = synced.count;
-        }
-      } catch (e) {
-        sourceError = errorText(e);
-      }
-    }
-    let content = newContent ?? original;
-    let next = recordFromMap(content, state.map, Object.keys(state.edited));
-    if (next.status !== "done" && newContent !== undefined) {
-      newContent = undefined;
-      rewritten = 0;
-      sourceError = "\uACE0\uCE5C \uC601\uC5B4 \uBB38\uB2E8\uC758 \uAD6C\uC870\uAC00 \uB9DE\uC9C0 \uC54A\uC544 \uC6D0\uBB38\uC740 \uADF8\uB300\uB85C \uB450\uC5C8\uC2B5\uB2C8\uB2E4";
-      content = original;
-      next = recordFromMap(content, corrected.map, Object.keys(corrected.edited));
-    }
-    if (next.status !== "done")
-      return result({ ok: false, error: "\uBB38\uB2E8 \uAD6C\uC870 \uB54C\uBB38\uC5D0 \uC774 \uBC88\uC5ED\uC744 \uC800\uC7A5\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC544\uBB34\uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
-    if (snapshot.messages.get(messageId)?.content !== original)
-      return result({ ok: false, error: "\uADF8 \uC0AC\uC774 \uBA54\uC2DC\uC9C0 \uB0B4\uC6A9\uC774 \uBC14\uB00C\uC5B4 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." });
-    const saved = await writeTranslations(uid, chatId, messageId, (draft) => {
-      delete draft.entries[oldKey];
-      delete draft.entries[rawSourceHash(original)];
-      draft.entries[sourceHash(content)] = next;
-      draft.hidden = false;
-    }, snapshot, newContent === undefined ? {} : { content: newContent });
-    if (!saved)
-      return result({ ok: false, error: "\uC800\uC7A5\uD558\uB294 \uC0AC\uC774 \uBA54\uC2DC\uC9C0\uAC00 \uC0AC\uB77C\uC84C\uC2B5\uB2C8\uB2E4." });
-    message = saved;
-    result({ ok: true, rewritten, saved: true, ...sourceError ? { error: `\uBC88\uC5ED\uC740 \uC800\uC7A5\uD588\uC9C0\uB9CC \uC601\uC5B4 \uC6D0\uBB38\uC740 \uACE0\uCE58\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${sourceError}` } : {} });
-  } catch (e) {
-    result({ ok: false, error: errorText(e) });
-  } finally {
-    jobs.delete(key);
-    message = chatCache.get(chatId)?.messages.get(messageId) ?? message;
-    if (message)
-      await sendView(uid, chatId, message).catch(() => {});
-    finish();
-  }
-}
 var generationActive = new Map;
-var stoppedReplies = new Map;
-var catchUps = new Map;
-function catchUpFor(uid) {
-  const k = userKey(uid);
-  let instance = catchUps.get(k);
-  if (instance)
-    return instance;
-  const rows = new Map;
-  const seconds = (value) => typeof value === "number" && Number.isFinite(value) ? value > 1000000000000 ? value / 1000 : value : 0;
-  instance = createCatchUp({
-    PT_KEY: "paraTranslate",
-    getChat: async (chatId) => ({ metadata: { autoTranslate: settingsFor(await loadStore(uid), chatId).autoTranslate === true } }),
-    handlesRow: () => true,
-    api: async () => ({ active: false }),
-    listMessages: async (chatId, n) => {
-      const snapshot = snapshotFor(chatId);
-      let list;
-      if (snapshot.loaded)
-        list = orderedMessages(snapshot).slice(-n);
-      else if (hostCaps(spindle).leanMessages)
-        list = await spindle.chat.getMessages(chatId, { tail: n, light: true });
-      else
-        list = orderedMessages(await cachedChat(chatId)).slice(-n);
-      rows.clear();
-      for (const m of list)
-        rows.set(m.id, m);
-      return list.map((m) => {
-        const stamp = Math.max(seconds(m.created_at), seconds(m.swipe_dates?.[m.swipe_id ?? 0]));
-        return { id: m.id, role: m.role, content: typeof m.content === "string" ? m.content : "", createdAt: stamp ? new Date(stamp * 1000).toISOString() : "", extra: { hiddenFromUser: m.extra?.hidden === true } };
-      });
-    },
-    rememberMessage: () => {},
-    getRecord: (id) => {
-      const m = rows.get(id);
-      return m && readTranslations(m) && Object.keys(readTranslations(m).entries).length ? true : null;
-    },
-    hashText,
-    translateMessage: async (chatId, id) => {
-      const content = rows.get(id)?.content ?? "";
-      if (stoppedReplies.get(chatId)?.has(hashText(content)))
-        return;
-      await translateMessage(uid, chatId, id, "fresh", { force: false, automatic: true });
-    },
-    generationActive,
-    marinara: { log: { warn: (text, error) => spindle.log.warn(`[translator] ${text} ${error instanceof Error ? error.message : ""}`.trim()) } }
-  });
-  catchUps.set(k, instance);
-  return instance;
-}
-async function refreshPub(uid, chatId, id, snapshot) {
-  const key = jobKey(chatId, id);
-  const row = snapshot.messages.get(id);
-  const mt = row ? readTranslations(row) : null;
-  if (!row || !mt || jobs.has(key) || reprojecting.has(key))
-    return;
-  const stale = mt.pub !== undefined && mt.pub.h !== hashText(row.content ?? "");
-  if (!stale && (mt.pub !== undefined || !Object.keys(mt.entries).length))
-    return;
-  reprojecting.add(key);
-  try {
-    if (!stale) {
-      const content = row.content ?? "";
-      const wanted = await peerState() === "ok" && buildPub(content, recordFor(mt, content) ?? undefined, settingsFor(await loadStore(uid), chatId), 0) !== null;
-      if (!wanted)
-        return;
-    }
-    await writeTranslations(uid, chatId, id, () => {}, snapshot);
-  } catch (e) {
-    spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`);
-  } finally {
-    reprojecting.delete(key);
-  }
-}
-if (LEGACY_ENGINE)
-  spindle.registerMessageContentProcessor(async (ctx) => {
-    if (ctx.origin !== "render" || !ctx.messageId || !ctx.content)
-      return;
-    const chat = await cachedChat(ctx.chatId);
-    const message = chat.messages.get(ctx.messageId);
-    const mt = message ? readTranslations(message) : null;
-    if (!mt)
-      return;
-    const store = await loadStore(ctx.userId);
-    const settings = settingsFor(store, ctx.chatId);
-    if (isTranslationHidden(mt.hidden, settings.displayMode))
-      return;
-    const record = recordFor(mt, ctx.content);
-    if (!record || !record.parts.some((p) => p.trim()))
-      return;
-    return { content: renderMessage(ctx.content, record, settings, store.view) };
-  });
 spindle.on("GENERATION_STARTED", (payload) => {
   if (payload?.chatId)
     generationActive.set(payload.chatId, true);
 });
 spindle.on("GENERATION_STOPPED", (payload) => {
-  if (!payload?.chatId)
-    return;
-  generationActive.delete(payload.chatId);
-  if (typeof payload.content === "string" && payload.content.trim()) {
-    const set = stoppedReplies.get(payload.chatId) ?? new Set;
-    set.add(hashText(payload.content));
-    stoppedReplies.set(payload.chatId, set);
-  }
-});
-spindle.on("GENERATION_ENDED", (payload, userId) => {
   if (payload?.chatId)
     generationActive.delete(payload.chatId);
-  if (!LEGACY_ENGINE)
-    return;
-  const context = { chatId: payload?.chatId, messageId: payload?.messageId, generationId: payload?.generationId, generationType: payload?.generationType };
-  if (payload?.generationType === "impersonate")
-    return;
-  if (payload?.error) {
-    warnAutomatic("generation-error", { ...context, error: payload.error });
-    return;
-  }
-  if (!payload?.chatId || !payload.messageId) {
-    warnAutomatic(!payload?.chatId ? "missing-chat-id" : "missing-message-id", context);
-    return;
-  }
-  translateMessage(userId, payload.chatId, payload.messageId, "fresh", {
-    force: false,
-    automatic: true,
-    generatedContent: payload.content,
-    generationId: payload.generationId,
-    generationType: payload.generationType
-  }).catch((e) => warnAutomatic("handler-failed", { ...context, error: errorText(e) }));
 });
-for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAGE_DELETED", "MESSAGE_SENT"]) {
+spindle.on("GENERATION_ENDED", (payload) => {
+  if (payload?.chatId)
+    generationActive.delete(payload.chatId);
+});
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+async function projectionFor(uid, chatId) {
+  const store = await loadStore(uid);
+  const cfg = (await readTtConfig(uid)).config;
+  return { publish: await peerState() === "ok", language: settingsFor(store, chatId).myLanguage, kept: keptTagNames(cfg?.paragraph?.keepTags) };
+}
+async function refreshPub(uid, chatId, raw) {
+  if (!raw.id || typeof raw.content !== "string")
+    return;
+  const meta = raw.metadata ?? (isObject2(raw.extra?.spindle_metadata) ? raw.extra.spindle_metadata : undefined);
+  const st = isObject2(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : null;
+  const tt = isObject2(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
+  if (!st?.pub && !tt)
+    return;
+  const proj = await projectionFor(uid, chatId);
+  const swipe = Number.isInteger(raw.swipe_id) ? raw.swipe_id : 0;
+  const want = proj.publish ? buildPubFromTt(raw.content, tt?.[String(swipe)], proj.language, proj.kept, Date.now()) : null;
+  const have = isObject2(st?.pub) ? st.pub : null;
+  if (!want && !have)
+    return;
+  if (want && have?.h === want.h)
+    return;
+  const merged = { v: 1, entries: {}, ...st ?? {} };
+  if (want)
+    merged.pub = want;
+  else
+    delete merged.pub;
+  const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: { [METADATA_KEY]: merged } } : { metadata: { ...meta ?? {}, [METADATA_KEY]: merged } };
+  await spindle.chat.updateMessage(chatId, raw.id, patch);
+}
+for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) {
   spindle.on(event, (payload, userId) => {
-    if (!payload?.chatId)
+    if (!payload?.chatId || !payload.message)
       return;
-    const snapshot = chatCache.get(payload.chatId);
-    if (!snapshot)
-      return;
-    const id = payload.messageId ?? payload.message?.id;
-    if (event === "MESSAGE_DELETED" && id) {
-      snapshot.messages.delete(id);
-      if (snapshot.reading)
-        snapshot.changes.set(id, null);
-      jobs.get(jobKey(payload.chatId, id))?.controller.abort();
-    } else if (payload.message && id) {
-      const raw = payload.message;
-      if (!raw.role && raw.is_user !== true && !snapshot.messages.has(id)) {
-        snapshot.loaded = false;
-        snapshot.invalidations++;
-      }
-      const { spindle_metadata, ...extra } = raw.extra ?? {};
-      cacheMessage(snapshot, {
-        ...raw,
-        role: raw.role ?? snapshot.messages.get(id)?.role ?? (raw.is_user ? "user" : "assistant"),
-        extra,
-        metadata: raw.metadata ?? spindle_metadata
-      });
-      refreshPub(userId, payload.chatId, id, snapshot);
-    } else {
-      snapshot.loaded = false;
-      snapshot.invalidations++;
-    }
+    refreshPub(userId, payload.chatId, { ...payload.message, id: payload.message.id ?? payload.messageId }).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
   });
 }
 var emuAborts = new Map;
+var leasedGenerations = new Set;
+var legacySkipped = new Set;
 async function emu(uid, msg) {
   const reply = (r) => send({ type: "emu_result", id: msg.id, ...r }, uid);
   try {
+    if (msg.op === "lease") {
+      const id = String(msg.args[0] ?? "");
+      const granted = !!id && !leasedGenerations.has(id);
+      if (granted) {
+        leasedGenerations.add(id);
+        if (leasedGenerations.size > 200)
+          leasedGenerations.delete(leasedGenerations.values().next().value);
+      }
+      reply({ ok: true, data: granted });
+      return;
+    }
     if (msg.op === "storage.get") {
-      reply({ ok: true, data: await spindle.userStorage.getJson(TT_CONFIG_PATH, { fallback: null, userId: uid }) });
+      reply({ ok: true, data: await readTtConfig(uid, true) });
       return;
     }
     if (msg.op === "storage.patch") {
-      const prev = await spindle.userStorage.getJson(TT_CONFIG_PATH, { fallback: null, userId: uid }) ?? {};
+      const prev = await readTtConfig(uid, true);
       const next = { ...prev, ...msg.args[0] ?? {} };
       await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
+      configCache.set(userKey(uid), { at: Date.now(), value: next });
       reply({ ok: true, data: next });
+      const open = lastChat.get(userKey(uid));
+      if (open)
+        publishGlossary(uid, open);
       return;
     }
     const bridge = createEmuBridge({
@@ -3575,6 +2343,32 @@ async function emu(uid, msg) {
           connectionId = (await resolveConnection(spindle, uid, effectiveConnectionId(store, chatId) || undefined, hintFor(uid, chatId))).id ?? "";
         } catch {}
         return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate };
+      },
+      projection: (chatId) => projectionFor(uid, chatId),
+      async legacy(chatId) {
+        const store = await loadStore(uid);
+        const cfg = (await readTtConfig(uid)).config;
+        return { settings: settingsFor(store, chatId), kept: keptTagNames(cfg?.paragraph?.keepTags) };
+      },
+      onLegacySkipped: (id) => {
+        if (!legacySkipped.has(id))
+          legacySkipped.add(id);
+      },
+      async extraSystem(chatId) {
+        const store = await loadStore(uid);
+        const guides = effectiveGuides(store, settingsFor(store, chatId));
+        const pairs = parseGlossary(guides.glossary);
+        const parts = [];
+        if (pairs.length)
+          parts.push(`## Glossary (apply in both directions)
+${pairs.map((p) => `${p.left} = ${p.right}`).join(`
+`)}`);
+        if (guides.freeContext.trim())
+          parts.push(`## Additional guidance
+${guides.freeContext.trim()}`);
+        return parts.join(`
+
+`);
       }
     });
     if (msg.op === "generateActive") {
@@ -3586,10 +2380,11 @@ async function emu(uid, msg) {
       reply({ ok: false, error: `unknown op ${msg.op}`, status: 404 });
       return;
     }
-    if (msg.op === "generateRaw")
+    const cancellable = msg.op === "generateRaw" || msg.op === "translate";
+    if (cancellable)
       emuAborts.set(msg.id, new AbortController);
     try {
-      reply({ ok: true, data: await fn(...msg.op === "generateRaw" ? [msg.args[0], msg.id] : msg.args) });
+      reply({ ok: true, data: await fn(...cancellable ? [msg.args[0], msg.id] : msg.args) });
     } finally {
       emuAborts.delete(msg.id);
     }
@@ -3612,11 +2407,10 @@ async function handle(msg, uid) {
           h.chats.delete(msg.chatId);
       }
       hints.set(userKey(uid), h);
-      if (msg.open && msg.chatId) {
-        if (LEGACY_ENGINE)
-          catchUpFor(uid).catchUpLatest(msg.chatId);
+      if (msg.chatId)
+        lastChat.set(userKey(uid), msg.chatId);
+      if (msg.open && msg.chatId)
         publishGlossary(uid, msg.chatId);
-      }
       return;
     }
     case "save_connection": {
@@ -3629,12 +2423,6 @@ async function handle(msg, uid) {
       await sendState(uid);
       return;
     }
-    case "chat":
-      await sendChatViews(uid, msg.chatId, msg.messageIds);
-      return;
-    case "view_messages":
-      await sendChatViews(uid, msg.chatId, msg.messageIds, false);
-      return;
     case "save_settings": {
       const store = await loadStore(uid);
       const settings = normalizeSettings(msg.settings, store.defaults, store.userBundles);
@@ -3644,52 +2432,8 @@ async function handle(msg, uid) {
         store.defaults = settings;
       await saveStore(uid, store);
       await sendState(uid);
-      if (msg.chatId)
-        publishGlossary(uid, msg.chatId);
       return;
     }
-    case "save_note": {
-      const store = await loadStore(uid);
-      const name = String(msg.note?.name ?? "").trim();
-      const text = String(msg.note?.text ?? "").trim();
-      const fail = (error) => send({ type: "note_result", ok: false, error }, uid);
-      if (!name)
-        return fail("\uC800\uC7A5\uD560 \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
-      if (name.length > NOTE_LIMITS.name)
-        return fail(`\uC774\uB984\uC740 ${NOTE_LIMITS.name}\uC790\uAE4C\uC9C0 \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4.`);
-      if (!text)
-        return fail("\uC800\uC7A5\uD560 \uAE30\uD0C0 \uC9C0\uCE68\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
-      if (text.length > NOTE_LIMITS.text)
-        return fail(`\uC800\uC7A5\uD55C \uAE30\uD0C0 \uC9C0\uCE68\uC740 ${NOTE_LIMITS.text.toLocaleString("en-US")}\uC790\uAE4C\uC9C0\uC785\uB2C8\uB2E4. \uC9C0\uAE08 ${text.length.toLocaleString("en-US")}\uC790\uC785\uB2C8\uB2E4. \uB0B4\uC6A9\uC740 \uC798\uB77C\uB0B4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.`);
-      const existing = store.notes.find((n) => n.name === name);
-      if (existing && !msg.overwrite) {
-        send({ type: "note_result", ok: false, needsOverwrite: name }, uid);
-        return;
-      }
-      if (!existing && store.notes.length >= NOTE_LIMITS.count)
-        return fail(`\uC800\uC7A5\uD55C \uAE30\uD0C0 \uC9C0\uCE68\uC740 ${NOTE_LIMITS.count}\uAC1C\uAE4C\uC9C0\uC785\uB2C8\uB2E4. \uC548 \uC4F0\uB294 \uAC83\uC744 \uC9C0\uC6CC \uC8FC\uC138\uC694.`);
-      if (existing)
-        existing.text = text;
-      else
-        store.notes.push({ id: newNoteId(), name, text });
-      await saveStore(uid, store);
-      await sendState(uid);
-      send({ type: "note_result", ok: true }, uid);
-      return;
-    }
-    case "delete_note": {
-      const store = await loadStore(uid);
-      store.notes = store.notes.filter((n) => n.id !== msg.id);
-      await saveStore(uid, store);
-      await sendState(uid);
-      return;
-    }
-    case "edit_open":
-      await openEdit(uid, msg.chatId, msg.messageId);
-      return;
-    case "edit_save":
-      await saveEdit(uid, msg);
-      return;
     case "save_bundle": {
       const store = await loadStore(uid);
       saveBundle(store, msg.bundle);
@@ -3704,78 +2448,6 @@ async function handle(msg, uid) {
       await sendState(uid);
       return;
     }
-    case "save_preset": {
-      const store = await loadStore(uid);
-      const id = msg.preset.id.startsWith("custom-") ? msg.preset.id : `custom-${crypto.randomUUID()}`;
-      if (BUILTIN_IDS.has(id))
-        throw new Error("\uAE30\uBCF8 \uD504\uB9AC\uC14B\uC740 \uC218\uC815\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-      if (!msg.preset.name.trim() || !msg.preset.prompt.trim())
-        throw new Error("\uD504\uB9AC\uC14B \uC774\uB984\uACFC \uD504\uB86C\uD504\uD2B8\uB97C \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
-      const preset = { id, name: msg.preset.name.trim(), prompt: msg.preset.prompt };
-      const i = store.userPresets.findIndex((p) => p.id === id);
-      if (i >= 0)
-        store.userPresets[i] = preset;
-      else
-        store.userPresets.push(preset);
-      await saveStore(uid, store);
-      await sendState(uid);
-      return;
-    }
-    case "delete_preset": {
-      const store = await loadStore(uid);
-      store.userPresets = store.userPresets.filter((p) => p.id !== msg.id);
-      for (const s of [store.defaults, ...Object.values(store.chats)]) {
-        if (s.incomingPresetId === msg.id)
-          s.incomingPresetId = INHERIT_PRESET_ID;
-        if (s.outgoingPresetId === msg.id)
-          s.outgoingPresetId = INHERIT_PRESET_ID;
-      }
-      await saveStore(uid, store);
-      await sendState(uid);
-      return;
-    }
-    case "translate":
-      await translateMessage(uid, msg.chatId, msg.messageId, "fresh", { force: msg.force, automatic: false });
-      return;
-    case "continue":
-      await translateMessage(uid, msg.chatId, msg.messageId, "continue", { force: true, automatic: false });
-      return;
-    case "cancel":
-      jobs.get(jobKey(msg.chatId, msg.messageId))?.controller.abort();
-      return;
-    case "set_hidden": {
-      const updated = await writeTranslations(uid, msg.chatId, msg.messageId, (mt) => {
-        mt.hidden = msg.hidden;
-      });
-      if (updated)
-        await sendView(uid, msg.chatId, updated);
-      return;
-    }
-    case "delete_translation": {
-      const job = jobs.get(jobKey(msg.chatId, msg.messageId));
-      job?.controller.abort();
-      await job?.finished;
-      const key = typeof msg.sourceKey === "string" && msg.sourceKey ? msg.sourceKey : null;
-      const updated = await writeTranslations(uid, msg.chatId, msg.messageId, (mt, message) => clearTranslation(mt, key ?? recordKeyFor(mt, message.content ?? "") ?? sourceHash(message.content ?? "")));
-      if (updated)
-        await sendView(uid, msg.chatId, updated);
-      return;
-    }
-    case "save_view": {
-      const store = await loadStore(uid);
-      store.view = normalizeView(msg.view);
-      await saveStore(uid, store);
-      await sendState(uid);
-      return;
-    }
-    case "translate_text":
-      try {
-        send({ type: "text_result", reqId: msg.reqId, ok: true, text: await translateOutgoing(uid, msg.chatId, msg.text) }, uid);
-      } catch (e) {
-        const text = e instanceof ExcludeRuleError ? e.message : errorText(e);
-        send({ type: "text_result", reqId: msg.reqId, ok: false, error: text }, uid);
-      }
-      return;
     case "emu":
       await emu(uid, msg);
       return;

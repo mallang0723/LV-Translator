@@ -38,6 +38,10 @@ export interface HostBridge {
     signal?: AbortSignal,
   ): Promise<{ content?: string; aborted?: boolean }>;
   generateActive(chatId: string): Promise<boolean>;
+  /** The body of the original's `POST /api/generate` (a stream of server-sent events). Absent where no stream is replayed. */
+  openGeneration?(chatId: string): ReadableStream<Uint8Array>;
+  /** The original's `POST /api/translate` (the Marinara translate endpoint it intercepts): the model's reply to the system prompt + text. */
+  translate?(req: { text: string; targetLanguage: string; systemPrompt?: string; connectionId?: string; chatId?: string }, signal?: AbortSignal): Promise<{ translatedText: string }>;
   connections(): Promise<Array<{ id: string; name: string; model?: string }>>;
   character(id: string): Promise<Record<string, unknown>>;
   persona(id: string): Promise<Record<string, unknown>>;
@@ -81,6 +85,31 @@ export function createRoutes(b: HostBridge): Route[] {
         return null;
       },
     },
+    {
+      // Acknowledged only: the original turns the chat's native auto-translate off while it translates and back on after.
+      // Lumiverse has no native translation, so nothing is stored (the setting lives in the LV panel).
+      method: 'PATCH',
+      re: /^\/chats\/([^/]+)\/metadata$/,
+      run: async () => ({}),
+    },
+    {
+      method: 'POST',
+      re: /^\/generate$/,
+      run: async (_m, _q, body) => {
+        if (!b.openGeneration || typeof body?.chatId !== 'string') throw new ApiError(404, 'no generation stream');
+        return new Response(b.openGeneration(body.chatId), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      },
+    },
+    { method: 'POST', re: /^\/generate\/abort$/, run: async () => ({}) },
+    {
+      method: 'POST',
+      re: /^\/translate$/,
+      run: async (_m, _q, body, signal) => {
+        if (!b.translate) throw new ApiError(404, 'no translate');
+        if (typeof body?.text !== 'string' || typeof body?.targetLanguage !== 'string') throw new ApiError(400, 'text and targetLanguage required');
+        return b.translate(body, signal);
+      },
+    },
     { method: 'POST', re: /^\/generate\/raw$/, run: async (_m, _q, body, signal) => b.generateRaw(body, signal) },
     { method: 'GET', re: /^\/generate\/status\/([^/]+)$/, run: async (m) => ({ active: await b.generateActive(id(m[1]!)) }) },
     { method: 'GET', re: /^\/connections$/, run: async () => b.connections() },
@@ -118,6 +147,7 @@ export function createApiFetch(bridge: HostBridge, realFetch: typeof fetch): typ
     }
     try {
       const data = await route.run(route.re.exec(path)!, url.searchParams, body, init?.signal ?? undefined);
+      if (data instanceof Response) return data;
       return json(200, data ?? null);
     } catch (e) {
       if (e instanceof ApiError) return json(e.status, { message: e.message });

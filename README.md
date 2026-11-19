@@ -10,6 +10,14 @@
 
 Lumiverse에는 기본 채팅 번역 기능이 없어서, 번역은 이 확장이 모두 맡습니다.
 
+## 0.5.1
+
+- **응답 자동 번역과 NPC 자동 수집이 원작대로 돕니다.** Lumiverse의 생성 끝·중지를 원작이 보는 생성 스트림으로 재생하므로, 번역·NPC 수집·Stop·impersonate 판단은 원작 코드가 합니다.
+- **내 메시지 번역·입력창 번역 버튼**은 원작의 유저 입력 번역 프롬프트·단어장·기타 지침을 따릅니다(제외 규칙·묶음은 LV가 그 위에 얹습니다).
+- **기억 서재 연동**이 돌아왔습니다(원작 기록에서 `pub`을 만들고, 원작의 채팅 단어장을 공개). 0.4.0으로 번역해 둔 문단 단위 기록은 채팅을 열 때 원작 기록으로 한 번 옮깁니다.
+- 못 한 것: 브라우저가 닫혀 있을 때의 서버 번역([N9a](docs/tt-1.10.0-ui-parity.md)).
+- 라이선스가 MIT에서 **AGPL-3.0**으로 바뀌었습니다(아래).
+
 ## 0.5.0
 
 번역 프리셋·단어장 **1.10.0**의 화면과 기능을 원작 그대로 옮겼습니다. 원작 `extension.js`를 `src/vendor/tt-1.10.0/`에 바이트 그대로 두고 통째로 실행하며(`npm run verify:original`로 원작과 비교), 호스트 입구만 `src/host-emu/`에서 만듭니다. 번역문 표시, 문단 대조·수정 창(문단별 **다시 번역**), 말투·단어·세계관 자동 정리, NPC 자동 수집, 설정 백업이 원작 모양 그대로 나옵니다.
@@ -283,6 +291,8 @@ RP 번역표시 설정 확장 1.0.2(아래 "참고" 절)를 참고해 Lumiverse�
 
 ## 라이선스
 
-이 저장소의 코드는 [MIT](LICENSE) © 2026 mallang0723입니다.
+이 확장 전체는 [GNU AGPL-3.0](LICENSE)(`AGPL-3.0-only`)입니다. Copyright (c) 2026 mallang0723.
+
+원작 번역 도구의 `extension.js`(`src/vendor/tt-1.10.0/`)에는 Marinara Engine(Pasta-Devs, AGPL-3.0)에서 가져온 부분이 들어 있고, 이 확장의 일부는 그 동작을 따라 만들었습니다. 그래서 0.5.1부터 확장 전체를 AGPL-3.0으로 냅니다(0.5.0까지는 MIT). 이 확장을 고쳐서 네트워크로 서비스하면 고친 소스를 받는 사람에게 제공해야 합니다. 번역 도구 원작자의 허락(이식과 업데이트 반영)은 그대로입니다.
 
 다만 [Marinara-Translation-Tools](https://github.com/minikkeuen/Marinara-Translation-Tools)(minikkuen, MIT)과 그 1.8.0판 [tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools)에서 가져온 부분(`src/vendor/tt-1.8.0/*`, `src/presets/catalog.ts`, `src/translate/prompt.ts`의 요청 조립 이식 부분, 테스트 기준값)은 원저작자의 저작권을 그대로 따르며(1.8.0판 저장소에는 별도 라이선스 파일이 없고, 이식·업데이트는 원저작자의 허락을 받았습니다), 그 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다. Marinara Engine(AGPL-3.0)에서 가져온 짧은 문구 두 개도 같은 파일에 적었습니다.

@@ -1,3 +1,57 @@
+// src/illustrations.ts
+var MALFORMED_ANNOTATION = "⟦삽화가: 그림 태그 형식 오류 — 고치면 다시 시도됩니다⟧";
+var START = /<pic(?=[\s/>]|$)|<pic⟦삽화가:|!\[그림:|\[⚠️ 그림 생성 실패\(|\[한 답변당 그림 상한\(|<pic-(?:failed|skipped)\b/g;
+var TAG = /^<pic(?:⟦삽화가: 그림 태그 형식 오류 — 고치면 다시 시도됩니다⟧)?(?=[\s/>]|$)(?:[^<>"']|"[^"<]*"|'[^'<]*')*>/;
+var STATUS = /^\[(?:⚠️ 그림 생성 실패\(|한 답변당 그림 상한\()[\s\S]*?<pic-(?:failed|skipped) id="[a-z0-9]+">\]/;
+var SENTINEL = /^<pic-(?:failed|skipped)\s+id="[a-z0-9]+"\s*\/?>/;
+function imageLength(text) {
+  const alt = /^!\[그림:[^\]\n]*\]\(/.exec(text);
+  if (!alt)
+    return 0;
+  let depth = 1;
+  for (let i = alt[0].length;i < text.length; i++) {
+    if (text[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (text[i] === "(")
+      depth++;
+    if (text[i] === ")" && --depth === 0)
+      return i + 1;
+  }
+  return 0;
+}
+function replaceIllustrations(text, replace) {
+  const scan = new RegExp(START);
+  let out = "", cursor = 0, count = 0;
+  for (let match;match = scan.exec(text); ) {
+    const start = match.index;
+    const rest = text.slice(start);
+    let length = 0;
+    if (rest.startsWith("!["))
+      length = imageLength(rest);
+    else if (rest.startsWith("["))
+      length = STATUS.exec(rest)?.[0].length ?? 0;
+    else if (rest.startsWith("<pic-"))
+      length = SENTINEL.exec(rest)?.[0].length ?? 0;
+    else {
+      length = TAG.exec(rest)?.[0].length ?? 0;
+      if (!length) {
+        const offset = rest.startsWith(`<pic${MALFORMED_ANNOTATION}`) ? 4 + MALFORMED_ANNOTATION.length : 4;
+        const stop = /[<>\r\n]/.exec(rest.slice(offset));
+        length = stop ? offset + stop.index + (stop[0] === ">" ? 1 : 0) : rest.length;
+      }
+    }
+    if (!length)
+      continue;
+    length += /^\s*<\/pic\s*>/.exec(rest.slice(length))?.[0].length ?? 0;
+    out += text.slice(cursor, start) + replace(text.slice(start, start + length), count++);
+    cursor = start + length;
+    scan.lastIndex = cursor;
+  }
+  return out + text.slice(cursor);
+}
+
 // src/translate/protect.ts
 class ExcludeRuleError extends Error {
   constructor(message) {
@@ -5,6 +59,7 @@ class ExcludeRuleError extends Error {
     this.name = "ExcludeRuleError";
   }
 }
+var MARKER = /⟦\s*(\d+)\s*⟧/g;
 var MARKER_INSTRUCTION = "The text contains placeholder tokens such as ⟦1⟧. Each one stands for markup or content that must stay untranslated. " + "Copy every token exactly as written, keep each one in the same place relative to the surrounding text, " + "and never add, remove, renumber, translate or explain them.";
 var VOID_TAGS = new Set("area base br col embed hr img input link meta param source track wbr".split(" "));
 var EMPHASIS_TAGS = new Set(["strong", "em"]);
@@ -14,6 +69,141 @@ function parseTags(raw) {
   if (bad !== undefined)
     throw new ExcludeRuleError(`태그 이름 "${bad}" 를 쓸 수 없습니다. 영문, 숫자, 하이픈, 언더바만 쓸 수 있습니다.`);
   return [...new Set(names)];
+}
+function lenientTags(raw) {
+  const out = [];
+  for (const piece of String(raw ?? "").split(/[,\s]+/).filter(Boolean)) {
+    try {
+      out.push(...parseTags(piece));
+    } catch {}
+  }
+  return [...new Set(out)];
+}
+var TAG_SCAN = /<!--[\s\S]*?(?:-->|$)|```[^\n]*\n[\s\S]*?(?:```|$)|~~~[^\n]*\n[\s\S]*?(?:~~~|$)|`[^`\n]+`|<\/?([a-z_][\w-]*)(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gi;
+function protectElements(text, names, hold) {
+  const wanted = new Set(names.filter((n) => !EMPHASIS_TAGS.has(n) && !VOID_TAGS.has(n)));
+  if (!wanted.size)
+    return text;
+  const matches = [...text.matchAll(TAG_SCAN)];
+  let out = "";
+  let cursor = 0;
+  for (let i = 0;i < matches.length; i++) {
+    const m = matches[i];
+    const name = m[1]?.toLowerCase();
+    if (m.index < cursor || !name || !wanted.has(name) || m[0].startsWith("</") || m[0].endsWith("/>"))
+      continue;
+    let end = text.length;
+    let depth = 1;
+    for (let j = i + 1;j < matches.length; j++) {
+      const n = matches[j];
+      if (n[1]?.toLowerCase() !== name)
+        continue;
+      if (n[0].startsWith("</"))
+        depth--;
+      else if (!n[0].endsWith("/>"))
+        depth++;
+      if (!depth) {
+        end = n.index + n[0].length;
+        i = j;
+        break;
+      }
+    }
+    out += text.slice(cursor, m.index) + hold(text.slice(m.index, end));
+    cursor = end;
+  }
+  return out + text.slice(cursor);
+}
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function parseExcludeRules(raw) {
+  const out = [];
+  raw.split(/\r?\n/).forEach((line, index) => {
+    const rule = line.trim();
+    if (!rule || rule.startsWith("#"))
+      return;
+    const where = `제외 규칙 ${index + 1}번째 줄`;
+    const tag = /^<\s*([A-Za-z][\w:.-]*)\s*\/?>$/.exec(rule);
+    if (tag) {
+      const name = escapeRegExp(tag[1]);
+      out.push(new RegExp(`<${name}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${name}\\s*>|<${name}(?:\\s[^>]*)?\\/>`, "gi"));
+      return;
+    }
+    const re = /^\/(.+)\/([a-z]*)$/s.exec(rule);
+    if (re) {
+      let flags = re[2];
+      if (/[^gimsuy]/.test(flags))
+        throw new ExcludeRuleError(`${where}: 정규식 플래그 "${flags}" 는 쓸 수 없습니다.`);
+      if (!flags.includes("g"))
+        flags += "g";
+      try {
+        const r = new RegExp(re[1], flags);
+        if (r.test(""))
+          throw new ExcludeRuleError(`${where}: 빈 문자열과 일치하는 정규식은 쓸 수 없습니다.`);
+        r.lastIndex = 0;
+        out.push(r);
+      } catch (e) {
+        if (e instanceof ExcludeRuleError)
+          throw e;
+        throw new ExcludeRuleError(`${where}: 정규식 오류 (${e.message})`);
+      }
+      return;
+    }
+    const range = rule.split(" ... ");
+    if (range.length === 2 && range[0].trim() && range[1].trim()) {
+      out.push(new RegExp(`${escapeRegExp(range[0].trim())}[\\s\\S]*?${escapeRegExp(range[1].trim())}`, "g"));
+      return;
+    }
+    throw new ExcludeRuleError(`${where}: "${rule}" 를 이해하지 못했습니다. <태그>, /정규식/, 시작 ... 끝 중 하나로 적어 주세요.`);
+  });
+  return out;
+}
+function protect(source, options) {
+  const pieces = [];
+  const hold = (piece) => {
+    pieces.push(piece.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m));
+    return `⟦${pieces.length}⟧`;
+  };
+  let text = source.replace(MARKER, (m) => {
+    pieces.push(m);
+    return `⟦${pieces.length}⟧`;
+  });
+  for (const rule of parseExcludeRules(options.excludeRules))
+    text = text.replace(rule, (m) => hold(m));
+  text = protectElements(text, lenientTags(options.excludeTags ?? ""), hold);
+  if (options.protectCode)
+    text = text.replace(/```[\s\S]*?```/g, (m) => hold(m));
+  text = text.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => hold(m));
+  text = replaceIllustrations(text, hold);
+  if (options.protectHtml) {
+    text = text.replace(/<!--[\s\S]*?-->/g, (m) => hold(m));
+    text = text.replace(/<\/?[A-Za-z][\w:.-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'">\s/]+|\/(?!>))*)*\s*\/?>/g, (m) => hold(m));
+  }
+  text = text.replace(/\{\{[\s\S]*?\}\}/g, (m) => hold(m));
+  return { text, pieces };
+}
+function markersIn(text) {
+  return [...text.matchAll(MARKER)].map((m) => Number(m[1]));
+}
+function checkMarkers(sourceText, translated) {
+  const expected = markersIn(sourceText).sort((a, b) => a - b);
+  const got = markersIn(translated).sort((a, b) => a - b);
+  if (expected.join(",") === got.join(","))
+    return null;
+  const missing = expected.filter((n) => !got.includes(n));
+  const extra = got.filter((n) => !expected.includes(n));
+  const dup = got.filter((n, i) => got.indexOf(n) !== i);
+  const parts = [];
+  if (missing.length)
+    parts.push(`빠짐 ${missing.map((n) => `⟦${n}⟧`).join(" ")}`);
+  if (extra.length)
+    parts.push(`없던 표시 ${extra.map((n) => `⟦${n}⟧`).join(" ")}`);
+  if (dup.length)
+    parts.push(`중복 ${[...new Set(dup)].map((n) => `⟦${n}⟧`).join(" ")}`);
+  return `번역문에서 보호 표시가 어긋났습니다 (${parts.join(", ")}).`;
+}
+function restore(text, pieces) {
+  return text.replace(MARKER, (m, n) => pieces[Number(n) - 1] ?? m);
 }
 
 // src/vendor/tt-1.8.0/prompts.ts
@@ -1136,6 +1326,7 @@ function effectiveConnectionId(store, chatId) {
 }
 
 // src/connection.ts
+var CONNECTION_HINT = "AI 연결을 찾지 못했습니다. 번역 설정에서 연결을 골랐는지, 그리고 저장했는지 확인해 주세요(저장하지 않으면 적용되지 않습니다). Lumiverse에 기본 연결이 있는지도 확인해 보세요.";
 function pickConnection(list, chosen, hint = {}) {
   const has = (id) => id ? list.some((c) => c.id === id) : false;
   const staleId = chosen && !has(chosen) ? chosen : undefined;
@@ -1160,27 +1351,13 @@ var SOURCE_LABELS = {
   first: "첫 번째 연결",
   host: "Lumiverse가 정하는 연결"
 };
-
-// src/vendor/tt-1.8.0/example-narration-style.ts
-var NARRATION_STYLE_EXAMPLE = `ABSOLUTE WORD BAN: never write 계집 or 계집애 anywhere in the translation, in any scene, tone or viewpoint, even when the source has no word for the woman at all. Do not turn a sentence about her into a label for her: "She didn't have an ounce of fear in her" = 서연에게는 두려움이라곤 눈곱만큼도 없었다 (never ~없는 계집이었다). Only when the source itself uses a crude word for a woman (girl, wench, broad, bitch) choose 여자, 아가씨 as the tone requires. Check the finished translation once for 계집 and rewrite any sentence that has it.
-
-Narration style (all scenes): write the Korean narration as original Korean web-fiction prose in close third person, not as a translated novel.
-- Free indirect style: let the viewpoint character's own judgment and tone run through the narration with endings such as ~할 테다, ~터였다, ~나 다름없었다, ~일 리 없었다, ~기 짝이 없었다, ~였으니까. Keep the source's meaning, but phrase each judgment the way that character would think it.
-- Translate sentence by sentence but not word by word: merge or split English sentences when Korean rhythm needs it, carry clauses with connective endings (~더니, ~자, ~며, ~채, ~는데), and turn English idioms and similes into natural Korean expressions.
-- Avoid translationese: 개인적인 모욕, ~한 양, ~에 대해, ~것이다, ~하는 중이었다 chains, stacked ~의, and literal "그는/그녀는". Use names, 제/제 몸 for reflexives, or omission.
-- Keep blank lines, paragraph breaks and scene dividers (***) exactly where the source has them.
-- Keep the source logic exact even while paraphrasing: contrast and irony, cause and effect, time frame, and who owns or does what. "Ten years of X, and Y happened" means Y happened now despite X, not repeatedly during those years. Write possessives as the right person's name when 제/자기 could point to the wrong one (his office = 도하의 사무실, not the company's). Do not drop images that carry meaning, such as a comparison to a startled deer.
-- Numbers and units stay exact: twenty degrees colder = 20도 더 차가운 (not 스무 배), centuries = 수백 년, millennia = 수천 년. Physical descriptions stay exact: slit-pupiled = 세로 동공의 (not 가늘게 좁아진), purple bruise = 보랏빛 멍.
-- Write spelled-out English numbers as Arabic numerals with Korean units: thirty-two degrees = 32도 (never 서른두 도), five kilos = 5킬로그램, two miles = 2마일, twenty minutes = 20분. Keep native Korean words only for small everyday counts in speech-like narration (한 번, 두 사람, 세 걸음).
-- Do not soften or guess what the source states: "she had jumped off" is 뛰어내렸다, not 떨어졌다; "So that was whose car" means realizing whose car it was, not guessing (~였던 모양이었다).
-- Add nothing the source does not say: no extra modifiers or actions (덜덜 떨리는 손, 능숙한), no invented positions, names or ship names. Paraphrase the wording, never the facts.
-- Distances and sizes stay at the source scale: a fraction of an inch = 거의 닿을 듯한 거리 / 몇 밀리미터, an inch = 2~3센티미터; never turn them into 한 뼘 or other folk units.
-- Terms: keep world terms fixed (consigliere = 콘실리에레, gangplank = 트랩) and write a character's fixed traits the same way every time (slate/storm/blue-gray eyes = 청회색 눈). A chill is 냉기 or 한기, never 온기.
-- 제/자기 always means the subject of its own clause. When "his/her" belongs to someone other than that subject, write the owner's name: "the girl who borrowed his car" = 도하의 차를 빌려 쓰던 서연 (never 제 차).
-- Terms: throat = 목/목울대 (멱살 is a shirt collar you grab, never something you bite); the base of her throat = 목 아래 오목한 곳 (front of the neck, never 목덜미, which is the back); nape = 목덜미; amusement = 재미/흥미/웃음기 (never 유흥 or 조소); effortless(ly) = 아무렇지 않게/힘들이지 않고 (never an invented image such as 숨결 하나 없이, 손짓 하나 없이); faint = 희미한.
-- When two people are in one sentence, do not use 저/제 for both of them; name one of them.
-- 계집/계집애 are banned (see the word ban at the top).
-`;
+function friendlyError(message) {
+  if (/No connection profile found/i.test(message))
+    return CONNECTION_HINT;
+  if (/userId is required/i.test(message))
+    return "이 확장은 사용자 정보를 받지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.";
+  return message;
+}
 
 // src/vendor/tt-1.10.0/personal-extension/extension.js
 var extension_default = `// Loaded in manifest order; each variant contains the complete prompt.
@@ -8275,8 +8452,29 @@ function createSettingsHost() {
   section.setAttribute("data-chat-settings-section", "translation");
   const body = document.createElement("div");
   body.className = "mari-drawer__body";
+  for (const which of ["outgoing", "incoming"]) {
+    const field = document.createElement("textarea");
+    field.hidden = true;
+    field.style.display = "none";
+    field.setAttribute("data-ptx-native-prompt", which);
+    field.addEventListener("input", () => field.setAttribute("data-ptx-touched", ""));
+    body.append(field);
+  }
   section.append(body);
   return section;
+}
+function nativePrompts(host) {
+  const field = (which) => host.querySelector(`textarea[data-ptx-native-prompt="${which}"]`);
+  return {
+    prompts: () => ({ outgoing: field("outgoing")?.value ?? "", incoming: field("incoming")?.value ?? "" }),
+    setPrompts(outgoing, incoming) {
+      for (const [which, value] of [["outgoing", outgoing], ["incoming", incoming]]) {
+        const f = field(which);
+        if (f && !f.hasAttribute("data-ptx-touched"))
+          f.value = value;
+      }
+    }
+  };
 }
 
 // src/host-emu/api.ts
@@ -8316,6 +8514,32 @@ function createRoutes(b) {
         return null;
       }
     },
+    {
+      method: "PATCH",
+      re: /^\/chats\/([^/]+)\/metadata$/,
+      run: async () => ({})
+    },
+    {
+      method: "POST",
+      re: /^\/generate$/,
+      run: async (_m, _q, body) => {
+        if (!b.openGeneration || typeof body?.chatId !== "string")
+          throw new ApiError(404, "no generation stream");
+        return new Response(b.openGeneration(body.chatId), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+    },
+    { method: "POST", re: /^\/generate\/abort$/, run: async () => ({}) },
+    {
+      method: "POST",
+      re: /^\/translate$/,
+      run: async (_m, _q, body, signal) => {
+        if (!b.translate)
+          throw new ApiError(404, "no translate");
+        if (typeof body?.text !== "string" || typeof body?.targetLanguage !== "string")
+          throw new ApiError(400, "text and targetLanguage required");
+        return b.translate(body, signal);
+      }
+    },
     { method: "POST", re: /^\/generate\/raw$/, run: async (_m, _q, body, signal) => b.generateRaw(body, signal) },
     { method: "GET", re: /^\/generate\/status\/([^/]+)$/, run: async (m) => ({ active: await b.generateActive(id(m[1])) }) },
     { method: "GET", re: /^\/connections$/, run: async () => b.connections() },
@@ -8352,6 +8576,8 @@ function createApiFetch(bridge, realFetch) {
     }
     try {
       const data = await route.run(route.re.exec(path), url.searchParams, body, init?.signal ?? undefined);
+      if (data instanceof Response)
+        return data;
       return json(200, data ?? null);
     } catch (e) {
       if (e instanceof ApiError)
@@ -8592,6 +8818,138 @@ function startOriginal(opts) {
   };
 }
 
+// src/host-emu/generation.ts
+class GenerationHub {
+  streams = new Map;
+  encoder = new TextEncoder;
+  open(chatId) {
+    this.cut(chatId);
+    let entry;
+    const stream = new ReadableStream({
+      start: (controller) => {
+        entry = { controller, closed: false };
+        this.streams.set(chatId, entry);
+      },
+      cancel: () => {
+        entry.closed = true;
+        if (this.streams.get(chatId) === entry)
+          this.streams.delete(chatId);
+      }
+    });
+    return stream;
+  }
+  has(chatId) {
+    return this.streams.has(chatId);
+  }
+  send(chatId, event) {
+    const entry = this.streams.get(chatId);
+    if (!entry || entry.closed)
+      return false;
+    try {
+      entry.controller.enqueue(this.encoder.encode(`data: ${JSON.stringify(event)}
+
+`));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  cut(chatId) {
+    const entry = this.streams.get(chatId);
+    if (!entry)
+      return;
+    this.streams.delete(chatId);
+    if (entry.closed)
+      return;
+    entry.closed = true;
+    try {
+      entry.controller.close();
+    } catch {}
+  }
+  abort(chatId) {
+    const entry = this.streams.get(chatId);
+    if (!entry)
+      return;
+    this.streams.delete(chatId);
+    if (entry.closed)
+      return;
+    entry.closed = true;
+    try {
+      entry.controller.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    } catch {}
+  }
+  finish(chatId, message) {
+    this.send(chatId, { type: "message_saved", data: { id: message.id, role: "assistant", content: message.content, activeSwipeIndex: message.swipe, extra: {} } });
+    this.send(chatId, { type: "done" });
+    this.cut(chatId);
+  }
+  fail(chatId, error) {
+    this.send(chatId, { type: "error", data: error });
+    this.cut(chatId);
+  }
+}
+
+class GenerationDriver {
+  hub;
+  fetchImpl;
+  log;
+  constructor(hub, fetchImpl, log = () => {}) {
+    this.hub = hub;
+    this.fetchImpl = fetchImpl;
+    this.log = log;
+  }
+  post(path, body) {
+    const f = this.fetchImpl();
+    if (!f)
+      return null;
+    return f(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Marinara-CSRF": "1" }, body: JSON.stringify(body) });
+  }
+  started(p) {
+    if (!p.chatId)
+      return;
+    const type = p.generationType;
+    const body = { chatId: p.chatId };
+    if (type === "impersonate")
+      body.impersonate = true;
+    if ((type === "regenerate" || type === "swipe") && p.targetMessageId)
+      body.regenerateMessageId = p.targetMessageId;
+    if (type === "continue" && p.targetMessageId)
+      body.continueMessageId = p.targetMessageId;
+    const pending = this.post("/api/generate", body);
+    if (!pending)
+      return;
+    pending.then(async (res) => {
+      if (!res.body)
+        return;
+      const reader = res.body.getReader();
+      while (!(await reader.read()).done) {}
+    }).catch((e) => {
+      if (e?.name !== "AbortError")
+        this.log("generation stream", e);
+    });
+  }
+  ended(p, swipe = 0) {
+    if (!this.hub.has(p.chatId))
+      return false;
+    if (p.generationType === "impersonate")
+      this.hub.cut(p.chatId);
+    else if (p.error)
+      this.hub.fail(p.chatId, p.error);
+    else if (p.messageId && typeof p.content === "string")
+      this.hub.finish(p.chatId, { id: p.messageId, content: p.content, swipe });
+    else
+      this.hub.abort(p.chatId);
+    return true;
+  }
+  stopped(chatId) {
+    if (!this.hub.has(chatId))
+      return;
+    const abort = this.post("/api/generate/abort", { chatId });
+    abort?.catch((e) => this.log("generation abort", e));
+    this.hub.abort(chatId);
+  }
+}
+
 // src/frontend.ts
 var PANEL_CSS = `
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
@@ -8677,12 +9035,9 @@ var parseTagsSafe = (raw) => {
 };
 function setup(ctx) {
   let store = null;
-  let presets = [];
   let connections = [];
   let link = "none";
   let chatId = null;
-  const pending = new Map;
-  let reqCounter = 0;
   let lastDraftTranslation = null;
   let dirty = false;
   let markDirtyUi = null;
@@ -8711,14 +9066,6 @@ function setup(ctx) {
     hint = next;
     toBackend({ type: "hint", chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId, ...open ? { open: true } : {} });
   }
-  async function translateText(text, forChat) {
-    await sendHint(forChat);
-    const reqId = `t${++reqCounter}`;
-    return new Promise((resolve, reject) => {
-      pending.set(reqId, { resolve, reject });
-      toBackend({ type: "translate_text", reqId, chatId: forChat, text });
-    });
-  }
   const rpc = new Map;
   let rpcCounter = 0;
   const call = (op, args, signal) => {
@@ -8733,6 +9080,7 @@ function setup(ctx) {
       }, { once: true });
     });
   };
+  const hub = new GenerationHub;
   const bridge = {
     getChat: (c) => call("getChat", [c]),
     listMessages: (c, n) => call("listMessages", [c, n]),
@@ -8745,7 +9093,9 @@ function setup(ctx) {
     character: (id) => call("character", [id]),
     persona: (id) => call("persona", [id]),
     lorebooks: () => call("lorebooks", []),
-    lorebookEntries: (b) => call("lorebookEntries", [b])
+    lorebookEntries: (b) => call("lorebookEntries", [b]),
+    openGeneration: (c) => hub.open(c),
+    translate: (req, signal) => call("translate", [req], signal)
   };
   const emuStorage = {
     get: () => call("storage.get", []),
@@ -8757,6 +9107,66 @@ function setup(ctx) {
     activeChatId: () => chatId,
     addStyle: (css) => ctx.dom.addStyle(css)
   });
+  const settingsElement = createSettingsHost();
+  const settingsHost = { element: settingsElement, ...nativePrompts(settingsElement) };
+  const driver = new GenerationDriver(hub, () => original.emu.installedFetch(), (text, error) => console.warn(`[translator] ${text}`, error));
+  const leased = new Set;
+  const offEvents = [
+    ctx.events.on("GENERATION_STARTED", (payload) => {
+      const p = payload;
+      if (!p?.chatId || !p.generationId)
+        return;
+      const { generationId, chatId: forChat } = p;
+      call("lease", [generationId]).then((granted) => {
+        if (!granted)
+          return;
+        leased.add(generationId);
+        driver.started({ chatId: forChat, generationType: p.generationType, targetMessageId: p.targetMessageId });
+      }).catch(() => {});
+    }),
+    ctx.events.on("GENERATION_ENDED", (payload) => {
+      const p = payload;
+      if (!p?.chatId || !p.generationId || !leased.delete(p.generationId))
+        return;
+      driver.ended({ chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType });
+    }),
+    ctx.events.on("GENERATION_STOPPED", (payload) => {
+      const p = payload;
+      if (!p?.chatId || !p.generationId || !leased.delete(p.generationId))
+        return;
+      driver.stopped(p.chatId);
+    })
+  ];
+  async function translateText(text, forChat) {
+    await sendHint(forChat);
+    const fetchOriginal = original.emu.installedFetch();
+    if (!fetchOriginal)
+      throw new Error("번역 도구가 아직 시작되지 않았습니다.");
+    const settings = store ? settingsFor(store, forChat) : DEFAULT_SETTINGS;
+    const row = await bridge.getChat(forChat);
+    const connectionId = String(row.metadata?.translationConnectionId ?? "");
+    const held = protect(text, settings);
+    let systemPrompt = settingsHost.prompts().outgoing.trim();
+    if (held.pieces.length)
+      systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, "").trim(), MARKER_INSTRUCTION].join(`
+
+`);
+    const res = await fetchOriginal("/api/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: held.text, provider: "ai", targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat })
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok)
+      throw new Error(friendlyError(data?.error || data?.message || `번역 요청 실패 (${res.status})`));
+    const translated = String(data?.translatedText ?? "").trim();
+    if (!translated)
+      throw new Error("번역 결과가 비어 있습니다.");
+    const problem = held.pieces.length ? checkMarkers(held.text, translated) : null;
+    if (problem)
+      throw new Error(problem);
+    return restore(translated, held.pieces).trim();
+  }
   function resetChat(next) {
     chatId = next;
     renderDraftButton();
@@ -8777,11 +9187,6 @@ function setup(ctx) {
     if (next !== chatId)
       resetChat(next);
   }, 700);
-  const offEvents = ["GENERATION_ENDED"].map((name) => ctx.events.on(name, (payload) => {
-    const p = payload;
-    if (!p?.chatId || p.chatId === chatId)
-      setTimeout(() => document.dispatchEvent(new Event("visibilitychange")), 1500);
-  }));
   const originalFetch = window.fetch;
   const translatingFetch = async function(input, init) {
     try {
@@ -8847,8 +9252,8 @@ function setup(ctx) {
   });
   const panel = el("div", { class: "stt-panel" });
   const originalSettings = el("div", { class: "stt-panel" }, [
-    el("div", { class: "stt-note" }, ["아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답 번역의 프리셋·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·내 메시지 번역에 쓰입니다."]),
-    createSettingsHost()
+    el("div", { class: "stt-note" }, ["아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답과 내 메시지 번역의 프롬프트·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·자동 번역·내 메시지 번역·제외 규칙·묶음에 쓰입니다."]),
+    settingsHost.element
   ]);
   tab.root.replaceChildren(panel, originalSettings);
   let draft = { ...DEFAULT_SETTINGS };
@@ -8886,76 +9291,17 @@ function setup(ctx) {
     });
     return el("label", { class: "stt-field" }, [el("span", {}, [label]), s]);
   }
-  function promptSection(direction) {
-    const presetKey = direction === "incoming" ? "incomingPresetId" : "outgoingPresetId";
-    const promptKey = direction === "incoming" ? "incomingPrompt" : "outgoingPrompt";
-    const presetId = draft[presetKey];
-    const preset = presets.find((p) => p.id === presetId);
-    const inherit = !preset || presetId === INHERIT_PRESET_ID;
-    const box = el("div", { class: "stt-field" });
-    const options = presets.map((p) => [p.id, p.builtin ? p.name : `${p.name} (내 프리셋)`]);
-    box.append(select(direction === "incoming" ? "응답 번역 프롬프트 (Incoming)" : "내 메시지 번역 프롬프트 (Outgoing)", presetId, options, (v) => {
-      draft[presetKey] = v;
-    }, true, true));
-    if (inherit) {
-      box.append(text("이 채팅의 프롬프트 (비워 두면 기본 번역 프롬프트, {{targetLanguage}} 사용 가능)", promptKey, { multiline: true, cls: "stt-prompt", placeholder: MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, "").trim() }));
-    } else {
-      box.append(el("textarea", { class: "stt-prompt", readOnly: true, value: preset.prompt }));
-    }
-    box.append(el("span", { class: "stt-note" }, ['저장한 뒤 새로 번역하는 메시지부터 적용됩니다. 이미 번역된 메시지는 메시지의 "다시 번역" 버튼으로 새로 번역하세요.']));
-    return box;
-  }
-  function editPreset(existing) {
-    const modal = ctx.ui.showModal({ title: existing ? "프리셋 수정" : "새 프리셋", width: 680, maxHeight: 820, persistent: true });
-    const name = el("input", { type: "text", value: existing?.name ?? "", placeholder: "프리셋 이름" });
-    const prompt = el("textarea", { value: existing?.prompt ?? "", placeholder: "번역 시스템 프롬프트. {{targetLanguage}} 는 대상 언어로 바뀝니다.", spellcheck: false });
-    modal.root.replaceChildren(el("div", { class: "stt-modal" }, [
-      el("label", { class: "stt-field" }, [el("span", {}, ["이름"]), name]),
-      el("label", { class: "stt-field" }, [el("span", {}, ["프롬프트 전문"]), prompt]),
-      el("div", { class: "stt-row" }, [
-        button("저장", () => {
-          if (!name.value.trim() || !prompt.value.trim())
-            return notify("warning", "이름과 프롬프트를 입력해 주세요.");
-          toBackend({ type: "save_preset", preset: { id: existing?.id ?? "", name: name.value, prompt: prompt.value } });
-          modal.dismiss();
-        }, "stt-primary"),
-        button("취소", () => modal.dismiss())
-      ])
-    ]));
-  }
-  function presetManager() {
-    const mine = presets.filter((p) => !p.builtin);
-    const row = el("div", { class: "stt-row" }, [
-      button("+ 새 프리셋", () => editPreset(null)),
-      button("기본 프리셋 복사해서 새로 만들기", () => {
-        const base = presets.find((p) => p.id === draft.incomingPresetId && p.prompt);
-        editPreset(base ? { ...base, id: "", name: `${base.name} 사본`, builtin: false } : null);
-      }, "", "응답 번역에 선택된 프리셋을 복사합니다")
-    ]);
-    const list = mine.map((p) => el("div", { class: "stt-row" }, [
-      el("span", { style: "flex:1" }, [p.name]),
-      button("수정", () => editPreset(p)),
-      button("삭제", async () => {
-        const { confirmed } = await ctx.ui.showConfirm({ title: "프리셋 삭제", message: `"${p.name}" 프리셋을 삭제할까요? 이 프리셋을 쓰던 채팅은 "채팅 설정 유지"로 돌아갑니다.`, variant: "danger", confirmLabel: "삭제" });
-        if (confirmed)
-          toBackend({ type: "delete_preset", id: p.id });
-      }, "stt-danger")
-    ]));
-    return el("div", { class: "stt-field" }, [row, ...list.length ? list : [el("span", { class: "stt-note" }, ["내 프리셋이 없습니다. 기본 프리셋은 읽기 전용입니다."])]]);
-  }
   function editBundle(existing) {
     const modal = ctx.ui.showModal({ title: existing ? "묶음 편집" : "새 묶음으로 저장", width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
     const source = existing ?? draft;
     const name = el("input", { type: "text", value: existing?.name ?? "", placeholder: "묶음 이름" });
     const glossary = el("textarea", { value: source.glossary, spellcheck: false, placeholder: "내 언어 용어 = 모델 언어 용어" });
     const freeContext = el("textarea", { value: source.freeContext, spellcheck: false });
-    const voice = el("textarea", { value: source.incomingVoicePrompt, spellcheck: false });
     modal.root.replaceChildren(el("div", { class: "stt-modal stt-bundle-editor" }, [
-      el("div", { class: "stt-note" }, [existing ? "저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다." : "이 방에 입력한 단어집·추가 지침·캐릭터 말투를 복사합니다. 저장 후 목록에서 선택해 주세요. 방의 입력 내용은 그대로 남습니다."]),
+      el("div", { class: "stt-note" }, [existing ? "저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다." : "이 방의 묶음 내용(단어집·추가 지침)을 복사합니다. 저장 후 목록에서 선택해 주세요."]),
       el("label", { class: "stt-field" }, [el("span", {}, ["이름"]), name]),
       el("label", { class: "stt-field" }, [el("span", {}, ["단어집"]), glossary]),
       el("label", { class: "stt-field" }, [el("span", {}, ["추가 지침"]), freeContext]),
-      el("label", { class: "stt-field" }, [el("span", {}, ["캐릭터 말투 (응답 번역에만)"]), voice]),
       el("div", { class: "stt-row" }, [
         button("저장", () => {
           if (!name.value.trim())
@@ -8965,7 +9311,7 @@ function setup(ctx) {
             name: name.value,
             glossary: glossary.value,
             freeContext: freeContext.value,
-            incomingVoicePrompt: voice.value
+            incomingVoicePrompt: existing?.incomingVoicePrompt ?? ""
           } });
           modal.dismiss();
         }, "stt-primary"),
@@ -8997,8 +9343,7 @@ function setup(ctx) {
       el("summary", {}, [`${selected.name} · 내용 보기 (읽기 전용)`]),
       ...[
         ["단어집", selected.glossary],
-        ["추가 지침", selected.freeContext],
-        ["캐릭터 말투", selected.incomingVoicePrompt]
+        ["추가 지침", selected.freeContext]
       ].map(([label, value]) => el("label", { class: "stt-field" }, [
         el("span", {}, [label]),
         el("textarea", { readOnly: true, value, placeholder: "내용 없음" })
@@ -9009,73 +9354,9 @@ function setup(ctx) {
       select("이 방의 묶음", draft.bundleId, [["", "없음"], ...bundles.map((b) => [b.id, b.name])], (value) => {
         draft.bundleId = value;
       }, true, true),
-      el("div", { class: "stt-row" }, [button("새 묶음으로 저장", () => editBundle(null), "", "이 방의 현재 3개 내용으로 새 묶음 저장"), edit, remove]),
-      el("div", { class: "stt-note" }, ["묶음 선택은 아래 저장 버튼으로 적용합니다. 추가 지침·말투의 사용 여부는 방마다 정하며, 묶음과 이 방 추가분에 함께 적용됩니다. 같은 용어는 이 방 단어장이 우선합니다."]),
+      el("div", { class: "stt-row" }, [button("새 묶음 만들기", () => editBundle(null), "", "새 묶음 저장"), edit, remove]),
+      el("div", { class: "stt-note" }, ["묶음의 단어집·추가 지침은 **내 메시지 번역**에 더해집니다(응답 번역의 단어장·기타 지침·말투는 아래 원작 설정 화면에서 합니다). 선택은 아래 저장 버튼으로 적용합니다."]),
       preview
-    ]);
-  }
-  let selectedNoteId = "";
-  let lastNote = null;
-  function noteTools() {
-    const notes = store?.notes ?? [];
-    if (!notes.some((n) => n.id === selectedNoteId))
-      selectedNoteId = "";
-    const picked = notes.find((n) => n.id === selectedNoteId);
-    const load = button("불러오기", async () => {
-      if (!picked)
-        return;
-      if (draft.freeContext.trim() && draft.freeContext.trim() !== picked.text.trim()) {
-        const { confirmed } = await ctx.ui.showConfirm({ title: "기타 지침 불러오기", message: `이 채팅의 기타 지침을 "${picked.name}"의 내용으로 바꿉니다. 지금 적힌 내용은 사라집니다.`, variant: "warning", confirmLabel: "바꾸기" });
-        if (!confirmed)
-          return;
-      }
-      draft.freeContext = picked.text;
-      draft.freeContextEnabled = true;
-      markDirty();
-      renderPanel();
-      notify("info", "불러왔습니다. 아래 저장 버튼을 눌러야 이 채팅에 적용됩니다.");
-    }, "", "저장한 기타 지침을 이 채팅에 복사합니다");
-    const remove = button("삭제", async () => {
-      if (!picked)
-        return;
-      const { confirmed } = await ctx.ui.showConfirm({ title: "저장한 기타 지침 삭제", message: `"${picked.name}"을 보관함에서 지울까요? 이미 불러와 쓰는 채팅의 기타 지침은 그대로 남습니다.`, variant: "danger", confirmLabel: "삭제" });
-      if (confirmed)
-        toBackend({ type: "delete_note", id: picked.id });
-    }, "stt-danger");
-    load.disabled = remove.disabled = !picked;
-    return el("div", { class: "stt-field" }, [
-      el("div", { class: "stt-row" }, [
-        button("예시 넣기 (지문 문체)", () => {
-          draft.freeContext = `${draft.freeContext.trimEnd()}${draft.freeContext.trim() ? `
-
-` : ""}${NARRATION_STYLE_EXAMPLE}`;
-          draft.freeContextEnabled = true;
-          markDirty();
-          renderPanel();
-        }, "", "tlsiddl/marinara-translation-tools의 예시 기타 지침을 아래에 이어 붙입니다. 저장 전에 고쳐 쓰세요"),
-        button("이 기타 지침 저장", () => {
-          const modal = ctx.ui.showModal({ title: "기타 지침 저장", width: Math.min(520, window.innerWidth - 32), maxHeight: 420, persistent: true });
-          const name = el("input", { type: "text", value: "", placeholder: "이름 (최대 60자)" });
-          modal.root.replaceChildren(el("div", { class: "stt-modal" }, [
-            el("label", { class: "stt-field" }, [el("span", {}, ["이름"]), name]),
-            el("div", { class: "stt-row" }, [
-              button("저장", () => {
-                if (!name.value.trim())
-                  return notify("warning", "이름을 입력해 주세요.");
-                lastNote = { name: name.value, text: draft.freeContext };
-                toBackend({ type: "save_note", note: lastNote });
-                modal.dismiss();
-              }, "stt-primary"),
-              button("취소", () => modal.dismiss())
-            ])
-          ]));
-        }, "", "지금 적힌 기타 지침을 이름을 붙여 모든 채팅에서 쓸 수 있게 보관합니다")
-      ]),
-      select("저장한 기타 지침", selectedNoteId, [["", notes.length ? "고르세요" : "저장한 것이 없습니다"], ...notes.map((n) => [n.id, n.name])], (v) => {
-        selectedNoteId = v;
-      }, false, true),
-      el("div", { class: "stt-row" }, [load, remove]),
-      el("div", { class: "stt-note" }, ['불러오기는 복사입니다. 저장한 것과 이 채팅의 기타 지침은 서로 연결되지 않습니다. (여러 방이 함께 쓰며 같이 바뀌는 묶음은 위의 "번역 지침 묶음")'])
     ]);
   }
   function markDirty() {
@@ -9135,22 +9416,6 @@ function setup(ctx) {
       saveNotice.hidden = !dirty;
     };
     markDirtyUi();
-    const contextSub = el("div", { class: "stt-sub" }, [
-      el("div", { class: "stt-row" }, [check("원문 포함", "contextIncludeOriginal"), check("번역문 포함", "contextIncludeTranslation"), check("내 메시지 번역에도 포함", "contextIncludeUserInput")]),
-      (() => {
-        const n = el("input", { type: "number", min: 1, max: 10, value: draft.contextMessageCount });
-        n.addEventListener("input", () => {
-          draft.contextMessageCount = Number(n.value) || 3;
-          markDirty();
-        });
-        return el("label", { class: "stt-field" }, [el("span", {}, ["최근 메시지 수 (1~10)"]), n]);
-      })()
-    ]);
-    const split = el("input", { type: "number", min: 0, step: 500, value: draft.longSplitChars });
-    split.addEventListener("input", () => {
-      draft.longSplitChars = Math.max(0, Number(split.value) || 0);
-      markDirty();
-    });
     panel.replaceChildren(el("div", { class: "stt-note" }, [chatId ? "지금 열린 채팅의 번역 설정입니다." : "열린 채팅이 없어 새 채팅의 기본값을 편집합니다."]), el("div", { class: "stt-section" }, [
       el("h3", {}, ["기본 번역"]),
       select("번역에 쓸 AI 연결", draft.connectionId, connectionOptions, (v) => {
@@ -9164,19 +9429,7 @@ function setup(ctx) {
       check("AI 응답 자동 번역", "autoTranslate"),
       check("내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)", "translateMyMessages"),
       check("입력창 옆에 번역 버튼 표시", "showDraftButton")
-    ]), el("div", { class: "stt-section" }, [el("h3", {}, ["프롬프트 프리셋"]), promptSection("incoming"), promptSection("outgoing"), presetManager()]), bundleSection(), el("div", { class: "stt-section" }, [
-      el("h3", {}, ["단어장"]),
-      text("이 방에만 추가 · 한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)", "glossary", { multiline: true, placeholder: `마리나라 = Marinara
-로어북 = lorebook` })
-    ]), el("div", { class: "stt-section" }, [
-      el("h3", {}, ["참고 정보"]),
-      check("기타 지침 추가 (장르·시대·지역·배경 등)", "freeContextEnabled", renderPanel),
-      draft.freeContextEnabled ? el("div", { class: "stt-sub" }, [text("이 방에만 추가 · 기타 지침", "freeContext", { multiline: true }), noteTools()]) : null,
-      check("대사 지침 추가 (응답 번역에만)", "incomingVoiceEnabled", renderPanel),
-      draft.incomingVoiceEnabled ? el("div", { class: "stt-sub" }, [text("이 방에만 추가 · 대사 지침 (# Character Voice Instructions)", "incomingVoicePrompt", { multiline: true })]) : null,
-      check("이전 대화를 번역 참고로 포함", "contextEnabled", renderPanel),
-      draft.contextEnabled ? contextSub : null
-    ]), el("div", { class: "stt-section" }, [
+    ]), bundleSection(), el("div", { class: "stt-section" }, [
       el("h3", {}, ["번역하지 않을 부분"]),
       check("HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역", "protectHtml"),
       check("코드 블록(```) 은 번역하지 않음", "protectCode"),
@@ -9198,9 +9451,6 @@ function setup(ctx) {
 /HP: \\d+\\/\\d+/
 [상태창] ... [/상태창]` }),
       el("div", { class: "stt-note" }, ["<태그> 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다."])
-    ]), el("div", { class: "stt-section" }, [
-      el("h3", {}, ["긴 지문"]),
-      el("label", { class: "stt-field" }, [el("span", {}, ["이 글자 수 이상이면 문단별로 나눠 번역 (0 = 나누지 않음)"]), split])
     ]), saveRow);
   }
   const onBeforeUnload = (e) => {
@@ -9217,7 +9467,7 @@ function setup(ctx) {
     switch (msg?.type) {
       case "state": {
         store = msg.store;
-        presets = msg.presets;
+        settingsHost.setPrompts(current().outgoingPrompt, current().incomingPrompt);
         connections = msg.connections;
         link = msg.link ?? "none";
         renderPanel();
@@ -9233,32 +9483,6 @@ function setup(ctx) {
           waiter.resolve(msg.data);
         else
           waiter.reject(Object.assign(new Error(msg.error || "요청 실패"), { status: msg.status }));
-        return;
-      }
-      case "note_result":
-        if (msg.needsOverwrite && lastNote) {
-          const again = lastNote;
-          ctx.ui.showConfirm({ title: "같은 이름이 있어요", message: `"${msg.needsOverwrite}" 이름으로 저장한 기타 지침이 있습니다. 덮어쓸까요?
-이미 불러와 쓰는 채팅의 기타 지침은 그대로입니다.`, variant: "warning", confirmLabel: "덮어쓰기" }).then(({ confirmed }) => {
-            if (confirmed)
-              toBackend({ type: "save_note", note: again, overwrite: true });
-          });
-          return;
-        }
-        if (!msg.ok)
-          notify("warning", msg.error || "저장하지 못했습니다.");
-        else
-          notify("info", "기타 지침을 저장했습니다.");
-        return;
-      case "text_result": {
-        const p = pending.get(msg.reqId);
-        if (!p)
-          return;
-        pending.delete(msg.reqId);
-        if (msg.ok && typeof msg.text === "string")
-          p.resolve(msg.text);
-        else
-          p.reject(new Error(msg.error || "번역 실패"));
         return;
       }
     }
@@ -9279,8 +9503,6 @@ function setup(ctx) {
     tab.destroy();
     if (window.fetch === translatingFetch)
       window.fetch = originalFetch;
-    for (const p of pending.values())
-      p.reject(new Error("확장이 종료되었습니다."));
     for (const p of rpc.values())
       p.reject(new Error("확장이 종료되었습니다."));
     removeStyle();

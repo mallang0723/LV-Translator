@@ -364,28 +364,12 @@ export interface ConnectionSummary {
 // frontend -> backend
 export type ToBackend =
   | { type: 'hello' }
-  /** `open`: the chat was just opened or came back on screen (a missed reply may be translated then). */
+  /** `open`: the chat was just opened or came back on screen (its glossary is published for the memory extension then). */
   | { type: 'hint'; chatId: string | null; activeId?: string; chatConnectionId?: string; open?: boolean }
   | { type: 'save_connection'; chatId: string | null; connectionId: string }
-  | { type: 'chat'; chatId: string; messageIds?: string[] }
-  | { type: 'view_messages'; chatId: string; messageIds: string[] }
   | { type: 'save_settings'; chatId: string | null; settings: ChatSettings; asDefault: boolean }
-  | { type: 'save_preset'; preset: UserPreset }
-  | { type: 'delete_preset'; id: string }
-  | { type: 'save_note'; note: { name: string; text: string }; overwrite?: boolean }
-  | { type: 'delete_note'; id: string }
-  | { type: 'edit_open'; chatId: string; messageId: string }
-  | { type: 'edit_save'; chatId: string; messageId: string; sourceKey: string; edits: Array<{ index: number; text: string }>; syncSource: boolean }
   | { type: 'save_bundle'; bundle: UserBundle }
   | { type: 'delete_bundle'; id: string }
-  | { type: 'translate'; chatId: string; messageId: string; force: boolean }
-  | { type: 'continue'; chatId: string; messageId: string }
-  | { type: 'set_hidden'; chatId: string; messageId: string; hidden: boolean }
-  /** `sourceKey` pins the swipe the user saw; without it the visible swipe's translation goes. */
-  | { type: 'delete_translation'; chatId: string; messageId: string; sourceKey?: string }
-  | { type: 'save_view'; view: ViewSettings }
-  | { type: 'cancel'; chatId: string; messageId: string }
-  | { type: 'translate_text'; reqId: string; chatId: string; text: string }
   | { type: 'notify'; kind: 'info' | 'warning' | 'error'; text: string }
   /** Host stand-in for the original Translation Tools screens (src/host-emu): one call of the original's `/api`. */
   | { type: 'emu'; id: string; op: string; args: unknown[] }
@@ -393,10 +377,5 @@ export type ToBackend =
 
 // backend -> frontend
 export type ToFrontend =
-  | { type: 'state'; store: Store; presets: PresetSummary[]; connections: ConnectionSummary[]; /** Link with the memory extension: not installed, working, or a contract version we do not share. */ link?: 'none' | 'ok' | 'incompatible' }
-  | { type: 'views'; chatId: string; views: MessageView[]; replace: boolean; requestedIds?: string[]; plainIds?: string[] }
-  | { type: 'text_result'; reqId: string; ok: boolean; text?: string; error?: string }
-  | { type: 'edit_data'; chatId: string; messageId: string; ok: boolean; error?: string; sourceKey?: string; pairs?: Array<{ source: string; translation: string; edited: boolean }> }
-  | { type: 'edit_result'; chatId: string; messageId: string; ok: boolean; error?: string; rewritten?: number; saved?: boolean }
-  | { type: 'note_result'; ok: boolean; error?: string; needsOverwrite?: string }
+  | { type: 'state'; store: Store; connections: ConnectionSummary[]; /** Link with the memory extension: not installed, working, or a contract version we do not share. */ link?: 'none' | 'ok' | 'incompatible' }
   | { type: 'emu_result'; id: string; ok: boolean; data?: unknown; error?: string; status?: number };
