@@ -5,7 +5,7 @@ import { blockKey } from '../src/adapter/keys';
 
 /** A host with `count` messages m0..m(count-1) (m(count-1) the newest) that honours `tail` and records every read and write. */
 function host(count: number, metadata: (i: number) => Record<string, unknown> | undefined = () => undefined) {
-  const messages = Array.from({ length: count }, (_, i) => ({ id: `m${i}`, role: 'assistant', content: `Text ${i}.`, extra: {}, metadata: metadata(i), swipes: ['x'], swipe_id: 0, send_date: 1_700_000_000 + i, swipe_dates: [1_700_000_000 + i] }));
+  const messages = Array.from({ length: count }, (_, i) => ({ id: `m${i}`, role: 'assistant', content: `Text ${i}.`, extra: {}, metadata: metadata(i), name: undefined as string | undefined, swipes: ['x'], swipe_id: 0, send_date: 1_700_000_000 + i, swipe_dates: [1_700_000_000 + i] }));
   const reads: number[] = [];
   const writes: Array<{ id: string; patch: any }> = [];
   const h: EmuHost = {
@@ -115,5 +115,37 @@ describe('what the original reads from a message', () => {
     const withPrompts = bridge(x, { chatSettings: async () => ({ connectionId: 'c1', myLanguage: '한국어', autoTranslate: false, outgoingPrompt: 'OUT', incomingPrompt: 'IN' }) });
     expect((await withPrompts.getChat('c')).metadata).toMatchObject({ translationPrompt: 'OUT', translationOutputPrompt: 'IN' });
     expect((await bridge(x).getChat('c')).metadata).not.toHaveProperty('translationOutputPrompt');
+  });
+});
+
+describe('group chat speakers (d)', () => {
+  const group = (chatId: string) => {
+    const x = host(3);
+    x.messages[0]!.name = 'Mina'; x.messages[1]!.name = 'Jun'; x.messages[2]!.name = 'Stranger';
+    x.h.chats.get = async (id) => ({ id, character_id: 'chMain', metadata: { group: true, character_ids: ['chMina', 'chJun'] } });
+    x.h.characters.get = async (id) => ({ name: ({ chMina: 'Mina', chJun: 'Jun', chMain: 'Main' } as Record<string, string>)[id] });
+    return { x, b: bridge(x), chatId };
+  };
+  test('the chat lists its group members, and each reply goes to the member whose name matches exactly', async () => {
+    const { x, b } = group('g1');
+    expect((await b.getChat('g1')).characterIds).toEqual(['chMina', 'chJun']);
+    const rows = await b.listMessages('g1', 10);
+    expect(rows.map((r) => r.characterId)).toEqual(['chMina', 'chJun', 'chMain']); // no match -> the main character, as before
+    expect(x.messages).toHaveLength(3);
+  });
+  test('messages found by id and event rows use the same attribution', async () => {
+    const { b } = group('g2');
+    expect((await b.messagesFor('g2', ['m1']))[0]!.characterId).toBe('chJun');
+    expect((await b.getMessage('g2', 'm0')).characterId).toBe('chMina');
+    const sp = await (await import('../src/host-emu/backend-ops')).resolveSpeakers({ chats: { get: async () => ({ id: 'g3', character_id: 'chMain', metadata: { group: true, character_ids: ['chJun'] } }) }, characters: { get: async () => ({ name: 'Jun' }) } }, 'u', 'g3');
+    expect(eventRow('g3', { id: 'e', is_user: false, name: 'Jun', content: 'x', swipe_id: 0 }, sp).characterId).toBe('chJun');
+    expect(eventRow('g3', { id: 'e', is_user: false, name: 'Nobody', content: 'x', swipe_id: 0 }, sp).characterId).toBe('chMain');
+  });
+  test('a solo chat is unchanged: its one character speaks every reply', async () => {
+    const x = host(2);
+    x.messages[0]!.name = 'Whoever';
+    const rows = await bridge(x).listMessages('solo1', 10);
+    expect(rows.map((r) => r.characterId)).toEqual(['ch1', 'ch1']);
+    expect((await bridge(x).getChat('solo1')).characterIds).toEqual(['ch1']);
   });
 });

@@ -2011,8 +2011,37 @@ function eventMsg(raw) {
   return { ...raw, role: raw.role ?? (raw.is_user ? "user" : "assistant"), extra: rest, ...metadata ? { metadata } : {} };
 }
 function eventRow(chatId, raw, characterId, kept) {
-  return messageRow(chatId, eventMsg(raw), characterId, kept);
+  const m = eventMsg(raw);
+  return messageRow(chatId, m, characterId && typeof characterId === "object" ? speakerOf(m, characterId) : characterId, kept);
 }
+var speakerCache = new Map;
+async function resolveSpeakers(host, uid, chatId) {
+  const hit = speakerCache.get(chatId);
+  if (hit && Date.now() - hit.at < 1e4)
+    return hit.value;
+  const chat = await host.chats.get(chatId, uid);
+  const main = chat?.character_id ?? null;
+  const meta = chat?.metadata ?? {};
+  const group = meta.group === true || meta.group === 1;
+  const listed = group && Array.isArray(meta.character_ids) ? meta.character_ids.filter((x) => typeof x === "string" && !!x) : [];
+  const members = [...new Set(listed.length ? listed : main ? [main] : [])];
+  const byName = new Map;
+  if (listed.length) {
+    for (const id of members.slice(0, 12)) {
+      try {
+        const name = (await host.characters.get(id, uid))?.name;
+        if (typeof name === "string" && name && !byName.has(name))
+          byName.set(name, id);
+      } catch {}
+    }
+  }
+  const value = { main, members, byName };
+  speakerCache.set(chatId, { at: Date.now(), value });
+  if (speakerCache.size > 20)
+    speakerCache.delete(speakerCache.keys().next().value);
+  return value;
+}
+var speakerOf = (m, sp) => (m.name ? sp.byName.get(m.name) : undefined) ?? sp.main;
 var isRecord2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function createEmuBridge(d) {
   const { host, uid } = d;
@@ -2021,9 +2050,7 @@ function createEmuBridge(d) {
     const rows = await host.chat.getMessages(chatId, { tail: Math.min(Math.max(1, n), MAX_TAIL) });
     return Array.isArray(rows) ? rows.slice(-n) : [];
   }
-  async function characterOf(chatId) {
-    return (await host.chats.get(chatId, uid))?.character_id ?? null;
-  }
+  const speakers = (chatId) => resolveSpeakers(host, uid, chatId);
   async function findMessage(chatId, messageId) {
     for (const n of FIND_TAILS) {
       const hit = (await tail(chatId, n)).find((m) => m.id === messageId);
@@ -2137,7 +2164,7 @@ function createEmuBridge(d) {
         id: chat.id,
         name: chat.name ?? "",
         mode: "roleplay",
-        characterIds: chat.character_id ? [chat.character_id] : [],
+        characterIds: (await speakers(chatId)).members,
         personaId,
         metadata: {
           ...meta,
@@ -2152,11 +2179,11 @@ function createEmuBridge(d) {
     },
     async listMessages(chatId, n, auto = false) {
       const want = n > 0 ? n : auto ? AUTO_TAIL : MAX_TAIL;
-      const character = await characterOf(chatId);
+      const sp = await speakers(chatId);
       const rows = await tail(chatId, want);
       await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
       const kept = await d.keptTags?.();
-      return rows.map((m) => messageRow(chatId, m, character, kept));
+      return rows.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     async messagesFor(chatId, ids) {
       const want = new Set(ids.slice(0, 80));
@@ -2174,13 +2201,13 @@ function createEmuBridge(d) {
           break;
       }
       await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
-      const [character, kept] = [await characterOf(chatId), await d.keptTags?.()];
-      return found.map((m) => messageRow(chatId, m, character, kept));
+      const [sp, kept] = [await speakers(chatId), await d.keptTags?.()];
+      return found.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
     },
     async getMessage(chatId, messageId) {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
-      return messageRow(chatId, row, await characterOf(chatId), await d.keptTags?.());
+      return messageRow(chatId, row, speakerOf(row, await speakers(chatId)), await d.keptTags?.());
     },
     async patchExtra(chatId, messageId, patch, swipeIndex) {
       if (!(PT_KEY in patch))
@@ -2437,7 +2464,7 @@ async function forwardMessage(uid, chatId, raw) {
   wideReads.update(chatId, eventMsg(raw));
   let character = null;
   try {
-    character = (await spindle.chats.get(chatId, uid))?.character_id ?? null;
+    character = await resolveSpeakers(spindle, uid, chatId);
   } catch {}
   const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags);
   send({ type: "msg_event", chatId, kind: "upsert", row: eventRow(chatId, raw, character, kept) }, uid);
