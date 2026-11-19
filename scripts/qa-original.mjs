@@ -243,7 +243,8 @@ await page2.evaluate(() => {
       (window.__quiet ||= []).push(i);
       const user = i.messages.find((m) => m.role === 'user')?.content ?? '';
       const ids = [...user.matchAll(/<segment id="(\d+)">/g)].map((m) => m[1]);
-      if (ids.length) return { content: ids.map((n) => `<segment id="${n}">번역 ${n}</segment>`).join('\n') };
+      // keeps every ⟦n⟧ protection marker it was given (the 제외 규칙 mask)
+      if (ids.length) return { content: [...user.matchAll(/<segment id="(\d+)">\n?([\s\S]*?)\n?<\/segment>/g)].map((m) => `<segment id="${m[1]}">번역 ${m[1]}${(m[2].match(/⟦\d+⟧/g) || []).map((k) => ' ' + k).join('')}</segment>`).join('\n') };
       if (/^\[Original English\]/.test(user)) return { content: 'Alpha one revised.' }; // 영어 원문도 같이 고치기
       if (/^Translate the following text to /.test(user)) return { content: 'EN: ' + user.split('\n\n').slice(1).join('\n\n') };
       return { content: '{"characters":[],"terms":[]}' };
@@ -719,6 +720,68 @@ const calls13 = await page2.evaluate((n) => window.__quiet.slice(n).map((c) => c
 check('0.5.3 (8): a long message with the limit 700 is sent as several requests, each at or under 700 characters', calls13.length >= 3 && calls13.every((c) => c <= 700), JSON.stringify(calls13));
 check('0.5.3 (8): and the result is the same as one request: all 6 paragraphs translated', Object.keys(await page2.evaluate(() => window.__messages.find((x) => x.id === 'm13').metadata?.st_translator_tt?.['0']?.map || {})).length === 6);
 await page2.evaluate(() => { document.querySelector('[data-message-id="m13"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm13'), 1); });
+
+// ---- 0.5.3 (9): excluded tags / rules are not sent and stay as the original text, in place, in every view mode ----
+const EXCL_RULES = '/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]';
+const setupExcl = async (viewMode) => {
+  await page2.evaluate(([vm, rules]) => {
+    window.__cleanup();
+    const m14 = window.__messages.find((x) => x.id === 'm14'); if (m14) { m14.metadata = {}; m14.extra = {}; }
+    window.__setStorage({ config: { paragraph: { keepTags: 'scene_plan my_card', viewMode: vm } } });
+    window.__lvStore = LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English', excludeRules: rules } });
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  }, [viewMode, EXCL_RULES]);
+  await page2.waitForTimeout(1800);
+};
+await page2.evaluate(() => {
+  window.__cleanup();
+  const lines = ['Intro paragraph of the scene.', 'Plan item A.', 'Plan item B.', 'Now HP: 10/20 remains in the body.', '[상태창] HP bar', 'MP bar [/상태창]', 'Card text here.', 'Closing paragraph here.'];
+  const t = Math.floor(Date.now() / 1000);
+  window.__messages.push({ id: 'm14', role: 'assistant', content: 'Intro paragraph of the scene.\n\n<scene_plan>\nPlan item A.\n\nPlan item B.\n</scene_plan>\n\nNow HP: 10/20 remains in the body.\n\n[상태창] HP bar\n\nMP bar [/상태창]\n\n<my_card>Card text here.</my_card>\n\nClosing paragraph here.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: t + 1000, swipe_dates: [t + 1000] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm14');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="b14">' + lines.map((x) => `<p>${x}</p>`).join('') + '</div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+const viewParas = () => page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m14"] .ptx-view .b14 > p')].map((p) => p.textContent.replace(/\s+/g, ' ').trim()));
+const sentSince = (n) => page2.evaluate((k) => window.__quiet.slice(k).map((c) => c.messages.find((m) => m.role === 'user').content).filter((u) => /<segment id=/.test(u)).join('\n'), n);
+const NOT_SENT = ['Plan item', 'Card text here', 'HP bar', 'MP bar', 'HP: 10/20'];
+for (const mode of ['tr', 'both']) {
+  await setupExcl(mode);
+  const q = await page2.evaluate(() => window.__quiet.length);
+  await page2.locator('[data-message-id="m14"] .mari-message-actions button:has(svg.lucide-languages)').click();
+  await page2.waitForSelector('[data-message-id="m14"] .ptx-view', { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(1000);
+  const sent = await sentSince(q);
+  check(`0.5.3 (9) [${mode}]: excluded tags (scene_plan, my_card), the 상태창 range and the HP regex are not sent to the model`, sent.length > 0 && NOT_SENT.every((x) => !sent.includes(x)) && sent.includes('Intro paragraph') && sent.includes('Closing paragraph') && sent.includes('⟦1⟧'), sent.slice(0, 260));
+  const paras = await viewParas();
+  const has = (i, text) => (paras[i] ?? '').includes(text);
+  const once = (text) => paras.filter((x) => x.includes(text)).length;
+  check(`0.5.3 (9) [${mode}]: every excluded block is in the translated view as the original text, in its place and order (before, between and after prose)`, paras.length === 8 && has(0, '번역') && paras[1].startsWith('Plan item A.') && paras[2].startsWith('Plan item B.') && has(3, 'HP: 10/20') && has(3, '번역') && paras[4].startsWith('[상태창] HP bar') && paras[5].startsWith('MP bar [/상태창]') && paras[6].startsWith('Card text here.') && has(7, '번역'), JSON.stringify(paras));
+  check(`0.5.3 (9) [${mode}]: no block is drawn twice (one copy of each excluded text)`, ['Plan item A.', 'Plan item B.', 'Card text here.'].every((t) => once(t) === 1), JSON.stringify(paras.map((x) => x.slice(0, 20))));
+  if (mode === 'tr') await page2.screenshot({ path: join(shots, '09-excluded-in-place.png'), fullPage: true });
+  // original / translation toggle cycle
+  await page2.locator('[data-message-id="m14"] .mari-message-actions button:has(svg.lucide-languages)').click();
+  await page2.waitForTimeout(700);
+  const origOnly = await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m14"] .b14 > p')].filter((p) => !p.closest('.ptx-view')).map((p) => p.textContent.trim()));
+  check(`0.5.3 (9) [${mode}]: showing the original, every paragraph is the original text`, (await page2.locator('[data-message-id="m14"] .ptx-view').count()) === 0 && origOnly.length === 8 && origOnly[1] === 'Plan item A.' && origOnly[7] === 'Closing paragraph here.');
+  await page2.locator('[data-message-id="m14"] .mari-message-actions button:has(svg.lucide-languages)').click();
+  await page2.waitForSelector('[data-message-id="m14"] .ptx-view', { timeout: 5000 }).catch(() => {});
+  await page2.waitForTimeout(700);
+  const again = await viewParas();
+  check(`0.5.3 (9) [${mode}]: back to the translation, the excluded blocks are still there in the same places`, again.length === 8 && again[1].startsWith('Plan item A.') && again[4].startsWith('[상태창] HP bar') && again[6].startsWith('Card text here.'), JSON.stringify(again));
+}
+// 전체 다시 번역 (재번역): the blocks stay and are still not sent
+{
+  const q = await page2.evaluate(() => window.__quiet.length);
+  await page2.locator('[data-message-id="m14"] .ptx-bar [data-ptx-act="retranslate"]').click({ timeout: 3000 }).catch(() => {});
+  await page2.waitForTimeout(1800);
+  const sent = await sentSince(q);
+  const paras = await viewParas();
+  check('0.5.3 (9): 재번역 keeps the excluded blocks in place and does not send them', sent.length > 0 && NOT_SENT.every((x) => !sent.includes(x)) && paras.length === 8 && paras[1].startsWith('Plan item A.') && paras[4].startsWith('[상태창] HP bar') && paras[6].startsWith('Card text here.'), JSON.stringify(paras));
+}
+await page2.evaluate(() => { document.querySelector('[data-message-id="m14"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm14'), 1); window.__cleanup(); window.__lvStore = null; window.__setStorage(null); window.__cleanup = window.__LVSetup(window.__ctx); });
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

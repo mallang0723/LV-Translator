@@ -3,6 +3,7 @@
 
 import { effectiveGuides } from '../bundles';
 import { settingsFor, type Store } from '../shared';
+import { lenientTags } from '../translate/protect';
 import { glossaryText } from './contract';
 
 /** Marker key in `tt-config.json` (outside `config`, which the original rewrites as a whole). */
@@ -115,6 +116,30 @@ export function planScopeMigration(file: Record<string, unknown>, store: Store, 
         config.chats = { ...(isObject(config.chats) ? config.chats : {}), [chatId]: { ...base, ...pick(old, g.keys) } };
         changed = true;
       }
+    }
+  }
+  // 0.4.0's 「제외할 HTML 태그」 (and `<tag>` lines of its exclusion rules) is the original's 「번역에서 제외할 태그」 (paragraph.keepTags, global):
+  // the names are added to it (nothing the original already lists is removed or reordered).
+  const names = new Set<string>();
+  const addAll = (text: string) => {
+    for (const t of lenientTags(text)) names.add(t);
+  };
+  const scopes = [store.defaults, ...Object.values(store.chats)];
+  for (const sc of scopes) {
+    addAll(sc.excludeTags);
+    for (const line of sc.excludeRules.split(/\r?\n/)) {
+      const m = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/.exec(line);
+      if (m) names.add(m[1]!.toLowerCase());
+    }
+  }
+  if (names.size) {
+    const para = isObject(config.paragraph) ? (config.paragraph as Fields) : {};
+    const have = typeof para.keepTags === 'string' ? para.keepTags : '';
+    const haveNames = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, '').toLowerCase()).filter(Boolean));
+    const add = [...names].filter((n) => !haveNames.has(n));
+    if (add.length) {
+      config.paragraph = { ...para, keepTags: [have.trim(), ...add].filter(Boolean).join(' ') };
+      changed = true;
     }
   }
   return { ...file, ...(changed ? { config } : {}), [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: at } };

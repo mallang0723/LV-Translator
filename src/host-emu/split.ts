@@ -40,7 +40,34 @@ export function groupSegments<T extends { text: string }>(segments: T[], limit: 
   return groups;
 }
 
-const REPLY = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)<\/segment\s*>/gi;
+// ---- reading a model reply: exactly as the original does (extension.js stripThinking 1992, extractSegments 2000, llm 2763-2775, translateBatch) ----
+
+function stripThinking(text: string): string {
+  let s = String(text ?? '');
+  s = s.replace(/<(think|thinking|thought|reasoning)>[\s\S]*?<\/\1>/gi, '');
+  const lastClose = s.search(/<\/(think|thinking|thought|reasoning)>(?![\s\S]*<\/(think|thinking|thought|reasoning)>)/i);
+  if (lastClose >= 0) s = s.slice(s.indexOf('>', lastClose) + 1);
+  return s;
+}
+
+export function extractSegments(output: string): { map: Map<number, string>; rest: string } {
+  const s = stripThinking(output);
+  const map = new Map<number, string>();
+  const re = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)<\/segment\s*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) map.set(Number(m[1]), m[2]!.replace(/^\n+|\n+$/g, ''));
+  if (!map.size) {
+    const loose = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)(?=<segment\b|$)/gi;
+    while ((m = loose.exec(s))) map.set(Number(m[1]), m[2]!.replace(/<\/?translate>/gi, '').replace(/^\n+|\s+$/g, ''));
+  }
+  return { map, rest: s.trim() };
+}
+
+/** The reply as the original sees it: its prefill (the last assistant message of the request) is put back in front unless the reply starts with it. */
+export function withPrefill(content: string, prefill: string): string {
+  const pre = String(prefill || '').trim();
+  return pre && !content.startsWith(pre) ? `${pre}${content}` : content;
+}
 
 export function withBatchLimit(generate: RawGenerate, limit: () => number): RawGenerate {
   return async (req, signal) => {
@@ -49,6 +76,10 @@ export function withBatchLimit(generate: RawGenerate, limit: () => number): RawG
     const userIndex = req.messages.map((m: Msg) => m.role).lastIndexOf('user');
     const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex]!.content) : null;
     if (!parsed) return generate(req, signal);
+    const last = req.messages[req.messages.length - 1]!;
+    const prefill = last.role === 'assistant' ? last.content : '';
+    // A prefill that is itself a piece of a segment tag cannot be put in front of a merged reply: such a request goes as it is.
+    if (/<\/?segment/i.test(prefill)) return generate(req, signal);
     const groups = groupSegments(parsed.segments, max);
     if (groups.length < 2) return generate(req, signal);
     const parts: string[] = [];
@@ -57,13 +88,11 @@ export function withBatchLimit(generate: RawGenerate, limit: () => number): RawG
       const messages = req.messages.map((m: Msg, i: number) => (i === userIndex ? { ...m, content: `${parsed.before}<translate>\n${body}\n</translate>${parsed.after}` } : m));
       const reply = await generate({ ...req, messages }, signal);
       if (reply.aborted) return reply;
-      const text = reply.content ?? '';
-      const found = new Map<number, string>();
-      for (const m of text.matchAll(REPLY)) found.set(Number(m[1]), m[2]!.replace(/^\n+|\n+$/g, ''));
-      // A one-paragraph request may be answered with the bare translation (the original accepts that too).
-      if (!found.size && group.length === 1 && text.trim() && !/<segment/i.test(text)) found.set(1, text.trim());
+      // Same reading as the original's translateBatch: thinking removed, strict then loose tags, a bare reply for a one-paragraph request.
+      const { map, rest } = extractSegments(withPrefill(reply.content ?? '', prefill));
+      if (!map.size && group.length === 1 && rest && !/<segment/i.test(rest)) map.set(1, rest);
       group.forEach((s, i) => {
-        const got = found.get(i + 1);
+        const got = map.get(i + 1);
         if (got !== undefined) parts.push(`<segment id="${s.id}">\n${got}\n</segment>`);
       });
     }

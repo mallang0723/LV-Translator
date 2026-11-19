@@ -14,7 +14,7 @@ import {
   type UserBundle,
   effectiveConnectionId,
 } from './shared';
-import { checkMarkers, ExcludeRuleError, MARKER_INSTRUCTION, parseTags, protect, restore } from './translate/protect';
+import { checkMarkers, ExcludeRuleError, lenientTags, MARKER_INSTRUCTION, parseExcludeRules, protect, restore } from './translate/protect';
 import { parseGlossary } from './translate/glossary';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
@@ -25,6 +25,7 @@ import { createSettingsHost, nativePrompts, startOriginal } from './host-emu/boo
 import { GenerationDriver, GenerationHub } from './host-emu/generation';
 import type { MarinaraStorage } from './host-emu/runtime';
 import { withBatchLimit } from './host-emu/split';
+import { withExclusions } from './host-emu/exclude';
 import { type LvForm, type LvState, type LvValues, mountLvForm } from './host-emu/lv-form';
 
 const PANEL_CSS = `
@@ -100,15 +101,6 @@ const button = (label: string, onClick: () => void, cls = '', title?: string) =>
   el('button', { type: 'button', class: `stt-btn ${cls}`.trim(), title: title ?? label, 'aria-label': title ?? label, onClick }, [label]);
 
 const ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
-
-const SUGGESTED_TAGS = ['choices', 'options', 'status', 'stats'];
-const parseTagsSafe = (raw: string): string[] => {
-  try {
-    return parseTags(raw);
-  } catch {
-    return [];
-  }
-};
 
 export function setup(ctx: SpindleFrontendContext) {
   let store: Store | null = null;
@@ -193,7 +185,7 @@ export function setup(ctx: SpindleFrontendContext) {
     updateContent: (c, m, content) => call('updateContent', [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call('patchExtra', [c, m, patch, swipe]),
     // The original's request grouping has a fixed 6000-character limit; a smaller one from the settings is applied here (split.ts).
-    generateRaw: withBatchLimit((req, signal) => call('generateRaw', [req], signal), () => (store ? current().batchChars : 0)),
+    generateRaw: withExclusions(withBatchLimit((req, signal) => call('generateRaw', [req], signal), () => (store ? current().batchChars : 0)), () => (store ? current().excludeRules : '')),
     generateActive: (c) => call('generateActive', [c]),
     connections: () => call('connections', []),
     character: (id) => call('character', [id]),
@@ -264,7 +256,9 @@ export function setup(ctx: SpindleFrontendContext) {
     const connectionId = String(row.metadata?.translationConnectionId ?? '');
     // The chat's own prompts (0.4.0 kept them per chat): the original's "채팅 설정 유지" preset means these.
     settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ''), String(row.metadata?.translationOutputPrompt ?? ''));
-    const held = protect(text, settings);
+    // The tags the original's 「번역에서 제외할 태그」 holds are excluded from my messages too (the 0.4.0 tag list is read as before).
+    const keep = await emuStorage.get().then((f) => String((f?.config as { paragraph?: { keepTags?: string } } | undefined)?.paragraph?.keepTags ?? '')).catch(() => '');
+    const held = protect(text, { ...settings, excludeTags: [settings.excludeTags, ...lenientTags(keep.replace(/;/g, ','))].filter(Boolean).join(', ') });
     // The prompt lives in the original's field (a hidden one here; in Marinara it is the 유저 입력 번역 프롬프트 field).
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     // LV additions on top of the original's prompt: the shared bundle's glossary / guidance (the bundle's own fields only) and the protection marker rule.
@@ -429,7 +423,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function lvState(): LvState {
     if (!store) {
-      return { ready: false, chatKey: chatId ?? '', hasChat: !!chatId, values: { connectionId: '', modelLanguage: '', myLanguage: '', batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeTags: '', excludeRules: '', bundleId: '' }, connections: [], connectionNote: { text: '', kind: '' }, linkNote: '', bundles: [] };
+      return { ready: false, chatKey: chatId ?? '', hasChat: !!chatId, values: { connectionId: '', modelLanguage: '', myLanguage: '', batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeRules: '', bundleId: '' }, connections: [], connectionNote: { text: '', kind: '' }, linkNote: '', bundles: [] };
     }
     const s = current();
     let bundleId = s.bundleId;
@@ -448,7 +442,7 @@ export function setup(ctx: SpindleFrontendContext) {
       ready: true,
       chatKey: chatId ?? '',
       hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeTags: s.excludeTags, excludeRules: s.excludeRules, bundleId },
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId },
       connections: options,
       connectionNote: note,
       linkNote: link === 'none' ? '' : link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.',
@@ -458,7 +452,6 @@ export function setup(ctx: SpindleFrontendContext) {
 
   const lvForm: LvForm = mountLvForm(settingsHost.element, {
     state: lvState,
-    suggestedTags: SUGGESTED_TAGS,
     editBundle: (id) => editBundle(id ? (store?.userBundles.find((b) => b.id === id) ?? null) : null),
     deleteBundle: async (id) => {
       const selected = store?.userBundles.find((b) => b.id === id);
@@ -471,16 +464,15 @@ export function setup(ctx: SpindleFrontendContext) {
       if (confirmed) toBackend({ type: 'delete_bundle', id: selected.id });
     },
     async save(v: LvValues) {
-      let tags: string;
       try {
-        tags = parseTags(v.excludeTags).join(', ');
+        parseExcludeRules(v.excludeRules);
       } catch (e) {
-        throw new Error(e instanceof ExcludeRuleError ? e.message : '제외할 태그 이름을 확인해 주세요.');
+        throw new Error(e instanceof ExcludeRuleError ? e.message : '제외 규칙을 확인해 주세요.');
       }
       const settings: ChatSettings = {
         ...current(),
         modelLanguage: v.modelLanguage, myLanguage: v.myLanguage, batchChars: v.batchChars, autoTranslate: v.autoTranslate, translateMyMessages: v.translateMyMessages,
-        showDraftButton: v.showDraftButton, protectHtml: v.protectHtml, protectCode: v.protectCode, excludeTags: tags, excludeRules: v.excludeRules,
+        showDraftButton: v.showDraftButton, protectHtml: v.protectHtml, protectCode: v.protectCode, excludeRules: v.excludeRules,
         bundleId: v.bundleId, connectionId: v.connectionId,
       };
       await call('lv.save', [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
