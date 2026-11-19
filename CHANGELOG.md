@@ -1,5 +1,9 @@
 # 변경 기록
 
+## 0.5.8 — 2026-11-19
+
+- **생성 끝 대기 중 같은 채팅의 다음 생성이 시작되면 다음 답의 자동 번역이 빠지던 문제(검수 SYHO-241 조건 1):** 붙잡아 둔 생성 끝을 같은 채팅의 `GENERATION_STARTED`가 오면 먼저 재생(`driver.ended`)한 뒤 `driver.started`를 하고, 확장을 끌 때 붙잡은 끝과 대기 타이머도 정리한다. 원작 `extension.js` 무변경(어댑터 `src/frontend.ts`·`src/host-emu/dom-bridge.ts`만). 회귀 시험: `scripts/qa-original.mjs` 0.5.8 구역(8887c4b에서 A 2칸·B 0칸, 요청 1회로 실패).
+
 ## 0.5.7 — 2026-11-19
 
 원작 `extension.js`는 그대로다(`verify:original` 9개 동일, 패치 0). 바뀐 것은 `src/host-emu/`·`src/frontend.ts`·`src/shared.ts`와 시험·문서뿐이다.

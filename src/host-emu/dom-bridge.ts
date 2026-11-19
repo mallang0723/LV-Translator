@@ -228,12 +228,15 @@ const missingCells = (view: HTMLElement): string[] => {
 };
 
 /** Resolves when the message is on screen with its HTML islands mirrored (the original can then read what the view will key), or after `timeoutMs`. */
-export function whenMessageSettled(messageId: string, timeoutMs = 6000): Promise<boolean> {
+export function whenMessageSettled(messageId: string, timeoutMs = 6000, signal?: AbortSignal): Promise<boolean> {
   if (typeof document === 'undefined') return Promise.resolve(true);
   const started = Date.now();
   let stableSince = 0;
   return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(false); }, { once: true });
     const tick = () => {
+      if (signal?.aborted) return;
       const el = Array.from(document.querySelectorAll('[data-message-id]')).find((e) => e.getAttribute('data-message-id') === messageId);
       const host = el?.querySelector('.mari-message-content');
       const islands = host ? Array.from(host.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]')) : [];
@@ -242,7 +245,7 @@ export function whenMessageSettled(messageId: string, timeoutMs = 6000): Promise
       else stableSince = 0;
       if (ready && Date.now() - stableSince >= 300) return resolve(true);
       if (Date.now() - started >= timeoutMs) return resolve(false);
-      setTimeout(tick, 100);
+      timer = setTimeout(tick, 100);
     };
     tick();
   });
