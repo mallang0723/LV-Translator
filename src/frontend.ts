@@ -7,8 +7,6 @@ import {
   type ChatSettings,
   type ConnectionSummary,
   DEFAULT_SETTINGS,
-  INHERIT_PRESET_ID,
-  type PresetSummary,
   settingsFor,
   type Store,
   type ToBackend,
@@ -16,12 +14,12 @@ import {
   type UserBundle,
   effectiveConnectionId,
 } from './shared';
-import { ExcludeRuleError, parseTags } from './translate/protect';
+import { checkMarkers, ExcludeRuleError, MARKER_INSTRUCTION, parseTags, protect, restore } from './translate/protect';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
-import { NARRATION_STYLE_EXAMPLE } from './vendor/tt-1.8.0/example-narration-style';
 import type { HostBridge } from './host-emu/api';
-import { createSettingsHost, startOriginal } from './host-emu/boot';
+import { createSettingsHost, nativePrompts, startOriginal } from './host-emu/boot';
+import { GenerationDriver, GenerationHub } from './host-emu/generation';
 import type { MarinaraStorage } from './host-emu/runtime';
 
 const PANEL_CSS = `
@@ -109,12 +107,9 @@ const parseTagsSafe = (raw: string): string[] => {
 
 export function setup(ctx: SpindleFrontendContext) {
   let store: Store | null = null;
-  let presets: PresetSummary[] = [];
   let connections: ConnectionSummary[] = [];
   let link: 'none' | 'ok' | 'incompatible' = 'none';
   let chatId: string | null = null;
-  const pending = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void }>();
-  let reqCounter = 0;
   let lastDraftTranslation: string | null = null;
   let dirty = false;
   let markDirtyUi: (() => void) | null = null;
@@ -150,15 +145,6 @@ export function setup(ctx: SpindleFrontendContext) {
     toBackend({ type: 'hint', chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId, ...(open ? { open: true } : {}) });
   }
 
-  async function translateText(text: string, forChat: string): Promise<string> {
-    await sendHint(forChat);
-    const reqId = `t${++reqCounter}`;
-    return new Promise<string>((resolve, reject) => {
-      pending.set(reqId, { resolve, reject });
-      toBackend({ type: 'translate_text', reqId, chatId: forChat, text });
-    });
-  }
-
   // ---- the original Translation Tools 1.10.0 screens (src/host-emu) ----
   // The message view, the bar, the 대조·수정 window, the per-paragraph 다시 번역, the scans and the settings screen are the
   // original's own code, run whole. Here only the entrance is provided: the host calls it asks for go to the backend.
@@ -177,6 +163,7 @@ export function setup(ctx: SpindleFrontendContext) {
       }, { once: true });
     });
   };
+  const hub = new GenerationHub();
   const bridge: HostBridge = {
     getChat: (c) => call('getChat', [c]),
     listMessages: (c, n) => call('listMessages', [c, n]),
@@ -190,6 +177,8 @@ export function setup(ctx: SpindleFrontendContext) {
     persona: (id) => call('persona', [id]),
     lorebooks: () => call('lorebooks', []),
     lorebookEntries: (b) => call('lorebookEntries', [b]),
+    openGeneration: (c) => hub.open(c),
+    translate: (req, signal) => call('translate', [req], signal),
   };
   const emuStorage: MarinaraStorage = {
     get: () => call('storage.get', []),
@@ -201,6 +190,62 @@ export function setup(ctx: SpindleFrontendContext) {
     activeChatId: () => chatId,
     addStyle: (css) => ctx.dom.addStyle(css),
   });
+  const settingsElement = createSettingsHost();
+  const settingsHost = { element: settingsElement, ...nativePrompts(settingsElement) };
+  const driver = new GenerationDriver(hub, () => original.emu.installedFetch(), (text, error) => console.warn(`[translator] ${text}`, error));
+
+  /** Lumiverse sends every generation event to every open page; one page takes each generation and replays it into the original. */
+  const leased = new Set<string>();
+  const offEvents = [
+    ctx.events.on('GENERATION_STARTED', (payload) => {
+      const p = payload as { generationId?: string; chatId?: string; generationType?: string; targetMessageId?: string } | null;
+      if (!p?.chatId || !p.generationId) return;
+      const { generationId, chatId: forChat } = p;
+      void call<boolean>('lease', [generationId])
+        .then((granted) => {
+          if (!granted) return;
+          leased.add(generationId);
+          driver.started({ chatId: forChat, generationType: p.generationType, targetMessageId: p.targetMessageId });
+        })
+        .catch(() => {});
+    }),
+    ctx.events.on('GENERATION_ENDED', (payload) => {
+      const p = payload as { generationId?: string; chatId?: string; messageId?: string; content?: string; error?: string; generationType?: string } | null;
+      if (!p?.chatId || !p.generationId || !leased.delete(p.generationId)) return;
+      driver.ended({ chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType });
+    }),
+    ctx.events.on('GENERATION_STOPPED', (payload) => {
+      const p = payload as { generationId?: string; chatId?: string } | null;
+      if (!p?.chatId || !p.generationId || !leased.delete(p.generationId)) return;
+      driver.stopped(p.chatId);
+    }),
+  ];
+
+  /** "내 메시지 번역": the original's own /api/translate handling (its 유저 입력 번역 프롬프트, 단어장, 기타 지침, 이전 대화), with the LV exclude rules on top. */
+  async function translateText(text: string, forChat: string): Promise<string> {
+    await sendHint(forChat);
+    const fetchOriginal = original.emu.installedFetch();
+    if (!fetchOriginal) throw new Error('번역 도구가 아직 시작되지 않았습니다.');
+    const settings = store ? settingsFor(store, forChat) : DEFAULT_SETTINGS;
+    const row = await bridge.getChat(forChat);
+    const connectionId = String(row.metadata?.translationConnectionId ?? '');
+    const held = protect(text, settings);
+    // The prompt lives in the original's field (a hidden one here; in Marinara it is the 유저 입력 번역 프롬프트 field).
+    let systemPrompt = settingsHost.prompts().outgoing.trim();
+    if (held.pieces.length) systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim(), MARKER_INSTRUCTION].join('\n\n');
+    const res = await fetchOriginal('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: held.text, provider: 'ai', targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat }),
+    });
+    const data = (await res.json().catch(() => null)) as { translatedText?: string; error?: string; message?: string } | null;
+    if (!res.ok) throw new Error(friendlyError(data?.error || data?.message || `번역 요청 실패 (${res.status})`));
+    const translated = String(data?.translatedText ?? '').trim();
+    if (!translated) throw new Error('번역 결과가 비어 있습니다.');
+    const problem = held.pieces.length ? checkMarkers(held.text, translated) : null;
+    if (problem) throw new Error(problem);
+    return restore(translated, held.pieces).trim();
+  }
 
   function resetChat(next: string | null): void {
     chatId = next;
@@ -222,15 +267,6 @@ export function setup(ctx: SpindleFrontendContext) {
     const next = chatIdFromLocation();
     if (next !== chatId) resetChat(next);
   }, 700);
-
-  // The original translates a missed reply when the page comes back into view (its `catchUpLatest`). A finished
-  // generation is the same situation, so the page-visible event is the original's own trigger, sent again.
-  const offEvents = ['GENERATION_ENDED'].map((name) =>
-    ctx.events.on(name, (payload) => {
-      const p = payload as { chatId?: string } | null;
-      if (!p?.chatId || p.chatId === chatId) setTimeout(() => document.dispatchEvent(new Event('visibilitychange')), 1500);
-    }),
-  );
 
   // ---- outgoing message translation (Marinara "Translate My Messages") ----
 
@@ -309,8 +345,8 @@ export function setup(ctx: SpindleFrontendContext) {
   const panel = el('div', { class: 'stt-panel' });
   // The original's settings screen (its own code) goes below ours; it finds this container by its own selector.
   const originalSettings = el('div', { class: 'stt-panel' }, [
-    el('div', { class: 'stt-note' }, ['아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답 번역의 프리셋·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·내 메시지 번역에 쓰입니다.']),
-    createSettingsHost(),
+    el('div', { class: 'stt-note' }, ['아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답과 내 메시지 번역의 프롬프트·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·자동 번역·내 메시지 번역·제외 규칙·묶음에 쓰입니다.']),
+    settingsHost.element,
   ]);
   tab.root.replaceChildren(panel, originalSettings);
   let draft: ChatSettings = { ...DEFAULT_SETTINGS };
@@ -353,91 +389,25 @@ export function setup(ctx: SpindleFrontendContext) {
     return el('label', { class: 'stt-field' }, [el('span', {}, [label]), s]);
   }
 
-  function promptSection(direction: 'incoming' | 'outgoing'): HTMLElement {
-    const presetKey = direction === 'incoming' ? 'incomingPresetId' : 'outgoingPresetId';
-    const promptKey = direction === 'incoming' ? 'incomingPrompt' : 'outgoingPrompt';
-    const presetId = draft[presetKey];
-    const preset = presets.find((p) => p.id === presetId);
-    const inherit = !preset || presetId === INHERIT_PRESET_ID;
-    const box = el('div', { class: 'stt-field' });
-    const options: Array<[string, string]> = presets.map((p) => [p.id, p.builtin ? p.name : `${p.name} (내 프리셋)`]);
-    box.append(
-      select(direction === 'incoming' ? '응답 번역 프롬프트 (Incoming)' : '내 메시지 번역 프롬프트 (Outgoing)', presetId, options, (v) => {
-        draft[presetKey] = v;
-      }, true, true),
-    );
-    if (inherit) {
-      box.append(text('이 채팅의 프롬프트 (비워 두면 기본 번역 프롬프트, {{targetLanguage}} 사용 가능)', promptKey, { multiline: true, cls: 'stt-prompt', placeholder: MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim() }));
-    } else {
-      box.append(el('textarea', { class: 'stt-prompt', readOnly: true, value: preset.prompt }));
-    }
-    box.append(el('span', { class: 'stt-note' }, ['저장한 뒤 새로 번역하는 메시지부터 적용됩니다. 이미 번역된 메시지는 메시지의 "다시 번역" 버튼으로 새로 번역하세요.']));
-    return box;
-  }
-
-  function editPreset(existing: PresetSummary | null): void {
-    const modal = ctx.ui.showModal({ title: existing ? '프리셋 수정' : '새 프리셋', width: 680, maxHeight: 820, persistent: true });
-    const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '프리셋 이름' });
-    const prompt = el('textarea', { value: existing?.prompt ?? '', placeholder: '번역 시스템 프롬프트. {{targetLanguage}} 는 대상 언어로 바뀝니다.', spellcheck: false });
-    modal.root.replaceChildren(
-      el('div', { class: 'stt-modal' }, [
-        el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
-        el('label', { class: 'stt-field' }, [el('span', {}, ['프롬프트 전문']), prompt]),
-        el('div', { class: 'stt-row' }, [
-          button('저장', () => {
-            if (!name.value.trim() || !prompt.value.trim()) return notify('warning', '이름과 프롬프트를 입력해 주세요.');
-            toBackend({ type: 'save_preset', preset: { id: existing?.id ?? '', name: name.value, prompt: prompt.value } });
-            modal.dismiss();
-          }, 'stt-primary'),
-          button('취소', () => modal.dismiss()),
-        ]),
-      ]),
-    );
-  }
-
-  function presetManager(): HTMLElement {
-    const mine = presets.filter((p) => !p.builtin);
-    const row = el('div', { class: 'stt-row' }, [
-      button('+ 새 프리셋', () => editPreset(null)),
-      button('기본 프리셋 복사해서 새로 만들기', () => {
-        const base = presets.find((p) => p.id === draft.incomingPresetId && p.prompt);
-        editPreset(base ? { ...base, id: '', name: `${base.name} 사본`, builtin: false } : null);
-      }, '', '응답 번역에 선택된 프리셋을 복사합니다'),
-    ]);
-    const list = mine.map((p) =>
-      el('div', { class: 'stt-row' }, [
-        el('span', { style: 'flex:1' }, [p.name]),
-        button('수정', () => editPreset(p)),
-        button('삭제', async () => {
-          const { confirmed } = await ctx.ui.showConfirm({ title: '프리셋 삭제', message: `"${p.name}" 프리셋을 삭제할까요? 이 프리셋을 쓰던 채팅은 "채팅 설정 유지"로 돌아갑니다.`, variant: 'danger', confirmLabel: '삭제' });
-          if (confirmed) toBackend({ type: 'delete_preset', id: p.id });
-        }, 'stt-danger'),
-      ]),
-    );
-    return el('div', { class: 'stt-field' }, [row, ...(list.length ? list : [el('span', { class: 'stt-note' }, ['내 프리셋이 없습니다. 기본 프리셋은 읽기 전용입니다.'])])]);
-  }
-
   function editBundle(existing: UserBundle | null): void {
     const modal = ctx.ui.showModal({ title: existing ? '묶음 편집' : '새 묶음으로 저장', width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
     const source = existing ?? draft;
     const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '묶음 이름' });
     const glossary = el('textarea', { value: source.glossary, spellcheck: false, placeholder: '내 언어 용어 = 모델 언어 용어' });
     const freeContext = el('textarea', { value: source.freeContext, spellcheck: false });
-    const voice = el('textarea', { value: source.incomingVoicePrompt, spellcheck: false });
     modal.root.replaceChildren(el('div', { class: 'stt-modal stt-bundle-editor' }, [
       el('div', { class: 'stt-note' }, [existing
         ? '저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다.'
-        : '이 방에 입력한 단어집·추가 지침·캐릭터 말투를 복사합니다. 저장 후 목록에서 선택해 주세요. 방의 입력 내용은 그대로 남습니다.']),
+        : '이 방의 묶음 내용(단어집·추가 지침)을 복사합니다. 저장 후 목록에서 선택해 주세요.']),
       el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['단어집']), glossary]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['추가 지침']), freeContext]),
-      el('label', { class: 'stt-field' }, [el('span', {}, ['캐릭터 말투 (응답 번역에만)']), voice]),
       el('div', { class: 'stt-row' }, [
         button('저장', () => {
           if (!name.value.trim()) return notify('warning', '묶음 이름을 입력해 주세요.');
           toBackend({ type: 'save_bundle', bundle: {
             id: existing?.id ?? '', name: name.value, glossary: glossary.value,
-            freeContext: freeContext.value, incomingVoicePrompt: voice.value,
+            freeContext: freeContext.value, incomingVoicePrompt: existing?.incomingVoicePrompt ?? '',
           } });
           modal.dismiss();
         }, 'stt-primary'),
@@ -463,7 +433,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const preview = selected ? el('details', { class: 'stt-bundle-preview' }, [
       el('summary', {}, [`${selected.name} · 내용 보기 (읽기 전용)`]),
       ...([
-        ['단어집', selected.glossary], ['추가 지침', selected.freeContext], ['캐릭터 말투', selected.incomingVoicePrompt],
+        ['단어집', selected.glossary], ['추가 지침', selected.freeContext],
       ] as const).map(([label, value]) => el('label', { class: 'stt-field' }, [
         el('span', {}, [label]), el('textarea', { readOnly: true, value, placeholder: '내용 없음' }),
       ])),
@@ -473,70 +443,9 @@ export function setup(ctx: SpindleFrontendContext) {
       select('이 방의 묶음', draft.bundleId, [['', '없음'], ...bundles.map((b): [string, string] => [b.id, b.name])], (value) => {
         draft.bundleId = value;
       }, true, true),
-      el('div', { class: 'stt-row' }, [button('새 묶음으로 저장', () => editBundle(null), '', '이 방의 현재 3개 내용으로 새 묶음 저장'), edit, remove]),
-      el('div', { class: 'stt-note' }, ['묶음 선택은 아래 저장 버튼으로 적용합니다. 추가 지침·말투의 사용 여부는 방마다 정하며, 묶음과 이 방 추가분에 함께 적용됩니다. 같은 용어는 이 방 단어장이 우선합니다.']),
+      el('div', { class: 'stt-row' }, [button('새 묶음 만들기', () => editBundle(null), '', '새 묶음 저장'), edit, remove]),
+      el('div', { class: 'stt-note' }, ['묶음의 단어집·추가 지침은 **내 메시지 번역**에 더해집니다(응답 번역의 단어장·기타 지침·말투는 아래 원작 설정 화면에서 합니다). 선택은 아래 저장 버튼으로 적용합니다.']),
       preview,
-    ]);
-  }
-
-  // ---- 저장한 기타 지침 ----
-
-  let selectedNoteId = '';
-  let lastNote: { name: string; text: string } | null = null;
-
-  function noteTools(): HTMLElement {
-    const notes = store?.notes ?? [];
-    if (!notes.some((n) => n.id === selectedNoteId)) selectedNoteId = '';
-    const picked = notes.find((n) => n.id === selectedNoteId);
-    const load = button('불러오기', async () => {
-      if (!picked) return;
-      if (draft.freeContext.trim() && draft.freeContext.trim() !== picked.text.trim()) {
-        const { confirmed } = await ctx.ui.showConfirm({ title: '기타 지침 불러오기', message: `이 채팅의 기타 지침을 "${picked.name}"의 내용으로 바꿉니다. 지금 적힌 내용은 사라집니다.`, variant: 'warning', confirmLabel: '바꾸기' });
-        if (!confirmed) return;
-      }
-      // A copy: later changes to either side do not reach the other.
-      draft.freeContext = picked.text;
-      draft.freeContextEnabled = true;
-      markDirty();
-      renderPanel();
-      notify('info', '불러왔습니다. 아래 저장 버튼을 눌러야 이 채팅에 적용됩니다.');
-    }, '', '저장한 기타 지침을 이 채팅에 복사합니다');
-    const remove = button('삭제', async () => {
-      if (!picked) return;
-      const { confirmed } = await ctx.ui.showConfirm({ title: '저장한 기타 지침 삭제', message: `"${picked.name}"을 보관함에서 지울까요? 이미 불러와 쓰는 채팅의 기타 지침은 그대로 남습니다.`, variant: 'danger', confirmLabel: '삭제' });
-      if (confirmed) toBackend({ type: 'delete_note', id: picked.id });
-    }, 'stt-danger');
-    load.disabled = remove.disabled = !picked;
-    return el('div', { class: 'stt-field' }, [
-      el('div', { class: 'stt-row' }, [
-        button('예시 넣기 (지문 문체)', () => {
-          draft.freeContext = `${draft.freeContext.trimEnd()}${draft.freeContext.trim() ? '\n\n' : ''}${NARRATION_STYLE_EXAMPLE}`;
-          draft.freeContextEnabled = true;
-          markDirty();
-          renderPanel();
-        }, '', 'tlsiddl/marinara-translation-tools의 예시 기타 지침을 아래에 이어 붙입니다. 저장 전에 고쳐 쓰세요'),
-        button('이 기타 지침 저장', () => {
-          const modal = ctx.ui.showModal({ title: '기타 지침 저장', width: Math.min(520, window.innerWidth - 32), maxHeight: 420, persistent: true });
-          const name = el('input', { type: 'text', value: '', placeholder: '이름 (최대 60자)' });
-          modal.root.replaceChildren(el('div', { class: 'stt-modal' }, [
-            el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
-            el('div', { class: 'stt-row' }, [
-              button('저장', () => {
-                if (!name.value.trim()) return notify('warning', '이름을 입력해 주세요.');
-                lastNote = { name: name.value, text: draft.freeContext };
-                toBackend({ type: 'save_note', note: lastNote });
-                modal.dismiss();
-              }, 'stt-primary'),
-              button('취소', () => modal.dismiss()),
-            ]),
-          ]));
-        }, '', '지금 적힌 기타 지침을 이름을 붙여 모든 채팅에서 쓸 수 있게 보관합니다'),
-      ]),
-      select('저장한 기타 지침', selectedNoteId, [['', notes.length ? '고르세요' : '저장한 것이 없습니다'], ...notes.map((n): [string, string] => [n.id, n.name])], (v) => {
-        selectedNoteId = v;
-      }, false, true),
-      el('div', { class: 'stt-row' }, [load, remove]),
-      el('div', { class: 'stt-note' }, ['불러오기는 복사입니다. 저장한 것과 이 채팅의 기타 지침은 서로 연결되지 않습니다. (여러 방이 함께 쓰며 같이 바뀌는 묶음은 위의 "번역 지침 묶음")']),
     ]);
   }
 
@@ -601,22 +510,6 @@ export function setup(ctx: SpindleFrontendContext) {
       saveNotice.hidden = !dirty;
     };
     markDirtyUi();
-    const contextSub = el('div', { class: 'stt-sub' }, [
-      el('div', { class: 'stt-row' }, [check('원문 포함', 'contextIncludeOriginal'), check('번역문 포함', 'contextIncludeTranslation'), check('내 메시지 번역에도 포함', 'contextIncludeUserInput')]),
-      (() => {
-        const n = el('input', { type: 'number', min: 1, max: 10, value: draft.contextMessageCount });
-        n.addEventListener('input', () => {
-          draft.contextMessageCount = Number(n.value) || 3;
-          markDirty();
-        });
-        return el('label', { class: 'stt-field' }, [el('span', {}, ['최근 메시지 수 (1~10)']), n]);
-      })(),
-    ]);
-    const split = el('input', { type: 'number', min: 0, step: 500, value: draft.longSplitChars });
-    split.addEventListener('input', () => {
-      draft.longSplitChars = Math.max(0, Number(split.value) || 0);
-      markDirty();
-    });
     panel.replaceChildren(
       el('div', { class: 'stt-note' }, [chatId ? '지금 열린 채팅의 번역 설정입니다.' : '열린 채팅이 없어 새 채팅의 기본값을 편집합니다.']),
       el('div', { class: 'stt-section' }, [
@@ -633,21 +526,7 @@ export function setup(ctx: SpindleFrontendContext) {
         check('내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)', 'translateMyMessages'),
         check('입력창 옆에 번역 버튼 표시', 'showDraftButton'),
       ]),
-      el('div', { class: 'stt-section' }, [el('h3', {}, ['프롬프트 프리셋']), promptSection('incoming'), promptSection('outgoing'), presetManager()]),
       bundleSection(),
-      el('div', { class: 'stt-section' }, [
-        el('h3', {}, ['단어장']),
-        text('이 방에만 추가 · 한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)', 'glossary', { multiline: true, placeholder: '마리나라 = Marinara\n로어북 = lorebook' }),
-      ]),
-      el('div', { class: 'stt-section' }, [
-        el('h3', {}, ['참고 정보']),
-        check('기타 지침 추가 (장르·시대·지역·배경 등)', 'freeContextEnabled', renderPanel),
-        draft.freeContextEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 기타 지침', 'freeContext', { multiline: true }), noteTools()]) : null,
-        check('대사 지침 추가 (응답 번역에만)', 'incomingVoiceEnabled', renderPanel),
-        draft.incomingVoiceEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 대사 지침 (# Character Voice Instructions)', 'incomingVoicePrompt', { multiline: true })]) : null,
-        check('이전 대화를 번역 참고로 포함', 'contextEnabled', renderPanel),
-        draft.contextEnabled ? contextSub : null,
-      ]),
       el('div', { class: 'stt-section' }, [
         el('h3', {}, ['번역하지 않을 부분']),
         check('HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역', 'protectHtml'),
@@ -667,10 +546,6 @@ export function setup(ctx: SpindleFrontendContext) {
         ]),
         text('제외 규칙 (한 줄에 하나)', 'excludeRules', { multiline: true, placeholder: '<status>\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]' }),
         el('div', { class: 'stt-note' }, ['<태그> 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.']),
-      ]),
-      el('div', { class: 'stt-section' }, [
-        el('h3', {}, ['긴 지문']),
-        el('label', { class: 'stt-field' }, [el('span', {}, ['이 글자 수 이상이면 문단별로 나눠 번역 (0 = 나누지 않음)']), split]),
       ]),
       saveRow,
     );
@@ -694,7 +569,7 @@ export function setup(ctx: SpindleFrontendContext) {
     switch (msg?.type) {
       case 'state': {
         store = msg.store;
-        presets = msg.presets;
+        settingsHost.setPrompts(current().outgoingPrompt, current().incomingPrompt);
         connections = msg.connections;
         link = msg.link ?? 'none';
         renderPanel();
@@ -707,27 +582,6 @@ export function setup(ctx: SpindleFrontendContext) {
         rpc.delete(msg.id);
         if (msg.ok) waiter.resolve(msg.data);
         else waiter.reject(Object.assign(new Error(msg.error || '요청 실패'), { status: msg.status }));
-        return;
-      }
-      case 'note_result':
-        if (msg.needsOverwrite && lastNote) {
-          const again = lastNote;
-          void ctx.ui
-            .showConfirm({ title: '같은 이름이 있어요', message: `"${msg.needsOverwrite}" 이름으로 저장한 기타 지침이 있습니다. 덮어쓸까요?\n이미 불러와 쓰는 채팅의 기타 지침은 그대로입니다.`, variant: 'warning', confirmLabel: '덮어쓰기' })
-            .then(({ confirmed }) => {
-              if (confirmed) toBackend({ type: 'save_note', note: again, overwrite: true });
-            });
-          return;
-        }
-        if (!msg.ok) notify('warning', msg.error || '저장하지 못했습니다.');
-        else notify('info', '기타 지침을 저장했습니다.');
-        return;
-      case 'text_result': {
-        const p = pending.get(msg.reqId);
-        if (!p) return;
-        pending.delete(msg.reqId);
-        if (msg.ok && typeof msg.text === 'string') p.resolve(msg.text);
-        else p.reject(new Error(msg.error || '번역 실패'));
         return;
       }
     }
@@ -749,7 +603,6 @@ export function setup(ctx: SpindleFrontendContext) {
     action.destroy();
     tab.destroy();
     if ((window.fetch as unknown) === translatingFetch) window.fetch = originalFetch;
-    for (const p of pending.values()) p.reject(new Error('확장이 종료되었습니다.'));
     for (const p of rpc.values()) p.reject(new Error('확장이 종료되었습니다.'));
     removeStyle();
     ctx.dom.cleanup();

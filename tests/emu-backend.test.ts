@@ -41,19 +41,3 @@ test('backend: a reply still being generated is reported active, and an unknown 
     expect(result(h, 'x')).toMatchObject({ ok: false, status: 404 });
   });
 });
-
-test('backend: in the shipped mode a finished generation is not translated on the server (the original does it in the page)', async () => {
-  await withEmu(async (h) => {
-    Reflect.set(globalThis, '__LV_TRANSLATOR_LEGACY__', false);
-    try {
-      const mod = await import(`../src/backend.ts?legacy-off=${Math.random()}`);
-      void mod;
-      h.messages.push(makeMessage('a1', 'The lamp was burning.', 'assistant', 0));
-      // the fresh import registered its own handlers on the same fake host: emit through them
-      await h.emit({ messageId: 'a1', content: 'The lamp was burning.', generationType: 'normal' });
-      expect(h.calls).toHaveLength(0);
-    } finally {
-      Reflect.set(globalThis, '__LV_TRANSLATOR_LEGACY__', true);
-    }
-  });
-});

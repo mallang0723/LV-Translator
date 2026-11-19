@@ -99,12 +99,46 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
   };
 }
 
-/** The container structure the original's `injectPanels` looks for. Returns the element to put in a Lumiverse panel. */
+/**
+ * The container structure the original's `injectPanels` looks for. Returns the element to put in a Lumiverse panel.
+ * Marinara keeps the two translation prompts ("유저 입력 번역 프롬프트", "캐릭터 응답 번역 프롬프트") in native text fields of the
+ * same drawer; the original reads and writes them (a chosen preset is copied into them) and Marinara sends the first one
+ * with every "translate my message" request. Lumiverse has no such fields, so the same two exist here, hidden.
+ */
 export function createSettingsHost(): HTMLElement {
   const section = document.createElement('div');
   section.setAttribute('data-chat-settings-section', 'translation');
   const body = document.createElement('div');
   body.className = 'mari-drawer__body';
+  for (const which of ['outgoing', 'incoming']) {
+    const field = document.createElement('textarea');
+    field.hidden = true;
+    field.style.display = 'none';
+    field.setAttribute('data-ptx-native-prompt', which);
+    // Once the original writes a preset into it, our own initial value must not overwrite that.
+    field.addEventListener('input', () => field.setAttribute('data-ptx-touched', ''));
+    body.append(field);
+  }
   section.append(body);
   return section;
+}
+
+export interface NativePrompts {
+  /** Current text of the two fields. */
+  prompts(): { outgoing: string; incoming: string };
+  /** Initial values (the chat's own prompts); fields the original already wrote are left alone. */
+  setPrompts(outgoing: string, incoming: string): void;
+}
+
+export function nativePrompts(host: HTMLElement): NativePrompts {
+  const field = (which: string) => host.querySelector<HTMLTextAreaElement>(`textarea[data-ptx-native-prompt="${which}"]`);
+  return {
+    prompts: () => ({ outgoing: field('outgoing')?.value ?? '', incoming: field('incoming')?.value ?? '' }),
+    setPrompts(outgoing, incoming) {
+      for (const [which, value] of [['outgoing', outgoing], ['incoming', incoming]] as const) {
+        const f = field(which);
+        if (f && !f.hasAttribute('data-ptx-touched')) f.value = value;
+      }
+    },
+  };
 }

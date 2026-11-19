@@ -29,4 +29,4 @@ export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandl
   };
 }
 
-export { createSettingsHost } from './dom-bridge';
+export { createSettingsHost, nativePrompts } from './dom-bridge';
