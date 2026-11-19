@@ -1374,6 +1374,198 @@ function friendlyError(message) {
   return message;
 }
 
+// src/host-emu/message-cache.ts
+var MESSAGES_KEY = ["chats", "messages"];
+var MAX_CHATS = 4;
+var fingerprint = (r) => JSON.stringify([r.content, r.activeSwipeIndex ?? null, r.extra ?? null, r.role, r.createdAt ?? "", r.characterId ?? null]);
+
+class MessageCache {
+  chats = new Map;
+  prints = new WeakMap;
+  subscribers = new Set;
+  clock = 0;
+  touchedAt = new Map;
+  mark() {
+    return this.clock;
+  }
+  has(chatId, id) {
+    return !!this.chats.get(chatId)?.has(id);
+  }
+  row(chatId, id) {
+    return this.chats.get(chatId)?.get(id);
+  }
+  size(chatId) {
+    return this.chats.get(chatId)?.size ?? 0;
+  }
+  bucket(chatId) {
+    let b = this.chats.get(chatId);
+    if (b) {
+      this.chats.delete(chatId);
+    } else {
+      b = new Map;
+    }
+    this.chats.set(chatId, b);
+    while (this.chats.size > MAX_CHATS) {
+      const oldest = this.chats.keys().next().value;
+      this.chats.delete(oldest);
+    }
+    return b;
+  }
+  put(b, row) {
+    const have = b.get(row.id);
+    const print = fingerprint(row);
+    if (have && (this.prints.get(have) ?? fingerprint(have)) === print)
+      return false;
+    this.prints.set(row, print);
+    b.set(row.id, row);
+    return true;
+  }
+  seed(chatId, rows, since = this.clock) {
+    const b = this.bucket(chatId);
+    let changed = false;
+    for (const row of rows) {
+      if (!row?.id)
+        continue;
+      if ((this.touchedAt.get(`${chatId}:${row.id}`) ?? 0) > since)
+        continue;
+      if (this.put(b, row))
+        changed = true;
+    }
+    if (changed)
+      this.emit(chatId);
+  }
+  upsert(chatId, row) {
+    if (!row?.id || !this.chats.has(chatId))
+      return;
+    const b = this.bucket(chatId);
+    this.touchedAt.set(`${chatId}:${row.id}`, ++this.clock);
+    if (this.put(b, row))
+      this.emit(chatId);
+  }
+  remove(chatId, id) {
+    const b = this.chats.get(chatId);
+    if (!b)
+      return;
+    this.touchedAt.set(`${chatId}:${id}`, ++this.clock);
+    if (b?.delete(id))
+      this.emit(chatId);
+  }
+  data(chatId) {
+    const b = this.chats.get(chatId);
+    if (!b || !b.size)
+      return;
+    const rows = [...b.values()].sort((x, y) => String(x.createdAt ?? "").localeCompare(String(y.createdAt ?? "")));
+    return { pages: [rows], pageParams: [undefined] };
+  }
+  emit(chatId) {
+    const event = { type: "updated", query: { queryKey: [...MESSAGES_KEY, chatId] } };
+    for (const fn of [...this.subscribers]) {
+      try {
+        fn(event);
+      } catch {}
+    }
+  }
+  client() {
+    const chatOf = (key) => Array.isArray(key) && key[0] === MESSAGES_KEY[0] && key[1] === MESSAGES_KEY[1] && typeof key[2] === "string" ? key[2] : null;
+    return {
+      getQueryCache: () => ({
+        subscribe: (fn) => {
+          this.subscribers.add(fn);
+          return () => this.subscribers.delete(fn);
+        }
+      }),
+      getQueryData: (key) => {
+        const chatId = chatOf(key);
+        return chatId ? this.data(chatId) : undefined;
+      },
+      setQueryData: (key, updater) => {
+        const chatId = chatOf(key);
+        if (!chatId)
+          return;
+        const old = this.data(chatId);
+        const next = typeof updater === "function" ? updater(old) : updater;
+        if (!next || next === old || !Array.isArray(next.pages))
+          return next;
+        const b = this.bucket(chatId);
+        let changed = false;
+        for (const page of next.pages)
+          for (const row of Array.isArray(page) ? page : [])
+            if (row?.id && this.put(b, row))
+              changed = true;
+        if (changed)
+          this.emit(chatId);
+        return next;
+      }
+    };
+  }
+}
+function installQueryClient(cache) {
+  const holder = document.createElement("div");
+  holder.hidden = true;
+  holder.style.display = "none";
+  holder.setAttribute("data-lv-translator-cache", "");
+  holder["__reactContainer$lvtranslator"] = { memoizedProps: { client: cache.client() } };
+  document.body.append(holder);
+  return () => holder.remove();
+}
+
+// src/host-emu/visible-messages.ts
+var NEWEST_SKIPPED = 2;
+var BATCH = 60;
+var DEBOUNCE_MS = 400;
+function watchVisibleMessages(o) {
+  const asked = new Map;
+  let timer = null;
+  let destroyed = false;
+  function scan() {
+    if (destroyed)
+      return;
+    const chatId = o.chat();
+    if (!chatId)
+      return;
+    const ids = Array.from(document.querySelectorAll("[data-message-id]"), (e) => e.getAttribute("data-message-id") ?? "").filter(Boolean);
+    const seen = asked.get(chatId) ?? new Set;
+    asked.set(chatId, seen);
+    const missing = ids.slice(0, Math.max(0, ids.length - NEWEST_SKIPPED)).filter((id) => !seen.has(id) && !o.known(chatId, id)).slice(0, BATCH);
+    if (!missing.length)
+      return;
+    for (const id of missing)
+      seen.add(id);
+    o.lookup(chatId, missing).catch((e) => o.log?.("visible messages", e));
+  }
+  const queue = (delay = DEBOUNCE_MS) => {
+    if (timer || destroyed)
+      return;
+    timer = setTimeout(() => {
+      timer = null;
+      scan();
+    }, delay);
+  };
+  const observer = new MutationObserver((list) => {
+    for (const r of list) {
+      for (const n of Array.from(r.addedNodes)) {
+        if (n instanceof Element && (n.hasAttribute("data-message-id") || n.querySelector("[data-message-id]")))
+          return queue();
+      }
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  queue(1500);
+  return {
+    scan: () => queue(),
+    reset() {
+      asked.clear();
+      queue(1500);
+    },
+    destroy() {
+      destroyed = true;
+      if (timer)
+        clearTimeout(timer);
+      observer.disconnect();
+    }
+  };
+}
+
 // src/vendor/tt-1.10.0/personal-extension/extension.js
 var extension_default = `// Loaded in manifest order; each variant contains the complete prompt.
 const MARINARA_TRANSLATION_GENERAL_PROMPTS = Object.freeze({
@@ -8516,7 +8708,10 @@ function createRoutes(b) {
     {
       method: "GET",
       re: /^\/chats\/([^/]+)\/messages$/,
-      run: async (m, q) => b.listMessages(id(m[1]), Math.max(0, Number(q.get("limit")) || 0))
+      run: async (m, q, _body, _signal, meta) => {
+        const limit = Math.max(0, Number(q.get("limit")) || 0);
+        return b.listMessages(id(m[1]), limit, limit === 0 && meta?.auto === true);
+      }
     },
     { method: "GET", re: /^\/chats\/([^/]+)\/messages\/([^/]+)$/, run: async (m) => b.getMessage(id(m[1]), id(m[2])) },
     {
@@ -8599,7 +8794,7 @@ function createApiFetch(bridge, realFetch) {
       return json(400, { error: "bad json" });
     }
     try {
-      const data = await route.run(route.re.exec(path), url.searchParams, body, init?.signal ?? undefined);
+      const data = await route.run(route.re.exec(path), url.searchParams, body, init?.signal ?? undefined, { auto: init?.credentials !== "same-origin" });
       if (data instanceof Response)
         return data;
       return json(200, data ?? null);
@@ -8824,19 +9019,24 @@ function utilities() {
   return [...rules, ...states].join(`
 `);
 }
+var HIDDEN = `
+.tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }`;
 var SHIM_CSS = `${VARS}
-${utilities()}`;
+${utilities()}
+${HIDDEN}`;
 
 // src/host-emu/boot.ts
 function startOriginal(opts) {
   const removeStyle = opts.addStyle(SHIM_CSS);
   const dom = startDomBridge();
+  const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
   const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId });
   return {
     emu,
     stop() {
       emu.cleanup();
       dom.destroy();
+      removeCache();
       removeStyle();
     }
   };
@@ -9107,10 +9307,21 @@ function setup(ctx) {
   const CONTEXT_READ_TAIL = 40;
   let outgoingInFlight = 0;
   const hub = new GenerationHub;
+  const cache = new MessageCache;
   const bridge = {
     getChat: (c) => call("getChat", [c]),
-    listMessages: (c, n) => call("listMessages", [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0)]),
-    getMessage: (c, m) => call("getMessage", [c, m]),
+    listMessages: async (c, n, auto) => {
+      const since = cache.mark();
+      const rows = await call("listMessages", [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0), auto === true]);
+      cache.seed(c, rows, since);
+      return rows;
+    },
+    getMessage: async (c, m) => {
+      const since = cache.mark();
+      const row = await call("getMessage", [c, m]);
+      cache.seed(c, [row], since);
+      return row;
+    },
     updateContent: (c, m, content) => call("updateContent", [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call("patchExtra", [c, m, patch, swipe]),
     generateRaw: (req, signal) => call("generateRaw", [req], signal),
@@ -9129,9 +9340,19 @@ function setup(ctx) {
   };
   const original = startOriginal({
     bridge,
+    cache,
     storage: emuStorage,
     activeChatId: () => chatId,
     addStyle: (css) => ctx.dom.addStyle(css)
+  });
+  const visible = watchVisibleMessages({
+    chat: () => chatId,
+    known: (c, id) => cache.has(c, id),
+    lookup: async (c, ids) => {
+      const since = cache.mark();
+      cache.seed(c, await call("messagesFor", [c, ids]), since);
+    },
+    log: (text, error) => console.warn(`[translator] ${text}`, error)
   });
   const settingsElement = createSettingsHost();
   const settingsHost = { element: settingsElement, ...nativePrompts(settingsElement) };
@@ -9171,6 +9392,7 @@ function setup(ctx) {
     const settings = store ? settingsFor(store, forChat) : DEFAULT_SETTINGS;
     const row = await bridge.getChat(forChat);
     const connectionId = String(row.metadata?.translationConnectionId ?? "");
+    settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ""), String(row.metadata?.translationOutputPrompt ?? ""));
     const held = protect(text, settings);
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
@@ -9210,8 +9432,10 @@ ${bundle.freeContext.trim()}` : "",
     return restore(translated, held.pieces).trim();
   }
   function resetChat(next) {
-    if (next !== chatId)
+    if (next !== chatId) {
       settingsHost.reset();
+      visible.reset();
+    }
     chatId = next;
     renderDraftButton();
     renderPanel();
@@ -9289,7 +9513,7 @@ ${bundle.freeContext.trim()}` : "",
     id: "translator",
     title: "양방향 번역",
     shortName: "번역",
-    description: "양방향 번역: 프리셋, 단어장, 자동 번역, 이어서 번역",
+    description: "양방향 번역: 문단 번역 보기·대조·수정, 프리셋, 단어장, 응답·내 메시지 번역(원작 Translation Tools 1.10.0)",
     keywords: ["translate", "translation", "glossary", "번역", "단어장"],
     headerTitle: "양방향 번역",
     iconSvg: ICON
@@ -9517,6 +9741,13 @@ ${bundle.freeContext.trim()}` : "",
         renderDraftButton();
         return;
       }
+      case "msg_event": {
+        if (msg.kind === "upsert")
+          cache.upsert(msg.chatId, msg.row);
+        else
+          cache.remove(msg.chatId, msg.messageId);
+        return;
+      }
       case "emu_result": {
         const waiter = rpc.get(msg.id);
         if (!waiter)
@@ -9538,6 +9769,7 @@ ${bundle.freeContext.trim()}` : "",
     clearInterval(routeTimer);
     document.removeEventListener("visibilitychange", onVisible);
     window.removeEventListener("beforeunload", onBeforeUnload);
+    visible.destroy();
     original.stop();
     offEvents.forEach((off) => off());
     offBackend();

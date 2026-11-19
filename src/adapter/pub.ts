@@ -52,6 +52,23 @@ export function contentUnits(content: string, kept: ReadonlySet<string> = new Se
     .filter((block) => block && /\p{L}/u.test(block));
 }
 
+/** The translated paragraphs of a swipe in the content's order, joined by blank lines ('' when none): Marinara's `extra.translation`. */
+export function translationText(content: string, record: unknown, kept: ReadonlySet<string> = new Set()): string {
+  if (!isRecord(record)) return '';
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const source of contentUnits(content, kept)) {
+    const key = blockKey(source);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const t = record.map[key];
+    // the original's formatting marks (`<x1>…</x1>`, `⟪1⟫`) are not part of the text (its `stripMarks`)
+    const plain = typeof t === 'string' ? t.replace(/<\/?x\d+>/g, '').replace(/⟪\d+⟫/g, '').trim() : '';
+    if (plain) out.push(plain);
+  }
+  return out.join('\n\n');
+}
+
 /**
  * The memory extension's public projection of one swipe, or null when nothing in the record belongs to this content.
  * `text` follows the content's order (untranslated paragraphs stay as they are); `paras` keeps the last PUB_PARAS_MAX.

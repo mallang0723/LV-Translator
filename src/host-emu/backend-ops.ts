@@ -3,13 +3,19 @@
 // swipe under its own metadata key, separate from the 0.4.0 `st_translator` records.
 
 import type { ChatRow, MessageRow } from './api';
-import { buildPubFromTt, convertLegacyRecord } from '../adapter/pub';
+import { buildPubFromTt, convertLegacyRecord, translationText } from '../adapter/pub';
 import { type ChatSettings, METADATA_KEY, type MessageTranslations } from '../shared';
 import { recordFor } from '../message-ui';
 
 export const TT_KEY = 'st_translator_tt';
 export const PT_KEY = 'paraTranslate';
 const MAX_TAIL = 1000;
+/** The original's own background reads (after a generation, for the reply context) are about one screen: never the whole chat. */
+export const AUTO_TAIL = 16;
+/** Saving a record usually concerns one of the newest messages: look at the end first, widen only when it is not there. */
+const FIND_TAILS = [AUTO_TAIL, 60] as const;
+/** Messages on screen that are older than the opening read (80): looked up in a window this big, then once in a bigger one. */
+export const OLD_TAILS = [200, 500] as const;
 
 export interface Msg {
   id: string;
@@ -49,6 +55,9 @@ export interface ChatTranslationSettings {
   /** Language incoming responses are translated into. */
   myLanguage: string;
   autoTranslate: boolean;
+  /** The chat's own translation prompts (what 0.4.0 stored per chat); '' = none, the original then uses its default prompt. */
+  outgoingPrompt?: string;
+  incomingPrompt?: string;
 }
 
 export interface EmuDeps {
@@ -65,6 +74,40 @@ export interface EmuDeps {
   legacy?(chatId: string): Promise<{ settings: ChatSettings; kept: ReadonlySet<string> } | null>;
   /** Count of 0.4.0 records that could not be converted exactly (whole-message or partial translations). */
   onLegacySkipped?(messageId: string): void;
+  /** The original's kept tags: needed to find a paragraph's key the way the original does when a record is turned into `extra.translation`. */
+  keptTags?(): Promise<ReadonlySet<string>>;
+  /** Wide reads shared across calls (one bridge is made per call in the backend); a bridge made without it keeps its own. */
+  wide?: WideReads;
+}
+
+/**
+ * The last wide read of a chat, for a few seconds. Saving the records of many old messages ("모두 번역") finds each message in it
+ * instead of reading up to 1000 rows again for every save. Kept current from the host's message events (`update`).
+ */
+export class WideReads {
+  private reads = new Map<string, { at: number; n: number; rows: Msg[] }>();
+  constructor(private readonly ttlMs = 15_000) {}
+
+  get(chatId: string, n: number): Msg[] | null {
+    const hit = this.reads.get(chatId);
+    return hit && hit.n >= n && Date.now() - hit.at < this.ttlMs ? hit.rows : null;
+  }
+
+  set(chatId: string, n: number, rows: Msg[]): void {
+    this.reads.set(chatId, { at: Date.now(), n, rows });
+    while (this.reads.size > 3) this.reads.delete(this.reads.keys().next().value as string);
+  }
+
+  /** A message event: the row held for it becomes the event's (a stale row would make the next whole-bag write drop what another extension just wrote). */
+  update(chatId: string, raw: Msg): void {
+    const rows = this.reads.get(chatId)?.rows;
+    const i = rows?.findIndex((m) => m.id === raw.id) ?? -1;
+    if (rows && i >= 0) rows[i] = raw;
+  }
+
+  drop(chatId: string): void {
+    this.reads.delete(chatId);
+  }
 }
 
 const ms = (n: unknown): number => {
@@ -73,12 +116,21 @@ const ms = (n: unknown): number => {
   return v < 1e12 ? v * 1000 : v;
 };
 
-export function messageRow(chatId: string, m: Msg, characterId: string | null): MessageRow {
+export function messageRow(chatId: string, m: Msg, characterId: string | null, kept: ReadonlySet<string> = new Set()): MessageRow {
   const swipe = Number.isInteger(m.swipe_id) ? (m.swipe_id as number) : 0;
   const { spindle_metadata: _drop, ...extra } = (m.extra ?? {}) as Record<string, unknown>;
   const tt = (m.metadata?.[TT_KEY] ?? null) as Record<string, unknown> | null;
   const rec = tt && typeof tt === 'object' ? tt[String(swipe)] : undefined;
-  if (rec) extra[PT_KEY] = rec;
+  if (rec) {
+    extra[PT_KEY] = rec;
+    // Marinara keeps a message's translation in `extra.translation` (+ `translationSource`, the text it was made from); the original
+    // reads that for "문맥 > 번역문 포함" of the my-message translation. Here it is made from the swipe's record.
+    const text = translationText(String(m.content ?? ''), rec, kept);
+    if (text) {
+      extra.translation = text;
+      extra.translationSource = String(m.content ?? '');
+    }
+  }
   if (extra.hidden === true) extra.hiddenFromUser = true;
   const when = ms(m.swipe_dates?.[swipe]) || ms(m.send_date) || ms(m.created_at);
   const role = m.role ?? (m.is_user ? 'user' : 'assistant');
@@ -94,8 +146,23 @@ export function messageRow(chatId: string, m: Msg, characterId: string | null): 
   };
 }
 
+/** A host message event's message (`extra.spindle_metadata` holds the metadata) as the row the original reads. */
+export function eventMsg(raw: Record<string, any>): Msg {
+  const extra = isRecord(raw.extra) ? raw.extra : {};
+  const metadata = isRecord(raw.metadata) ? raw.metadata : isRecord(extra.spindle_metadata) ? (extra.spindle_metadata as Record<string, unknown>) : undefined;
+  const { spindle_metadata: _drop, ...rest } = extra;
+  return { ...(raw as Msg), role: raw.role ?? (raw.is_user ? 'user' : 'assistant'), extra: rest, ...(metadata ? { metadata } : {}) };
+}
+
+export function eventRow(chatId: string, raw: Record<string, any>, characterId: string | null, kept?: ReadonlySet<string>): MessageRow {
+  return messageRow(chatId, eventMsg(raw), characterId, kept);
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
 export function createEmuBridge(d: EmuDeps) {
   const { host, uid } = d;
+  const wide = d.wide ?? new WideReads();
 
   async function tail(chatId: string, n: number): Promise<Msg[]> {
     const rows = (await host.chat.getMessages(chatId, { tail: Math.min(Math.max(1, n), MAX_TAIL) })) as Msg[];
@@ -107,10 +174,18 @@ export function createEmuBridge(d: EmuDeps) {
   }
 
   async function findMessage(chatId: string, messageId: string): Promise<Msg> {
-    for (const n of [60, MAX_TAIL]) {
+    for (const n of FIND_TAILS) {
       const hit = (await tail(chatId, n)).find((m) => m.id === messageId);
       if (hit) return hit;
     }
+    // Older than the end of the chat: one wide read, shared by the saves that follow (a bulk run saves many old messages).
+    let rows = wide.get(chatId, MAX_TAIL);
+    if (!rows) {
+      rows = await tail(chatId, MAX_TAIL);
+      wide.set(chatId, MAX_TAIL, rows);
+    }
+    const hit = rows.find((m) => m.id === messageId);
+    if (hit) return hit;
     throw Object.assign(new Error('메시지를 찾지 못했습니다.'), { status: 404 });
   }
 
@@ -220,6 +295,8 @@ export function createEmuBridge(d: EmuDeps) {
           ...meta,
           // Marinara keeps these in its chat settings; here they come from our own settings.
           translationProvider: 'ai',
+          // "채팅 설정 유지" (the original's preset that means: use the chat's own prompt). Absent keys keep the original's default prompt.
+          ...(s.outgoingPrompt || s.incomingPrompt ? { translationPrompt: s.outgoingPrompt ?? '', translationOutputPrompt: s.incomingPrompt ?? '' } : {}),
           translationConnectionId: s.connectionId,
           translationTargetLang: s.myLanguage,
           autoTranslate: s.autoTranslate,
@@ -227,16 +304,37 @@ export function createEmuBridge(d: EmuDeps) {
         },
       };
     },
-    async listMessages(chatId: string, n: number): Promise<MessageRow[]> {
+    /** `n` 0 and `auto`: the original's own background read asked for the whole chat; it gets the end of it (AUTO_TAIL). `n` 0 alone is the user's 모두 번역. */
+    async listMessages(chatId: string, n: number, auto = false): Promise<MessageRow[]> {
+      const want = n > 0 ? n : auto ? AUTO_TAIL : MAX_TAIL;
       const character = await characterOf(chatId);
-      const rows = await tail(chatId, n || MAX_TAIL);
-      await convertLegacy(chatId, rows, n > 0 && n <= SCREEN_READ_MAX);
-      return rows.map((m) => messageRow(chatId, m, character));
+      const rows = await tail(chatId, want);
+      await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
+      const kept = await d.keptTags?.();
+      return rows.map((m) => messageRow(chatId, m, character, kept));
+    },
+    /** Messages on screen that the opening read did not reach: those among the end of the chat (OLD_TAILS), by id. Older ones are absent. */
+    async messagesFor(chatId: string, ids: string[]): Promise<MessageRow[]> {
+      const want = new Set(ids.slice(0, 80));
+      if (!want.size) return [];
+      let found: Msg[] = [];
+      for (const n of OLD_TAILS) {
+        let rows = wide.get(chatId, n);
+        if (!rows) {
+          rows = await tail(chatId, n);
+          wide.set(chatId, n, rows);
+        }
+        found = rows.filter((m) => want.has(m.id));
+        if (found.length >= want.size || rows.length < n) break;
+      }
+      await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
+      const [character, kept] = [await characterOf(chatId), await d.keptTags?.()];
+      return found.map((m) => messageRow(chatId, m, character, kept));
     },
     async getMessage(chatId: string, messageId: string): Promise<MessageRow> {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
-      return messageRow(chatId, row, await characterOf(chatId));
+      return messageRow(chatId, row, await characterOf(chatId), await d.keptTags?.());
     },
     async patchExtra(chatId: string, messageId: string, patch: Record<string, unknown>, swipeIndex?: number): Promise<void> {
       if (!(PT_KEY in patch)) return; // the original only ever writes its own record

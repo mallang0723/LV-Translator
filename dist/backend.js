@@ -79,6 +79,8 @@ function planGlossary(meta, text, now) {
   const hash = hashText(text);
   if (!published && !text)
     return null;
+  if (!text && published && typeof published.text === "string" && published.text.trim())
+    return null;
   if (published?.hash === hash)
     return null;
   const entry = { text, hash, at: now };
@@ -1111,6 +1113,25 @@ var BUILTIN_PRESET_ORDER = new Map([
   "builtin-bilingual-dialogue-korean-v2"
 ].map((id, index) => [id, index]));
 // src/bundles.ts
+function effectiveGuides(store, settings) {
+  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
+  if (!bundle)
+    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
+  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
+  const glossary = [
+    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
+    ...parseGlossary(settings.glossary)
+  ].map((p) => `${p.left} = ${p.right}`).join(`
+`);
+  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
+
+`);
+  return {
+    glossary,
+    freeContext: join(bundle.freeContext, settings.freeContext),
+    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
+  };
+}
 function newBundleId(cryptoApi = globalThis.crypto) {
   if (typeof cryptoApi?.randomUUID === "function")
     return `bundle-${cryptoApi.randomUUID()}`;
@@ -1753,6 +1774,25 @@ function contentUnits(content, kept = new Set) {
   });
   return source.split(/\n[ \t]*\n/).map((block) => block.trim()).filter((block) => block && /\p{L}/u.test(block));
 }
+function translationText(content, record, kept = new Set) {
+  if (!isRecord(record))
+    return "";
+  const out = [];
+  const seen = new Set;
+  for (const source of contentUnits(content, kept)) {
+    const key = blockKey(source);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    const t = record.map[key];
+    const plain = typeof t === "string" ? t.replace(/<\/?x\d+>/g, "").replace(/\u27EA\d+\u27EB/g, "").trim() : "";
+    if (plain)
+      out.push(plain);
+  }
+  return out.join(`
+
+`);
+}
 function buildPubFromTt(content, record, language, kept, now) {
   if (!isRecord(record))
     return null;
@@ -1901,19 +1941,54 @@ function recordKeyFor(mt, content) {
 var TT_KEY = "st_translator_tt";
 var PT_KEY = "paraTranslate";
 var MAX_TAIL = 1000;
+var AUTO_TAIL = 16;
+var FIND_TAILS = [AUTO_TAIL, 60];
+var OLD_TAILS = [200, 500];
+
+class WideReads {
+  ttlMs;
+  reads = new Map;
+  constructor(ttlMs = 15000) {
+    this.ttlMs = ttlMs;
+  }
+  get(chatId, n) {
+    const hit = this.reads.get(chatId);
+    return hit && hit.n >= n && Date.now() - hit.at < this.ttlMs ? hit.rows : null;
+  }
+  set(chatId, n, rows) {
+    this.reads.set(chatId, { at: Date.now(), n, rows });
+    while (this.reads.size > 3)
+      this.reads.delete(this.reads.keys().next().value);
+  }
+  update(chatId, raw) {
+    const rows = this.reads.get(chatId)?.rows;
+    const i = rows?.findIndex((m) => m.id === raw.id) ?? -1;
+    if (rows && i >= 0)
+      rows[i] = raw;
+  }
+  drop(chatId) {
+    this.reads.delete(chatId);
+  }
+}
 var ms = (n) => {
   const v = Number(n);
   if (!Number.isFinite(v) || v <= 0)
     return 0;
   return v < 1000000000000 ? v * 1000 : v;
 };
-function messageRow(chatId, m, characterId) {
+function messageRow(chatId, m, characterId, kept = new Set) {
   const swipe = Number.isInteger(m.swipe_id) ? m.swipe_id : 0;
   const { spindle_metadata: _drop, ...extra } = m.extra ?? {};
   const tt = m.metadata?.[TT_KEY] ?? null;
   const rec = tt && typeof tt === "object" ? tt[String(swipe)] : undefined;
-  if (rec)
+  if (rec) {
     extra[PT_KEY] = rec;
+    const text = translationText(String(m.content ?? ""), rec, kept);
+    if (text) {
+      extra.translation = text;
+      extra.translationSource = String(m.content ?? "");
+    }
+  }
   if (extra.hidden === true)
     extra.hiddenFromUser = true;
   const when = ms(m.swipe_dates?.[swipe]) || ms(m.send_date) || ms(m.created_at);
@@ -1929,8 +2004,19 @@ function messageRow(chatId, m, characterId) {
     activeSwipeIndex: swipe
   };
 }
+function eventMsg(raw) {
+  const extra = isRecord2(raw.extra) ? raw.extra : {};
+  const metadata = isRecord2(raw.metadata) ? raw.metadata : isRecord2(extra.spindle_metadata) ? extra.spindle_metadata : undefined;
+  const { spindle_metadata: _drop, ...rest } = extra;
+  return { ...raw, role: raw.role ?? (raw.is_user ? "user" : "assistant"), extra: rest, ...metadata ? { metadata } : {} };
+}
+function eventRow(chatId, raw, characterId, kept) {
+  return messageRow(chatId, eventMsg(raw), characterId, kept);
+}
+var isRecord2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function createEmuBridge(d) {
   const { host, uid } = d;
+  const wide = d.wide ?? new WideReads;
   async function tail(chatId, n) {
     const rows = await host.chat.getMessages(chatId, { tail: Math.min(Math.max(1, n), MAX_TAIL) });
     return Array.isArray(rows) ? rows.slice(-n) : [];
@@ -1939,11 +2025,19 @@ function createEmuBridge(d) {
     return (await host.chats.get(chatId, uid))?.character_id ?? null;
   }
   async function findMessage(chatId, messageId) {
-    for (const n of [60, MAX_TAIL]) {
+    for (const n of FIND_TAILS) {
       const hit = (await tail(chatId, n)).find((m) => m.id === messageId);
       if (hit)
         return hit;
     }
+    let rows = wide.get(chatId, MAX_TAIL);
+    if (!rows) {
+      rows = await tail(chatId, MAX_TAIL);
+      wide.set(chatId, MAX_TAIL, rows);
+    }
+    const hit = rows.find((m) => m.id === messageId);
+    if (hit)
+      return hit;
     throw Object.assign(new Error("\uBA54\uC2DC\uC9C0\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."), { status: 404 });
   }
   const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -2048,6 +2142,7 @@ function createEmuBridge(d) {
         metadata: {
           ...meta,
           translationProvider: "ai",
+          ...s.outgoingPrompt || s.incomingPrompt ? { translationPrompt: s.outgoingPrompt ?? "", translationOutputPrompt: s.incomingPrompt ?? "" } : {},
           translationConnectionId: s.connectionId,
           translationTargetLang: s.myLanguage,
           autoTranslate: s.autoTranslate,
@@ -2055,16 +2150,37 @@ function createEmuBridge(d) {
         }
       };
     },
-    async listMessages(chatId, n) {
+    async listMessages(chatId, n, auto = false) {
+      const want = n > 0 ? n : auto ? AUTO_TAIL : MAX_TAIL;
       const character = await characterOf(chatId);
-      const rows = await tail(chatId, n || MAX_TAIL);
-      await convertLegacy(chatId, rows, n > 0 && n <= SCREEN_READ_MAX);
-      return rows.map((m) => messageRow(chatId, m, character));
+      const rows = await tail(chatId, want);
+      await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
+      const kept = await d.keptTags?.();
+      return rows.map((m) => messageRow(chatId, m, character, kept));
+    },
+    async messagesFor(chatId, ids) {
+      const want = new Set(ids.slice(0, 80));
+      if (!want.size)
+        return [];
+      let found = [];
+      for (const n of OLD_TAILS) {
+        let rows = wide.get(chatId, n);
+        if (!rows) {
+          rows = await tail(chatId, n);
+          wide.set(chatId, n, rows);
+        }
+        found = rows.filter((m) => want.has(m.id));
+        if (found.length >= want.size || rows.length < n)
+          break;
+      }
+      await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
+      const [character, kept] = [await characterOf(chatId), await d.keptTags?.()];
+      return found.map((m) => messageRow(chatId, m, character, kept));
     },
     async getMessage(chatId, messageId) {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
-      return messageRow(chatId, row, await characterOf(chatId));
+      return messageRow(chatId, row, await characterOf(chatId), await d.keptTags?.());
     },
     async patchExtra(chatId, messageId, patch, swipeIndex) {
       if (!(PT_KEY in patch))
@@ -2113,6 +2229,40 @@ ${req.text}` });
       return rows.map((e) => ({ id: e.id, name: e.comment ?? "", keys: e.key ?? [], content: e.content ?? "", enabled: e.disabled !== true }));
     }
   };
+}
+
+// src/adapter/migrate.ts
+var MIGRATIONS_KEY = "lvMigrations";
+var GLOSSARY_MARK = "glossary052";
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var filled = (v) => typeof v === "string" && v.trim() !== "";
+function planGlossaryMigration(file, store, at) {
+  const marks = isObject2(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
+  if (marks[GLOSSARY_MARK])
+    return null;
+  const config = isObject2(file.config) ? structuredClone(file.config) : {};
+  let changed = false;
+  const oldDefault = glossaryText(effectiveGuides(store, settingsFor(store, null)).glossary);
+  if (oldDefault && !filled(config.defaults?.glossary)) {
+    config.defaults = { ...isObject2(config.defaults) ? config.defaults : {}, glossary: oldDefault };
+    changed = true;
+  }
+  for (const chatId of Object.keys(store.chats)) {
+    const text = glossaryText(effectiveGuides(store, settingsFor(store, chatId)).glossary);
+    if (!text)
+      continue;
+    const scope = isObject2(config.chats) && isObject2(config.chats[chatId]) ? config.chats[chatId] : null;
+    if (scope) {
+      if (filled(scope.glossary))
+        continue;
+      config.chats = { ...config.chats, [chatId]: { ...scope, glossary: text } };
+      changed = true;
+    } else if (!filled(config.defaults?.glossary)) {
+      config.chats = { ...isObject2(config.chats) ? config.chats : {}, [chatId]: { ...isObject2(config.defaults) ? config.defaults : {}, glossary: text } };
+      changed = true;
+    }
+  }
+  return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [GLOSSARY_MARK]: at } };
 }
 
 // src/backend.ts
@@ -2164,7 +2314,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.1";
+var SELF_VERSION = "0.5.2";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -2189,6 +2339,18 @@ try {
   spindle.rpcPool?.sync("contract", handshake(SELF_VERSION, PROVIDES), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
+}
+async function migrateGlossary(uid) {
+  try {
+    const file = await readTtConfig(uid, true);
+    const next = planGlossaryMigration(file, await loadStore(uid), new Date().toISOString());
+    if (!next)
+      return;
+    await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
+    configCache.set(userKey(uid), { at: Date.now(), value: next });
+  } catch (e) {
+    spindle.log.warn(`[translator] 0.4.0 glossary not carried over (will retry): ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 var warnedGlossary = false;
 var lastChat = new Map;
@@ -2238,7 +2400,7 @@ spindle.on("GENERATION_ENDED", (payload) => {
   if (payload?.chatId)
     generationActive.delete(payload.chatId);
 });
-var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var isObject3 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 async function projectionFor(uid, chatId) {
   const store = await loadStore(uid);
   const cfg = (await readTtConfig(uid)).config;
@@ -2247,15 +2409,15 @@ async function projectionFor(uid, chatId) {
 async function refreshPub(uid, chatId, raw) {
   if (!raw.id || typeof raw.content !== "string")
     return;
-  const meta = raw.metadata ?? (isObject2(raw.extra?.spindle_metadata) ? raw.extra.spindle_metadata : undefined);
-  const st = isObject2(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : null;
-  const tt = isObject2(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
+  const meta = raw.metadata ?? (isObject3(raw.extra?.spindle_metadata) ? raw.extra.spindle_metadata : undefined);
+  const st = isObject3(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : null;
+  const tt = isObject3(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
   if (!st?.pub && !tt)
     return;
   const proj = await projectionFor(uid, chatId);
   const swipe = Number.isInteger(raw.swipe_id) ? raw.swipe_id : 0;
   const want = proj.publish ? buildPubFromTt(raw.content, tt?.[String(swipe)], proj.language, proj.kept, Date.now()) : null;
-  const have = isObject2(st?.pub) ? st.pub : null;
+  const have = isObject3(st?.pub) ? st.pub : null;
   if (!want && !have)
     return;
   if (want && have?.h === want.h)
@@ -2268,13 +2430,37 @@ async function refreshPub(uid, chatId, raw) {
   const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: { [METADATA_KEY]: merged } } : { metadata: { ...meta ?? {}, [METADATA_KEY]: merged } };
   await spindle.chat.updateMessage(chatId, raw.id, patch);
 }
-for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) {
+var wideReads = new WideReads;
+async function forwardMessage(uid, chatId, raw) {
+  if (!raw?.id)
+    return;
+  wideReads.update(chatId, eventMsg(raw));
+  let character = null;
+  try {
+    character = (await spindle.chats.get(chatId, uid))?.character_id ?? null;
+  } catch {}
+  const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags);
+  send({ type: "msg_event", chatId, kind: "upsert", row: eventRow(chatId, raw, character, kept) }, uid);
+}
+for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAGE_SENT"]) {
   spindle.on(event, (payload, userId) => {
     if (!payload?.chatId || !payload.message)
       return;
-    refreshPub(userId, payload.chatId, { ...payload.message, id: payload.message.id ?? payload.messageId }).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
+    const message = { ...payload.message, id: payload.message.id ?? payload.messageId };
+    forwardMessage(userId, payload.chatId, message).catch((e) => spindle.log.warn(`[translator] message event not forwarded: ${errorText(e)}`));
+    if (event === "MESSAGE_SENT")
+      return;
+    refreshPub(userId, payload.chatId, message).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
   });
 }
+spindle.on("MESSAGE_DELETED", (payload, userId) => {
+  if (!payload?.chatId)
+    return;
+  wideReads.drop(payload.chatId);
+  const id = payload.messageId ?? payload.message?.id;
+  if (id)
+    send({ type: "msg_event", chatId: payload.chatId, kind: "delete", messageId: id }, userId);
+});
 var emuAborts = new Map;
 var leasedGenerations = new Set;
 var legacySkipped = new Set;
@@ -2293,6 +2479,7 @@ async function emu(uid, msg) {
       return;
     }
     if (msg.op === "storage.get") {
+      await migrateGlossary(uid);
       reply({ ok: true, data: await readTtConfig(uid, true) });
       return;
     }
@@ -2319,8 +2506,10 @@ async function emu(uid, msg) {
         try {
           connectionId = (await resolveConnection(spindle, uid, effectiveConnectionId(store, chatId) || undefined, hintFor(uid, chatId))).id ?? "";
         } catch {}
-        return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate };
+        return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate, outgoingPrompt: settings.outgoingPrompt, incomingPrompt: settings.incomingPrompt };
       },
+      wide: wideReads,
+      keptTags: async () => keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags),
       projection: (chatId) => projectionFor(uid, chatId),
       async legacy(chatId) {
         const store = await loadStore(uid);

@@ -76,6 +76,9 @@ export function planGlossary(meta: Record<string, unknown>, text: string, now: n
   const published = isObject(own.glossary) ? (own.glossary as Partial<GlossaryEntry>) : null;
   const hash = hashText(text);
   if (!published && !text) return null;
+  // The original's glossary starts empty (0.5.x reads it from the original's settings): an empty one must never clear a glossary
+  // that is already published (0.4.0's, or an earlier one), or the memory extension's room would lose its words.
+  if (!text && published && typeof published.text === 'string' && published.text.trim()) return null;
   if (published?.hash === hash) return null;
   const entry: GlossaryEntry = { text, hash, at: now };
   return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };

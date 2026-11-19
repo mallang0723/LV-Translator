@@ -79,4 +79,12 @@ function utilities(): string {
   return [...rules, ...states].join('\n');
 }
 
-export const SHIM_CSS = `${VARS}\n${utilities()}`;
+/**
+ * Controls of the original that cannot do anything in Lumiverse are hidden (관리자 결정 11-19: 못 쓰는 버튼은 뺀다). The original's markup is
+ * not changed: the input stays in its form (it reads as off), only its row is not drawn.
+ *   - "후처리 후 번역" (N2): Marinara's post-processing step (`postProcessingPending`) does not exist in Lumiverse.
+ */
+const HIDDEN = `
+.tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }`;
+
+export const SHIM_CSS = `${VARS}\n${utilities()}\n${HIDDEN}`;

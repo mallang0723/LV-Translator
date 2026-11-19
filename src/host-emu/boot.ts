@@ -2,6 +2,7 @@
 import ORIGINAL from '../vendor/tt-1.10.0/personal-extension/extension.js' with { type: 'text' };
 import type { HostBridge } from './api';
 import { startDomBridge } from './dom-bridge';
+import { installQueryClient, type MessageCache } from './message-cache';
 import { type EmuHandle, type MarinaraStorage, runOriginal } from './runtime';
 import { SHIM_CSS } from './shim-css';
 
@@ -11,6 +12,8 @@ export interface StartOptions {
   activeChatId: () => string | null;
   /** Adds a stylesheet to the page and returns its remover (ctx.dom.addStyle in Lumiverse). */
   addStyle: (css: string) => () => void;
+  /** The message cache the original finds as the app's (see message-cache.ts). */
+  cache?: MessageCache;
   /** Test hook: the original's text (defaults to the embedded pinned copy). */
   source?: string;
 }
@@ -18,12 +21,15 @@ export interface StartOptions {
 export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandle } {
   const removeStyle = opts.addStyle(SHIM_CSS);
   const dom = startDomBridge();
+  // Before the original starts: it looks for the cache while it starts.
+  const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
   const emu = runOriginal({ source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId });
   return {
     emu,
     stop() {
       emu.cleanup();
       dom.destroy();
+      removeCache();
       removeStyle();
     },
   };

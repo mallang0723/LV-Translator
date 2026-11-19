@@ -26,8 +26,8 @@ export interface MessageRow {
 /** What the host side must provide. Every read is bounded: `listMessages` takes a tail count (never the whole chat). */
 export interface HostBridge {
   getChat(chatId: string): Promise<ChatRow>;
-  /** The last `tail` messages in chat order (oldest first). `tail` 0 means the host's own bounded window. */
-  listMessages(chatId: string, tail: number): Promise<MessageRow[]>;
+  /** The last `tail` messages in chat order (oldest first). `tail` 0 means the host's own bounded window. `auto`: the original's own background read (no limit asked, not the user's 모두 번역). */
+  listMessages(chatId: string, tail: number, auto?: boolean): Promise<MessageRow[]>;
   getMessage(chatId: string, messageId: string): Promise<MessageRow>;
   /** Merge `patch` into the message's extra (a `null` value deletes the key). `swipeIndex` pins a non-visible swipe. */
   /** Replace the message text (the active swipe), as the original's 영어 원문도 같이 고치기 does. */
@@ -55,7 +55,17 @@ export class ApiError extends Error {
   }
 }
 
-type Route = { re: RegExp; method: string; run: (m: RegExpExecArray, q: URLSearchParams, body: any, signal?: AbortSignal) => Promise<unknown> };
+/** What the route handler is told about the request beyond its url and body. */
+export interface RouteMeta {
+  /**
+   * A message list read with no limit that is NOT the user's own "번역 안 된 메시지 모두 번역": the original's automatic
+   * translation module (`messageRows`, `messagesUrl`) asks for the whole chat after every generation. The user's own bulk run
+   * goes through the original's `api()` helper, which always sends `credentials: 'same-origin'`; the automatic module's `request()` never does.
+   */
+  auto: boolean;
+}
+
+type Route = { re: RegExp; method: string; run: (m: RegExpExecArray, q: URLSearchParams, body: any, signal?: AbortSignal, meta?: RouteMeta) => Promise<unknown> };
 
 export function createRoutes(b: HostBridge): Route[] {
   const id = (s: string) => decodeURIComponent(s);
@@ -64,7 +74,10 @@ export function createRoutes(b: HostBridge): Route[] {
     {
       method: 'GET',
       re: /^\/chats\/([^/]+)\/messages$/,
-      run: async (m, q) => b.listMessages(id(m[1]!), Math.max(0, Number(q.get('limit')) || 0)),
+      run: async (m, q, _body, _signal, meta) => {
+        const limit = Math.max(0, Number(q.get('limit')) || 0);
+        return b.listMessages(id(m[1]!), limit, limit === 0 && meta?.auto === true);
+      },
     },
     { method: 'GET', re: /^\/chats\/([^/]+)\/messages\/([^/]+)$/, run: async (m) => b.getMessage(id(m[1]!), id(m[2]!)) },
     {
@@ -146,7 +159,7 @@ export function createApiFetch(bridge: HostBridge, realFetch: typeof fetch): typ
       return json(400, { error: 'bad json' });
     }
     try {
-      const data = await route.run(route.re.exec(path)!, url.searchParams, body, init?.signal ?? undefined);
+      const data = await route.run(route.re.exec(path)!, url.searchParams, body, init?.signal ?? undefined, { auto: init?.credentials !== 'same-origin' });
       if (data instanceof Response) return data;
       return json(200, data ?? null);
     } catch (e) {

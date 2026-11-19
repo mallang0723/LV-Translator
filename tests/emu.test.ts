@@ -104,7 +104,7 @@ describe('host stand-in: /api router', () => {
     const get = async (p: string) => (await fetcher(p)).json();
     expect(await get('/api/chats/c%201')).toEqual({ ok: 'getChat' });
     expect(await get('/api/chats/c1/messages?limit=40')).toEqual({ ok: 'listMessages' });
-    expect(calls.at(-1)).toBe('listMessages:["c1",40]');
+    expect(calls.at(-1)).toBe('listMessages:["c1",40,false]');
     expect(await get('/api/chats/c1/messages/m1')).toEqual({ ok: 'getMessage' });
     expect(await get('/api/generate/status/c1')).toEqual({ active: false });
     expect(await get('/api/connections')).toEqual({ ok: 'connections' });

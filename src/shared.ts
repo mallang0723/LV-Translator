@@ -378,4 +378,7 @@ export type ToBackend =
 // backend -> frontend
 export type ToFrontend =
   | { type: 'state'; store: Store; connections: ConnectionSummary[]; /** Link with the memory extension: not installed, working, or a contract version we do not share. */ link?: 'none' | 'ok' | 'incompatible' }
-  | { type: 'emu_result'; id: string; ok: boolean; data?: unknown; error?: string; status?: number };
+  | { type: 'emu_result'; id: string; ok: boolean; data?: unknown; error?: string; status?: number }
+  /** A message changed (edit, swipe, new, deleted) after the page read it: the page's message cache (src/host-emu/message-cache.ts) follows. `row` is the original's message row (src/host-emu/backend-ops.ts eventRow). */
+  | { type: 'msg_event'; chatId: string; kind: 'upsert'; row: unknown }
+  | { type: 'msg_event'; chatId: string; kind: 'delete'; messageId: string };
