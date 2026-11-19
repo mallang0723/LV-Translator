@@ -206,7 +206,12 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
     translationUnit: s.translationUnit === 'paragraph' ? 'paragraph' : s.translationUnit === 'whole' ? 'whole' : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200_000, split)) : base.longSplitChars,
-    batchChars: Number.isFinite(batch) ? (batch > 0 ? batch : 0) : base.batchChars,
+    // 0.4.0's "split size" (longSplitChars) is the same setting as 0.5.3's 한 번에 번역할 최대 글자수 (batchChars): when the new one was never
+    // saved and the 0.4.0 value is one the user chose (not the 7000 default), it carries over. Once saved, batchChars is written and wins.
+    batchChars: Number.isFinite(batch)
+      ? (batch > 0 ? batch : 0)
+      : Object.hasOwn(s, 'batchChars') ? base.batchChars
+      : Number.isFinite(split) && split > 0 && split !== LONG_SPLIT_DEFAULT ? split : base.batchChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),

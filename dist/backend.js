@@ -1591,7 +1591,7 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
     translationUnit: s.translationUnit === "paragraph" ? "paragraph" : s.translationUnit === "whole" ? "whole" : base.translationUnit,
     autoContinue: bool(s.autoContinue, base.autoContinue),
     longSplitChars: Number.isFinite(split) ? Math.max(0, Math.min(200000, split)) : base.longSplitChars,
-    batchChars: Number.isFinite(batch) ? batch > 0 ? batch : 0 : base.batchChars,
+    batchChars: Number.isFinite(batch) ? batch > 0 ? batch : 0 : Object.hasOwn(s, "batchChars") ? base.batchChars : Number.isFinite(split) && split > 0 && split !== LONG_SPLIT_DEFAULT ? split : base.batchChars,
     protectHtml: bool(s.protectHtml, base.protectHtml),
     protectCode: bool(s.protectCode, base.protectCode),
     excludeRules: str(s.excludeRules, base.excludeRules),
