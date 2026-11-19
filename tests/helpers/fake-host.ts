@@ -131,7 +131,7 @@ export async function fakeHost(options: HostOptions = {}) {
   return {
     api, chatId, uid, messages, sent, calls, warnings, errors, counts, readOptions, updates, rpc, chatMetadata, chats,
     event(name: string, payload: Record<string, unknown>) { handlers.get(name)?.(structuredClone(payload), uid); },
-    async render(message: Message) { return processor({ origin: 'render', chatId, messageId: message.id, content: message.content, userId: uid }); },
+    async render(message: Message, content = message.content) { return processor({ origin: 'render', chatId, messageId: message.id, content, userId: uid }); },
     setComplete(fn: typeof complete) { complete = fn; },
     async send(payload: ToBackend) { receive(payload, uid); await settle(); },
     async emit(payload: Record<string, unknown>) { handlers.get('GENERATION_ENDED')!({ generationId: 'generation', chatId, ...payload }, uid); await settle(); },

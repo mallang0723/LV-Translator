@@ -38,7 +38,7 @@ import {
 import { effectiveGuides } from './bundles';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { renderMessage } from './display/render';
-import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, skipFresh } from './message-ui';
+import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, renderSourceFor, skipFresh, stripReasoning } from './message-ui';
 import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
@@ -103,7 +103,7 @@ async function sendState(uid: Uid): Promise<void> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.4.0';
+const SELF_VERSION = '0.4.1';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -805,9 +805,15 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const settings = settingsFor(store, ctx.chatId);
   // The paragraph view has no hide toggle, so a "hidden" flag left over from another mode must not hide it.
   if (isTranslationHidden(mt.hidden, settings.displayMode)) return;
-  const record = recordFor(mt, ctx.content);
+  // With the host's Auto-parse ON, `ctx.content` is the stored text minus <think> blocks and trim()med, so it can hash
+  // differently from the key the translation was stored under (the full text). Look up by the stored text instead.
+  const source = renderSourceFor(mt, ctx.content, [message?.content, message?.swipes?.[message.swipe_id ?? 0]]);
+  if (source === null) return;
+  const record = recordFor(mt, source);
   if (!record || !record.parts.some((p) => p.trim())) return;
-  return { content: renderMessage(ctx.content, record, settings, store.view) };
+  const rendered = renderMessage(source, record, settings, store.view);
+  // The reasoning box already shows the thought, so the body must not bring it back (original or translated).
+  return { content: source === ctx.content ? rendered : stripReasoning(rendered) };
 });
 
 // ---- events ----

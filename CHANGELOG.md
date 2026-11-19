@@ -1,5 +1,9 @@
 # 변경 기록
 
+## 0.4.1 — 2026-11-19
+
+- 수정: Lumiverse의 추론 설정 "자동 파싱(Auto-parse)"이 켜져 있으면 번역이 화면에 안 나오던 문제. 호스트는 이때 확장에 `<think>` 블록을 뺀 뒤 앞뒤 공백까지 자른 본문을 넘기는데(`<think>`가 없어도 공백은 잘립니다), 번역은 저장된 전체 본문의 해시로 보관돼 있어 키가 맞지 않았습니다. 이제 넘어온 본문이 저장된 본문(현재 스와이프)에서 그렇게 줄어든 것이면 저장된 본문의 기록을 찾아 보여 주고, 추론 박스가 따로 있으므로 번역문의 `<think>` 블록은 본문에서 뺍니다. 기존 번역 기록의 키는 바꾸지 않았고 자동 파싱 꺼짐 경로도 그대로입니다.
+
 ## 0.4.0 — 2026-11-15
 
 번역 프리셋·단어장 1.8.0 이식 ([tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools) `807d6a3`, 원작 [minikkuen/Marinara-Translation-Tools](https://github.com/minikkeuen/Marinara-Translation-Tools), 원저작자 허락). 통이식: 원본의 순수 로직을 `src/vendor/tt-1.8.0/`에 그대로 복사하고(SHA-256 고정) 호스트에 묶인 부분만 어댑터로 바꿨습니다.

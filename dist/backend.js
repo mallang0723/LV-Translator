@@ -2633,6 +2633,19 @@ function clearTranslation(mt, key) {
   if (Object.keys(mt.entries).length === 0)
     mt.hidden = false;
 }
+function stripReasoning(content) {
+  const closed = content.replace(/\s*<(think|thinking|reasoning)>([\s\S]*?)<\/\1>\s*/gi, "");
+  return closed.replace(/\s*<(think|thinking|reasoning)>([\s\S]*)$/i, "").trim();
+}
+function renderSourceFor(mt, content, stored) {
+  if (recordKeyFor(mt, content))
+    return content;
+  for (const candidate of stored) {
+    if (typeof candidate === "string" && candidate !== content && stripReasoning(candidate) === content && recordKeyFor(mt, candidate))
+      return candidate;
+  }
+  return null;
+}
 
 // src/backend.ts
 var STORE_PATH = "translator.json";
@@ -2669,7 +2682,7 @@ async function sendState(uid) {
   const store = await loadStore(uid);
   send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
 }
-var SELF_VERSION = "0.4.0";
+var SELF_VERSION = "0.4.1";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -3320,10 +3333,14 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const settings = settingsFor(store, ctx.chatId);
   if (isTranslationHidden(mt.hidden, settings.displayMode))
     return;
-  const record = recordFor(mt, ctx.content);
+  const source = renderSourceFor(mt, ctx.content, [message?.content, message?.swipes?.[message.swipe_id ?? 0]]);
+  if (source === null)
+    return;
+  const record = recordFor(mt, source);
   if (!record || !record.parts.some((p) => p.trim()))
     return;
-  return { content: renderMessage(ctx.content, record, settings, store.view) };
+  const rendered = renderMessage(source, record, settings, store.view);
+  return { content: source === ctx.content ? rendered : stripReasoning(rendered) };
 });
 spindle.on("GENERATION_STARTED", (payload) => {
   if (payload?.chatId)

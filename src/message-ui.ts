@@ -131,3 +131,27 @@ export function clearTranslation(mt: MessageTranslations, key: string): void {
   delete mt.entries[key];
   if (Object.keys(mt.entries).length === 0) mt.hidden = false;
 }
+
+// ---- Auto-parse (host reasoning split) ----
+
+/**
+ * Mirrors the host's Auto-parse (Lumiverse frontend `parseThinkingTags`, useMessageCard.ts): closed
+ * <think>/<thinking>/<reasoning> blocks and an unclosed trailing one are cut out and the rest is trim()med -- even
+ * when there is no reasoning block at all. With Auto-parse ON the host hands extensions this text, not the stored one.
+ */
+export function stripReasoning(content: string): string {
+  const closed = content.replace(/\s*<(think|thinking|reasoning)>([\s\S]*?)<\/\1>\s*/gi, '');
+  return closed.replace(/\s*<(think|thinking|reasoning)>([\s\S]*)$/i, '').trim();
+}
+
+/**
+ * The stored text the host's displayed `content` came from: `content` itself when a translation is stored for it,
+ * otherwise the stored text (active swipe) that Auto-parse reduces to `content`. Records stay keyed by the full text.
+ */
+export function renderSourceFor(mt: Pick<MessageTranslations, 'entries'>, content: string, stored: Array<string | undefined>): string | null {
+  if (recordKeyFor(mt, content)) return content;
+  for (const candidate of stored) {
+    if (typeof candidate === 'string' && candidate !== content && stripReasoning(candidate) === content && recordKeyFor(mt, candidate)) return candidate;
+  }
+  return null;
+}
