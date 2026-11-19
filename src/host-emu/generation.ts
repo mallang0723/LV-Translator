@@ -11,7 +11,7 @@ export class GenerationHub {
 
   /** The response body of `POST /api/generate` for this chat. A second request for the same chat replaces the first. */
   open(chatId: string): ReadableStream<Uint8Array> {
-    this.cut(chatId);
+    this.abort(chatId); // an older stream of this chat did not finish: the original must not count it as a finished generation
     let entry!: { controller: ReadableStreamDefaultController<Uint8Array>; closed: boolean };
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {

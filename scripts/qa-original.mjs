@@ -188,7 +188,7 @@ await page2.evaluate(() => {
   row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm3');
   row.innerHTML = '<div><div data-component="MessageContent"><p>Rain fell on the roof.</p><p>She waited.</p></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
   document.querySelector('#chat').append(row);
-  window.__setStorage({ config: { defaults: { autoCollectEnabled: true, autoCollectEvery: 1, glossary: 'Mina = 미나' } } });
+  window.__setStorage({ config: { defaults: { autoCollectEnabled: true, autoCollectEvery: 1, glossary: 'Mina = 미나' }, chats: { c1: { outgoingPresetId: 'custom-qa1', autoCollectEnabled: true, autoCollectEvery: 1, glossary: 'Mina = 미나' } }, presets: [{ id: 'custom-qa1', name: 'QA prompt', prompt: 'CUSTOM-OUT-PROMPT for {{targetLanguage}}.' }] } });
   window.__auto = true;
   window.__quiet = [];
   window.__writes.length = 0;
@@ -237,6 +237,16 @@ await page2.waitForTimeout(1500);
 const outgoingCall = await page2.evaluate((n) => window.__quiet.slice(n).find((c) => c.messages.some((m) => /^Translate the following text to English/.test(m.content))), quiet2);
 check('N6: my message is translated by the original request handling (target language, glossary from the original config)', !!outgoingCall && outgoingCall.messages.some((m) => m.content.includes('Mina') && m.content.includes('미나')), JSON.stringify(outgoingCall?.messages?.map((m) => m.content.slice(0, 80))));
 check('N6: the translated text is what is sent to the chat', !!sentBody && JSON.parse(sentBody).content.startsWith('EN: '), String(sentBody).slice(0, 120));
+
+// the chat's own prompt must not follow the user into another chat that keeps the default
+check('N6: the 유저 입력 번역 프롬프트 chosen for this chat (a preset) is the one used', !!outgoingCall && outgoingCall.messages.some((m) => m.role === 'system' && m.content.includes('CUSTOM-OUT-PROMPT for English')), JSON.stringify(outgoingCall?.messages?.map((m) => m.content.slice(0, 60))));
+await page2.evaluate(() => history.pushState({}, '', '/chat/c2'));
+await page2.waitForTimeout(2500);
+const quiet3 = await page2.evaluate(() => window.__quiet.length);
+await page2.evaluate(() => fetch('/api/v1/chats/c2/messages', { method: 'POST', body: JSON.stringify({ is_user: true, content: '안녕하세요.' }) }).catch(() => {}));
+await page2.waitForTimeout(1500);
+const secondChatCall = await page2.evaluate((n) => window.__quiet.slice(n).find((c) => c.messages.some((m) => /^Translate the following text to English/.test(m.content))), quiet3);
+check('N6: in another chat that keeps the default prompt, the first chat\'s preset is gone', !!secondChatCall && !secondChatCall.messages.some((m) => m.content.includes('CUSTOM-OUT-PROMPT')), JSON.stringify(secondChatCall?.messages?.map((m) => m.content.slice(0, 60))));
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

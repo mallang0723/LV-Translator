@@ -11,7 +11,7 @@
 - **지움:** 0.4.0 서버 번역 엔진과 표시(`LEGACY_ENGINE`, 번역 작업·고치기·보충·`display/render.ts`·`translate/edit.ts`·`adapter/sync-source.ts`·`vendor/tt-1.8.0`의 `catch-up`·`sync-source`·예시 파일)와 그것만 보던 시험, LV 패널의 프롬프트 프리셋·단어장·참고 정보·긴 지문 구역(원작 화면과 겹쳤다). 채팅 전체를 읽던 캐시(`cachedChat`)도 없앴다.
 - **못 한 것:** 브라우저가 닫혀 있어도 번역하는 서버 워커 보조(DOM 구현 의존성이 필요해 멈춤). [docs/tt-1.10.0-ui-parity.md](docs/tt-1.10.0-ui-parity.md)의 N9a.
 - **라이선스:** MIT에서 **AGPL-3.0**(`AGPL-3.0-only`)으로 바꿨다. `LICENSE`는 gnu.org 전문, `package.json`, README, `THIRD_PARTY_NOTICES.md`에 반영.
-- 시험: bun 226개(0 실패), 원작 시험 82항목 통과, 브라우저 QA 통과, `verify:original` ok.
+- 시험: bun 197개(0 실패), 원작 시험 82항목 통과, 브라우저 QA 통과, `verify:original` ok.
 
 ## 0.5.0 — 2026-11-19
 

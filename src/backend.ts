@@ -6,10 +6,9 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 import { hostCaps } from './adapter/host';
 import { classifyPeer, glossaryText, handshake, PEER_ID, type PeerState, planGlossary, PROVIDES } from './adapter/contract';
 import { buildPubFromTt, keptTagNames } from './adapter/pub';
-import { deleteBundle, effectiveGuides, saveBundle } from './bundles';
+import { deleteBundle, saveBundle } from './bundles';
 import { type ConnectionHint, friendlyError, resolveConnection } from './connection';
 import { createEmuBridge, type EmuHost, TT_KEY } from './host-emu/backend-ops';
-import { parseGlossary } from './translate/glossary';
 import {
   type ConnectionSummary,
   effectiveConnectionId,
@@ -282,16 +281,6 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
       },
       onLegacySkipped: (id) => {
         if (!legacySkipped.has(id)) legacySkipped.add(id);
-      },
-      // Shared guide bundle (LV): its glossary and extra guidance are added to "translate my message".
-      async extraSystem(chatId) {
-        const store = await loadStore(uid);
-        const guides = effectiveGuides(store, settingsFor(store, chatId));
-        const pairs = parseGlossary(guides.glossary);
-        const parts: string[] = [];
-        if (pairs.length) parts.push(`## Glossary (apply in both directions)\n${pairs.map((p) => `${p.left} = ${p.right}`).join('\n')}`);
-        if (guides.freeContext.trim()) parts.push(`## Additional guidance\n${guides.freeContext.trim()}`);
-        return parts.join('\n\n');
       },
     });
     if (msg.op === 'generateActive') {

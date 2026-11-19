@@ -121,19 +121,36 @@ test('0.4.0 translations are shown by the original once: exact paragraph pairs o
   });
 });
 
-test('"내 메시지 번역": the original\'s prompt goes to the model with {{targetLanguage}} filled; the shared bundle is added on top', async () => {
-  const bundle = { id: 'bundle-1', name: 'B', glossary: 'Mina = 미나', freeContext: 'Modern Seoul.', incomingVoicePrompt: '' };
-  await withEmu({ store: { userBundles: [bundle], defaults: {}, chats: { chat: { bundleId: 'bundle-1' } } } }, async (h) => {
+test('0.4.0 translations are saved only for a screen-sized read; a big read (모두 번역) is converted in memory and writes nothing', async () => {
+  await withEmu({}, async (h) => {
+    const content = fixture.content;
+    for (let i = 0; i < 5; i++) {
+      const m = makeMessage(`a${i}`, content, 'assistant', i);
+      m.metadata = { [METADATA_KEY]: { v: 1, entries: { [sourceHash(content)]: { parts: ['등불은 꺼져 있었다.', '그가 한숨을 쉬었다.'], pieces: [], unit: 'paragraph', total: 2, truncatedPart: -1, status: 'done', updatedAt: 9 } } } };
+      h.messages.push(m);
+    }
+    await h.send({ type: 'emu', id: 'big', op: 'listMessages', args: ['chat', 0] });
+    expect(result(h, 'big').data.every((r: any) => r.extra.paraTranslate)).toBe(true);
+    await settle();
+    expect(h.updates).toEqual([]);
+    await h.send({ type: 'emu', id: 'small', op: 'listMessages', args: ['chat', 3] });
+    await settle();
+    expect(h.updates).toHaveLength(3);
+    expect(h.messages.filter((m: any) => meta(m)[TT]).length).toBe(3);
+  });
+});
+
+test('"내 메시지 번역": the original\'s prompt goes to the model with {{targetLanguage}} filled, in the original\'s message shape', async () => {
+  await withEmu({}, async (h) => {
     h.setComplete(async () => ({ content: '  Hello there.  ', finish_reason: 'stop' }));
     await h.send({ type: 'emu', id: 't', op: 'translate', args: [{ text: '안녕하세요.', targetLanguage: 'English', systemPrompt: 'Translate to {{targetLanguage}}.', connectionId: 'connection', chatId: 'chat' }] });
     expect(result(h, 't')).toMatchObject({ ok: true, data: { translatedText: 'Hello there.' } });
     const call = h.calls.at(-1);
     expect(call.connection_id).toBe('connection');
-    expect(call.messages[0].role).toBe('system');
-    expect(call.messages[0].content).toStartWith('Translate to English.');
-    expect(call.messages[0].content).toContain('Mina = 미나');
-    expect(call.messages[0].content).toContain('Modern Seoul.');
-    expect(call.messages[1]).toEqual({ role: 'user', content: 'Translate the following text to English:\n\n안녕하세요.' });
+    expect(call.messages).toEqual([
+      { role: 'system', content: 'Translate to English.' },
+      { role: 'user', content: 'Translate the following text to English:\n\n안녕하세요.' },
+    ]);
     h.setComplete(async () => ({ content: '   ', finish_reason: 'stop' }));
     await h.send({ type: 'emu', id: 'e', op: 'translate', args: [{ text: 'x', targetLanguage: 'English', chatId: 'chat' }] });
     expect(result(h, 'e')).toMatchObject({ ok: false, status: 502 });

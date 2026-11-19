@@ -1325,6 +1325,21 @@ function effectiveConnectionId(store, chatId) {
   return settingsFor(store, chatId).connectionId || store.defaults.connectionId;
 }
 
+// src/translate/glossary.ts
+function parseGlossary(raw) {
+  const pairs = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator < 1)
+      continue;
+    const left = line.slice(0, separator).trim();
+    const right = line.slice(separator + 1).trim();
+    if (left && right)
+      pairs.push({ left, right });
+  }
+  return pairs;
+}
+
 // src/connection.ts
 var CONNECTION_HINT = "AI 연결을 찾지 못했습니다. 번역 설정에서 연결을 골랐는지, 그리고 저장했는지 확인해 주세요(저장하지 않으면 적용되지 않습니다). Lumiverse에 기본 연결이 있는지도 확인해 보세요.";
 function pickConnection(list, chosen, hint = {}) {
@@ -8473,6 +8488,15 @@ function nativePrompts(host) {
         if (f && !f.hasAttribute("data-ptx-touched"))
           f.value = value;
       }
+    },
+    reset() {
+      for (const which of ["outgoing", "incoming"]) {
+        const f = field(which);
+        if (!f)
+          continue;
+        f.value = "";
+        f.removeAttribute("data-ptx-touched");
+      }
     }
   };
 }
@@ -8823,7 +8847,7 @@ class GenerationHub {
   streams = new Map;
   encoder = new TextEncoder;
   open(chatId) {
-    this.cut(chatId);
+    this.abort(chatId);
     let entry;
     const stream = new ReadableStream({
       start: (controller) => {
@@ -9080,10 +9104,12 @@ function setup(ctx) {
       }, { once: true });
     });
   };
+  const CONTEXT_READ_TAIL = 40;
+  let outgoingInFlight = 0;
   const hub = new GenerationHub;
   const bridge = {
     getChat: (c) => call("getChat", [c]),
-    listMessages: (c, n) => call("listMessages", [c, n]),
+    listMessages: (c, n) => call("listMessages", [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0)]),
     getMessage: (c, m) => call("getMessage", [c, m]),
     updateContent: (c, m, content) => call("updateContent", [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call("patchExtra", [c, m, patch, swipe]),
@@ -9147,15 +9173,31 @@ function setup(ctx) {
     const connectionId = String(row.metadata?.translationConnectionId ?? "");
     const held = protect(text, settings);
     let systemPrompt = settingsHost.prompts().outgoing.trim();
-    if (held.pieces.length)
-      systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, "").trim(), MARKER_INSTRUCTION].join(`
+    const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
+    const pairs = bundle ? parseGlossary(bundle.glossary) : [];
+    const extras = [
+      pairs.length ? `## Glossary (apply in both directions)
+${pairs.map((p) => `${p.left} = ${p.right}`).join(`
+`)}` : "",
+      bundle?.freeContext.trim() ? `## Additional guidance
+${bundle.freeContext.trim()}` : "",
+      held.pieces.length ? MARKER_INSTRUCTION : ""
+    ].filter(Boolean);
+    if (extras.length)
+      systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, "").trim(), ...extras].join(`
 
 `);
-    const res = await fetchOriginal("/api/translate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: held.text, provider: "ai", targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat })
-    });
+    let res;
+    outgoingInFlight++;
+    try {
+      res = await fetchOriginal("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: held.text, provider: "ai", targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat })
+      });
+    } finally {
+      outgoingInFlight--;
+    }
     const data = await res.json().catch(() => null);
     if (!res.ok)
       throw new Error(friendlyError(data?.error || data?.message || `번역 요청 실패 (${res.status})`));
@@ -9168,6 +9210,8 @@ function setup(ctx) {
     return restore(translated, held.pieces).trim();
   }
   function resetChat(next) {
+    if (next !== chatId)
+      settingsHost.reset();
     chatId = next;
     renderDraftButton();
     renderPanel();
@@ -9467,7 +9511,6 @@ function setup(ctx) {
     switch (msg?.type) {
       case "state": {
         store = msg.store;
-        settingsHost.setPrompts(current().outgoingPrompt, current().incomingPrompt);
         connections = msg.connections;
         link = msg.link ?? "none";
         renderPanel();
