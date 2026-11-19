@@ -8750,13 +8750,20 @@ var missingCells = (view) => {
   const roots = [view, ...Array.from(view.querySelectorAll("[data-lumiverse-html-island]")).map((e) => e.shadowRoot).filter((r) => !!r)];
   return roots.flatMap((r) => Array.from(r.querySelectorAll(".ptx-u.is-missing")).map((c) => c.textContent ?? ""));
 };
-function whenMessageSettled(messageId, timeoutMs = 6000) {
+function whenMessageSettled(messageId, timeoutMs = 6000, signal) {
   if (typeof document === "undefined")
     return Promise.resolve(true);
   const started = Date.now();
   let stableSince = 0;
   return new Promise((resolve) => {
+    let timer;
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve(false);
+    }, { once: true });
     const tick = () => {
+      if (signal?.aborted)
+        return;
       const el = Array.from(document.querySelectorAll("[data-message-id]")).find((e) => e.getAttribute("data-message-id") === messageId);
       const host = el?.querySelector(".mari-message-content");
       const islands = host ? Array.from(host.querySelectorAll("[data-lumiverse-html-island]")) : [];
@@ -8769,7 +8776,7 @@ function whenMessageSettled(messageId, timeoutMs = 6000) {
         return resolve(true);
       if (Date.now() - started >= timeoutMs)
         return resolve(false);
-      setTimeout(tick, 100);
+      timer = setTimeout(tick, 100);
     };
     tick();
   });
@@ -10262,12 +10269,22 @@ function setup(ctx) {
   const settingsHost = { element: settingsElement, ...nativePrompts(settingsElement) };
   const driver = new GenerationDriver(hub, () => original.emu.installedFetch(), (text, error) => console.warn(`[translator] ${text}`, error));
   const leased = new Set;
+  const heldEnds = new Map;
+  const flushHeldEnd = (forChat) => {
+    const held = heldEnds.get(forChat);
+    if (!held)
+      return;
+    heldEnds.delete(forChat);
+    held.abort.abort();
+    driver.ended(held.ended);
+  };
   const offEvents = [
     ctx.events.on("GENERATION_STARTED", (payload) => {
       const p = payload;
       if (!p?.chatId || !p.generationId)
         return;
       const { generationId, chatId: forChat } = p;
+      flushHeldEnd(forChat);
       call("lease", [generationId]).then((granted) => {
         if (!granted)
           return;
@@ -10280,9 +10297,15 @@ function setup(ctx) {
       if (!p?.chatId || !p.generationId || !leased.delete(p.generationId))
         return;
       const ended = { chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType };
-      if (p.messageId && typeof p.content === "string" && !p.error && p.generationType !== "impersonate")
-        whenMessageSettled(p.messageId).then(() => driver.ended(ended));
-      else
+      flushHeldEnd(p.chatId);
+      if (p.messageId && typeof p.content === "string" && !p.error && p.generationType !== "impersonate") {
+        const held = { ended, abort: new AbortController };
+        heldEnds.set(p.chatId, held);
+        whenMessageSettled(p.messageId, 6000, held.abort.signal).then(() => {
+          if (heldEnds.get(ended.chatId) === held)
+            flushHeldEnd(ended.chatId);
+        });
+      } else
         driver.ended(ended);
     }),
     ctx.events.on("GENERATION_STOPPED", (payload) => {
@@ -10567,6 +10590,9 @@ ${bundle.freeContext.trim()}` : "",
     visible.destroy();
     original.stop();
     offEvents.forEach((off) => off());
+    for (const held of heldEnds.values())
+      held.abort.abort();
+    heldEnds.clear();
     offBackend();
     offAction();
     action.destroy();

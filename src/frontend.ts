@@ -222,11 +222,23 @@ export function setup(ctx: SpindleFrontendContext) {
 
   /** Lumiverse sends every generation event to every open page; one page takes each generation and replays it into the original. */
   const leased = new Set<string>();
+  /** A generation end held back until its message is drawn (one per chat: the original keeps one stream per chat). */
+  const heldEnds = new Map<string, { ended: Parameters<GenerationDriver['ended']>[0]; abort: AbortController }>();
+  /** Replays the chat's held end now (the wait is over, or the next generation of the same chat is about to start). */
+  const flushHeldEnd = (forChat: string): void => {
+    const held = heldEnds.get(forChat);
+    if (!held) return;
+    heldEnds.delete(forChat);
+    held.abort.abort();
+    driver.ended(held.ended);
+  };
   const offEvents = [
     ctx.events.on('GENERATION_STARTED', (payload) => {
       const p = payload as { generationId?: string; chatId?: string; generationType?: string; targetMessageId?: string } | null;
       if (!p?.chatId || !p.generationId) return;
       const { generationId, chatId: forChat } = p;
+      // The held end of the previous reply goes first: the original's stream for this chat must close before the next generation opens its own.
+      flushHeldEnd(forChat);
       void call<boolean>('lease', [generationId])
         .then((granted) => {
           if (!granted) return;
@@ -241,8 +253,14 @@ export function setup(ctx: SpindleFrontendContext) {
       const ended = { chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType };
       // The original reads a message's cells from the screen when it can (an off-screen message is split from its source text, which does not
       // match the cells the view keys). The reply is on screen now or a moment from now: give it up to a few seconds to draw before replaying the end.
-      if (p.messageId && typeof p.content === 'string' && !p.error && p.generationType !== 'impersonate') void whenMessageSettled(p.messageId).then(() => driver.ended(ended));
-      else driver.ended(ended);
+      flushHeldEnd(p.chatId);
+      if (p.messageId && typeof p.content === 'string' && !p.error && p.generationType !== 'impersonate') {
+        const held = { ended, abort: new AbortController() };
+        heldEnds.set(p.chatId, held);
+        void whenMessageSettled(p.messageId, 6000, held.abort.signal).then(() => {
+          if (heldEnds.get(ended.chatId) === held) flushHeldEnd(ended.chatId);
+        });
+      } else driver.ended(ended);
     }),
     ctx.events.on('GENERATION_STOPPED', (payload) => {
       const p = payload as { generationId?: string; chatId?: string } | null;
@@ -529,6 +547,8 @@ export function setup(ctx: SpindleFrontendContext) {
     visible.destroy();
     original.stop();
     offEvents.forEach((off) => off());
+    for (const held of heldEnds.values()) held.abort.abort();
+    heldEnds.clear();
     offBackend();
     offAction();
     action.destroy();

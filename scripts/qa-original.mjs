@@ -1067,6 +1067,47 @@ for (const heal of [true, false]) {
   await dropMsg(id);
 }
 await setHeal(true);
+// ---- 0.5.8: a generation end held back until its message is drawn must not swallow the next generation's auto-translation ----
+// The end is replayed only once the reply is on screen (up to 6 s). When the same chat starts its next generation in that window, the held end went into the new
+// generation's stream (one stream per chat) and the next reply was never auto-translated. Now the held end is replayed first, then the new generation starts.
+{
+  const A = 'm30', B = 'm31';
+  const keyCount = (id) => page2.evaluate((id) => Object.keys(window.__messages.find((x) => x.id === id)?.metadata?.st_translator_tt?.['0']?.map ?? {}).length, id);
+  await page2.evaluate(([A, B]) => {
+    window.__cleanup(); window.__auto = true;
+    for (const [id, text] of [[A, 'The first reply, drawn nowhere.\n\nIt has two paragraphs.'], [B, 'The second reply, also nowhere.\n\nIt too has two paragraphs.']]) {
+      window.__messages.push({ id, role: 'assistant', content: text, swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+    }
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  }, [A, B]);
+  await page2.waitForTimeout(500);
+  const q0 = await page2.evaluate(() => window.__quiet.length);
+  const emit = (name, p) => page2.evaluate(([name, p]) => window.__emit(name, p), [name, p]);
+  const contentOf = (id) => page2.evaluate((id) => window.__messages.find((x) => x.id === id).content, id);
+  await emit('GENERATION_STARTED', { generationId: 'g-a', chatId: 'c1', generationType: 'normal' });
+  await page2.waitForTimeout(300);
+  await emit('GENERATION_ENDED', { generationId: 'g-a', chatId: 'c1', messageId: A, content: await contentOf(A), generationType: 'normal' });
+  await page2.waitForTimeout(150);
+  await emit('GENERATION_STARTED', { generationId: 'g-b', chatId: 'c1', generationType: 'normal' });
+  await page2.waitForTimeout(1500);
+  await emit('GENERATION_ENDED', { generationId: 'g-b', chatId: 'c1', messageId: B, content: await contentOf(B), generationType: 'normal' });
+  await page2.waitForFunction(([A, B]) => [A, B].every((id) => Object.keys(window.__messages.find((x) => x.id === id)?.metadata?.st_translator_tt?.['0']?.map ?? {}).length >= 1), [A, B], { timeout: 12000 }).catch(() => {});
+  await page2.waitForTimeout(1000);
+  const a = await keyCount(A), b = await keyCount(B);
+  const reqs = await page2.evaluate((n) => window.__quiet.slice(n).filter((c) => c.messages.some((m) => /<segment id=/.test(m.content))).length, q0);
+  check('0.5.8 held end + next generation of the same chat (both replies off screen): BOTH replies get a translation record', a >= 1 && b >= 1, JSON.stringify({ a, b, reqs }));
+  check('0.5.8 held end + next generation: one translation request per reply (2)', reqs === 2, JSON.stringify({ a, b, reqs }));
+  // destroy() with a held end: nothing is replayed afterwards and no timer keeps running
+  const C = 'm32';
+  await page2.evaluate((C) => { window.__messages.push({ id: C, role: 'assistant', content: 'A third reply.\n\nTwo paragraphs again.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] }); }, C);
+  await emit('GENERATION_STARTED', { generationId: 'g-c', chatId: 'c1', generationType: 'normal' });
+  await page2.waitForTimeout(300);
+  await emit('GENERATION_ENDED', { generationId: 'g-c', chatId: 'c1', messageId: C, content: await contentOf(C), generationType: 'normal' });
+  await page2.evaluate(() => window.__cleanup());
+  await page2.waitForTimeout(7500);
+  check('0.5.8 destroy() while an end is held: the held end is dropped (no translation after the extension is off)', (await keyCount(C)) === 0, JSON.stringify({ c: await keyCount(C) }));
+  await page2.evaluate(([A, B, C]) => { for (const id of [A, B, C]) { const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); } window.__auto = false; window.__cleanup = window.__LVSetup(window.__ctx); }, [A, B, C]);
+}
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
