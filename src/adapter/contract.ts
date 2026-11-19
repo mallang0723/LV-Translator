@@ -22,8 +22,8 @@ export const PUB_PARAS_MAX = 400;
 
 export const PROVIDES = ['pub-translation@1', 'glossary@1'] as const;
 
-export function handshake(version: string) {
-  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...PROVIDES] };
+export function handshake(version: string, provides: readonly string[] = PROVIDES) {
+  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
 }
 
 export type PeerState = 'none' | 'ok' | 'incompatible';

@@ -1,0 +1,15 @@
+{
+  "kind": "marinara.personal-extension",
+  "version": 1,
+  "config": {
+    "name": "번역 프리셋·단어장",
+    "version": "1.10.0",
+    "description": "Marinara Engine 2.4.x·2.5.x에 AI 번역 프롬프트 프리셋, 채팅별 단어장과 선택형 기타 지침·이전 대화 Context, 문단별 번역 보기(문단을 누르면 원문), 대조·수정, 말투·단어 자동 수집, 설정 백업을 추가합니다. 기억 서재(장기 기억 모듈)와 함께 쓰면 방의 단어장이 기억 번역에 쓰이고, 저장된 응답 번역으로 한국어 낱말 회상이 됩니다.",
+    "runtime": "client",
+    "enabled": false,
+    "capabilities": [
+      "full_page_access"
+    ],
+    "jsPath": "extension.js"
+  }
+}
