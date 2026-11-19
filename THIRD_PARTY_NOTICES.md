@@ -1,6 +1,6 @@
 # Third-party notices
 
-As a whole, this extension is licensed under the GNU Affero General Public License v3.0 (`AGPL-3.0-only`, see `LICENSE`), Copyright (c) 2026 mallang0723. Part of it is derived from Marinara Engine (AGPL-3.0), and `src/vendor/tt-1.10.0/extension.js` contains Marinara Engine code (see the last two sections). The parts listed below also keep their own copyright and notices; the permission of the translation tool's author to port and follow updates stays as stated.
+As a whole, this extension is licensed under the GNU Affero General Public License v3.0 (`AGPL-3.0-only`, see `LICENSE`), Copyright (c) 2026 mallang0723. Part of it is derived from Marinara Engine (AGPL-3.0), and `src/vendor/tt-1.10.0/personal-extension/extension.js` contains Marinara Engine code (see the last two sections). The parts listed below also keep their own copyright and notices; the permission of the translation tool's author to port and follow updates stays as stated.
 
 ## Translation Tools 1.8.0 (tlsiddl/marinara-translation-tools)
 

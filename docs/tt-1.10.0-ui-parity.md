@@ -1,18 +1,19 @@
-# 원작 화면 동등성 표 — 번역 프리셋·단어장 1.10.0 → LV-Translator 0.5.1
+# 원작 화면 동등성 표 — 번역 프리셋·단어장 1.10.0 → LV-Translator 0.5.2
 
 원작: `tlsiddl/marinara-translation-tools` `0ff1338`(1.10.0). 원작 파일은 `src/vendor/tt-1.10.0/`에 **바이트 그대로** 들어 있고(`npm run verify:original`: 파일 9개, 바이트 동일 9, 패치 0), 호스트 차이는 전부 `src/host-emu/`(어댑터)에서 흡수한다. 원작 `extension.js`는 통째로 실행된다(화면·DOM·CSS·문구는 원작의 코드 그대로).
 
-표기: **있음** = 원작 코드 그대로 실행됨 / **대역** = 호스트 쪽 입구를 얇게 만들어 같은 동작을 냄 / **없음** = 옮기지 못함(이유). 확인: ✅ Chromium에서 가짜 호스트로 직접 확인(`node scripts/qa-original.mjs`), ⚠️ 코드는 원작 그대로이나 이 환경에선 미확인.
+표기: **있음** = 원작 코드 그대로 실행됨 / **대역** = 호스트 쪽 입구를 얇게 만들어 같은 동작을 냄 / **숨김** = 루미버스에서 정말 동작하지 못해 화면에서 뺌(빠게뜨 결정 11-19: 못 쓰는 버튼 제거) / **없음** = 옮기지 못함(이유). 확인: ✅ Chromium에서 가짜 호스트로 직접 확인(`node scripts/qa-original.mjs`), ⚠️ 코드는 원작 그대로이나 이 환경에선 미확인.
 
-## 없음 (멈추고 알림: 결정 필요)
+## 숨김 · 없음
 
-| # | 원작 요소 | 이유 |
+| # | 원작 요소 | 처리 |
 |---|---|---|
-| N2 | "후처리 후 번역" 스위치의 효과 | Marinara 후처리 단계(`postProcessingPending`)가 Lumiverse에 없다. 스위치는 보이나 효과 없음 |
-| N3 | 대화 모드의 설정 버튼·메뉴(`.ptx-act-btn`) | Lumiverse에는 대화 모드가 없어(채팅 행의 `mode`는 항상 roleplay) 나타나지 않는다 |
-| N4 | 게임 모드 번역(원작 `MARINARA_GAME_TRANSLATION`) | Lumiverse에 게임 모드 없음 |
+| N2 | "후처리 후 번역" 스위치 | **숨김**(빠게뜨 결정 11-19: 못 쓰는 버튼 제거). Marinara 후처리 단계(`postProcessingPending`)가 Lumiverse에 없어 켜도 효과가 없다. 스위치 줄만 덧씌움 CSS로 가리고(`src/host-emu/shim-css.ts`) 입력칸은 폼에 그대로 둔다(꺼진 값으로 읽힘). 원작 파일 무수정 |
+| N3 | 대화 모드의 설정 버튼·메뉴(`.ptx-act-btn`) | **숨김**(빠게뜨 결정 11-19). Lumiverse에는 대화 모드가 없어(채팅 행의 `mode`는 항상 roleplay) 원작이 이 버튼을 그리지 않는다 — 따로 가릴 것이 없다 |
+| N4 | 게임 모드 번역(원작 `MARINARA_GAME_TRANSLATION`) | **숨김**(빠게뜨 결정 11-19). Lumiverse에 게임 모드가 없고 채팅 행이 게임이 아니라 화면 요소가 없다 |
 | N9a | **브라우저가 닫혀 있어도 응답이 번역되는 서버 워커 보조**(0.5.1 할 일 2) | 미구현. 원작 `extension.js`는 브라우저 스크립트라서 서버(Bun)에서 돌리려면 진짜 DOM이 필요하다(문단 단위 `collectUnits`가 `querySelectorAll`·`splitText`·`replaceWith` 등을 쓴다). 서버 번역이 원작과 같은 키·같은 결과를 내려면 `linkedom`/`happy-dom` 같은 DOM 구현을 개발 의존성으로 넣어 `dist/backend.js`에 묶어야 하는데, 의존성 설치가 이 환경에서 차단돼 시도하지 못했다. 자체 DOM을 새로 짜는 것은 "원작 코드 그대로"에 어긋나 하지 않았다. 지금은 브라우저가 열려 있을 때만(원작의 `catchUpLatest`가 화면 복귀·채팅 열기 때 놓친 최신 답변을 보충) 번역된다 |
 | N9b | 0.4.0의 **번역 지침 묶음·제외 규칙(HTML·상태창 보호)을 응답 번역에 적용** | 응답 번역은 원작 엔진이 하므로 얹을 곳이 없다(한 메시지에 두 엔진 불가). 묶음·제외 규칙·HTML/코드 보호는 LV 패널에 남아 **내 메시지 번역에만** 적용된다. 응답 번역의 단어장·기타 지침·말투는 원작 화면(설정)에서 한다. 끊긴 번역 이어서 하기·번역 단위(whole/paragraph)는 원작의 문단 번역·"전체 다시 번역"으로 대체 |
+
 
 ## 대역 (얇은 입구)
 
@@ -28,8 +29,8 @@
 | A8 | 영어 원문 재작성 저장(`PATCH /messages/:id {content}`) | `updateMessage({content})` ⚠️ 활성 스와이프가 바뀌는지는 실호스트 확인 필요 |
 | A9 | 확장 저장소(`marinara.storage`, `/api/personal-extensions`) | 사용자 저장소 파일 `tt-config.json` |
 | A10 | 활성 채팅 id(localStorage `marinara-active-chat-id`) | 주소(`/chat/<id>`)를 0.7초마다 읽어 그 키에 대한 읽기만 대역 |
-| A11 | React Query 캐시 읽기·갱신 | 없는 것으로 처리(원작이 없을 때의 경로로 직접 조회). 스와이프·수정은 DOM 변화로 감지 |
-| A12 | 대화 전체 조회 | 원작의 "번역 안 된 메시지 모두 번역"·스캔·문맥은 끝에서 N개(최대 1000)만 읽는다. 1000개보다 앞의 메시지는 "모두 번역"이 건드리지 않는다 |
+| A11 | React Query 캐시 읽기·갱신(`rememberMessage`·`onCacheEvent`·`scheduleRefill`) | 원작은 앱의 React Query 클라이언트를 React 섬유에서 찾아 그 메시지 목록을 읽고 갱신을 듣는다. 루미버스에는 없어서 **같은 모양의 작은 캐시**(`src/host-emu/message-cache.ts`)를 `document.body` 아래 숨은 요소의 `__reactContainer$…`에 달아 원작이 찾게 한다(원작 무수정). 원작이 읽은 행이 이 캐시에 들어가고, 백엔드가 `MESSAGE_EDITED`·`MESSAGE_SWIPED`·`SWIPE_EDITED`·`MESSAGE_SENT`·`MESSAGE_DELETED`를 `msg_event`로 넘겨 행을 바꾼다 → 원작의 `onCacheEvent`가 돌아 `rememberMessage`(기록 교체·삭제)·`scheduleRefill`(수정된 번역 메시지의 새 문단만 번역)이 일한다. 읽는 도중 일어난 이벤트가 더 새 것이므로 늦게 도착한 읽기 결과는 그 행을 덮지 않는다. 연 뒤 수정·스와이프에서 낡은 스냅샷으로 원문을 덮어쓰던 문제(0.5.1)가 이것으로 닫힌다 ✅(브라우저 QA: 옛 코드에서 실패, 지금 통과) |
+| A12 | 대화 전체 조회 | **사용자가 누른** "번역 안 된 메시지 모두 번역"만 끝에서 최대 1000개를 읽는다(원작 `api()`가 `credentials:'same-origin'`을 보내는 것으로 구분). 원작이 생성 뒤 자동으로 부르는 한도 없는 읽기(`messageRows`·`messagesUrl`)는 끝 16개로 줄인다(`AUTO_TAIL`). 저장 때 메시지 찾기는 끝 16 → 60 → (그래도 없으면) 1000 한 번 읽은 것을 15초간 재사용(이벤트로 갱신). 1000개보다 앞의 메시지는 "모두 번역"이 건드리지 않는다 |
 | A13 | 캐릭터 카드·페르소나·로어북 읽기 | 새 권한 `characters`·`personas`·`world_books`(재승인 필요). 로어북 연결은 캐릭터의 `world_book_ids`·페르소나의 연결 책을 `activeLorebookIds`로 합성(원작의 chat/persona 범위 규칙은 근사) |
 
 ## 있음 (원작 코드 그대로)
@@ -73,5 +74,20 @@
 |---|---|---|
 | A14 | **N6 내 메시지 번역** | 입력창 번역 버튼·보내기 전 번역이 원작의 `/api/translate` 처리(`routedFetch`: 유저 입력 번역 프롬프트, 단어장, 기타 지침, 이전 대화)를 거친다. Marinara가 그 프롬프트를 두는 "기본 프롬프트 칸" 두 개를 원작 설정 화면 컨테이너에 **숨겨 둔다**(`src/host-emu/dom-bridge.ts`). 원작이 고른 프리셋을 거기에 써 넣고, 그 칸의 값이 요청의 `systemPrompt`가 된다. `/translate` 경로가 모델을 부른다(`generate/raw`와 같은 연결·같은 메시지 모양). LV 묶음(묶음 자체의 단어집·추가 지침만)은 시스템 프롬프트 뒤에, 제외 규칙·HTML/코드 보호는 앞뒤에 얹는다(원작이 긴 프롬프트를 `generate/raw`로 돌려도 같이 간다). 번역 중 "이전 대화 참고"가 읽는 메시지는 끝 40개로 묶는다. 칸은 채팅을 바꾸면 비운다 ✅(브라우저 QA: 채팅 A의 프리셋이 B로 새지 않음) |
 | A15 | **N7 기억 서재 연동(lv-tx v1)** | 원작 기록(`st_translator_tt`)의 보이는 스와이프에서 `metadata.st_translator.pub = {v:1,h,lang,text,paras,edited,at}`를 만든다(`src/adapter/pub.ts`, vendor 밖). `h`는 content의 FNV-1a32(base36), `paras` 키는 원작의 `blockKey`, `text`는 content 순서. 기억 서재 시험 픽스처와 같음을 `tests/pub.test.ts`가 고정한다. 계약 `provides`는 0.4.0대로 `pub-translation@1`·`glossary@1`(기억 서재 쪽이 `reads-pub-translation@1`·`reads-glossary@1`로 읽는다). 단어장은 원작 설정(`tt-config.json`의 채팅 범위, 없으면 기본)에서 `chat.metadata.st_translator.glossary`로 공개. 스와이프·수정 때 `pub`을 맞춘다 |
-| A16 | **N8 0.4.0 번역 기록 변환** | 채팅을 열어 원작이 메시지를 읽을 때(끝에서 N개만) 0.4.0 `st_translator.entries`의 **문단 단위·완료** 기록을 원작 기록으로 한 번 옮겨 `st_translator_tt`에 저장한다(60개 이하로 읽을 때만 저장. "모두 번역" 같은 큰 읽기는 메모리에서만 옮기고 쓰지 않는다). 이미 원작 기록이 있으면 건드리지 않고, 0.4.0 기록은 지우지 않는다. 통째 번역·부분 번역·문단 수가 안 맞는 기록은 옮기지 않는다(원작 화면에 안 나온다). ⚠️ 문단은 원작이 화면에 없는 메시지를 다룰 때 쓰는 방식(`fallbackRoot`)으로 찾으므로 렌더 결과가 원문과 다른 메시지(HTML 카드 등)는 일부 문단이 안 이어질 수 있다 |
+| A16 | **N8 0.4.0 번역 기록 변환** | 원작이 메시지를 읽을 때(끝에서 N개만) 0.4.0 `st_translator.entries`의 **문단 단위·완료** 기록을 원작 기록으로 옮긴다. **60개 이하로 읽을 때만 `st_translator_tt`에 저장**한다 — 채팅을 열 때의 80개 읽기와 "모두 번역" 같은 큰 읽기는 메모리에서만 옮기고 쓰지 않으며, 저장은 16·40·60개 읽기·화면에 들어온 옛 메시지 조회(A19)·개별 조회 때 부수적으로 일어난다(손실 없음). 이미 원작 기록이 있으면 건드리지 않고, 0.4.0 기록은 지우지 않는다. 통째 번역·부분 번역·문단 수가 안 맞는 기록은 옮기지 않는다(원작 화면에 안 나온다). ⚠️ 문단은 원작이 화면에 없는 메시지를 다룰 때 쓰는 방식(`fallbackRoot`)으로 찾으므로 렌더 결과가 원문과 다른 메시지(HTML 카드 등)는 일부 문단이 안 이어질 수 있다 |
 | A17 | **스와이프별 `pub`** | 번역 기록은 스와이프별이고 `pub`은 보이는 스와이프 것만이다. 0.4.0은 끝까지 번역된 메시지만 공개했지만 원작 기록은 문단 단위로 쌓이므로 일부만 번역된 메시지도 번역된 문단만으로 `pub`이 만들어진다(안 된 문단은 원문 그대로 `text`에 들어간다). 스와이프를 넘기거나 수정하면 `MESSAGE_SWIPED`·`MESSAGE_EDITED`·`SWIPE_EDITED`에서 맞추고, 기록이 없는 스와이프면 지운다 |
+
+## 0.5.2에서 더한 것 (허니 SYHO-229 조건 해소)
+
+| # | 항목 | 내용 |
+|---|---|---|
+| A18 | **원작 단어장 이전·공개 가드** (조건 2) | 0.4.0의 채팅별·기본 단어장(묶음 단어 포함, 0.4.0이 공개하던 그대로)을 원작 설정(`tt-config.json`)으로 **한 번** 옮긴다(원작이 처음 설정을 읽는 `storage.get` 안에서, 표식 `lvMigrations.glossary052`는 `config` 밖). 원작에 이미 있는 단어장은 덮지 않고, 범위(scope)가 없던 채팅은 원작 기본값을 바탕으로 새로 만든다(원작 범위는 기본값을 상속하지 않는다). `translator.json` 원본은 그대로. 또 원작 단어장이 빈 동안엔 이미 공개된 단어장을 `""`로 덮지 않는다(`planGlossary`). 시험: `tests/glossary-migration.test.ts`, `tests/emu-backend.test.ts` |
+| A19 | **화면에 들어온 옛 메시지** (e) | 연 뒤 읽기(80개)에 안 든 메시지가 화면에 있으면(목록 끝 2개는 새 메시지라 제외) 그 id만 모아 백엔드에 묻는다: 끝 200개 안에서 찾고, 못 찾은 것이 있으면 한 번 500개까지. 답은 원작 캐시(A11)에 들어가 저장된 번역이 그려지고 번역 버튼이 동작한다. 끝 500개보다 앞은 못 찾아 그대로 비어 있다(전체 조회 대신). ✅(브라우저 QA: 읽기 80·200) |
+| A20 | **문맥 "번역문 포함"** (c) | 원작 기록(`extra.paraTranslate`)에서 Marinara의 `extra.translation`(번역 문단을 순서대로)과 `extra.translationSource`(만든 원문)를 만들어 준다 — 원작의 "내 메시지 번역" 문맥이 읽는 자리. 번역 서식 표지(`<x1>`·`⟪1⟫`)는 뺀다. 응답(문단) 번역 문맥은 원작이 기록에서 직접 만들어 원래 동작 ✅ |
+| A21 | **"채팅 설정 유지" 프리셋** (a) | 이 프리셋은 "채팅에 직접 쓴 번역 프롬프트"를 쓴다. 0.4.0이 채팅별로 저장한 `outgoingPrompt`·`incomingPrompt`를 채팅의 `translationPrompt`·`translationOutputPrompt`로 넘기고(내 메시지 쪽 숨은 칸에도 채움) 원작이 그대로 읽는다. 값이 비면 원작 기본 프롬프트(`BASE_PROMPT`)로 동작하므로 선택지는 숨기지 않았다. 0.5.x에는 이 값을 고치는 화면이 없다(0.4.0에서 쓴 값만 이어진다) |
+| h | 채팅 전환 감지(원작은 이벤트로 감지) | **대역**: 0.7초마다 주소를 읽고 `history`를 감싼다(A10). 동작한다 |
+| i | "기본 번역 버튼도 최신 프리셋"(원작 README) | **호스트에 없음**: Marinara의 통째 번역 버튼 기능이다. Lumiverse에는 그 버튼이 없고 번역 버튼은 원작의 문단 번역을 연다(항상 지금 고른 프리셋) |
+| b | 번역 공급자 Google/DeepL/DeepLX | **해당 없음(숨길 화면 없음)**: 원작 설정 화면에는 공급자 선택·키 칸이 없다. Marinara 채팅 설정(`translationProvider`·`deeplApiKey`)에 있던 것이라 Lumiverse에 대응 화면이 없다. 항상 AI(`translationProvider:'ai'`)이고 문단 번역만 동작한다(A6) |
+| g | `/swipes`·metadata PATCH·extra의 `translation` | **해당 없음(그 기능을 쓰는 버튼 없음)**: `/swipes`는 원작의 AI 아닌 공급자 경로(통째 번역)에서만 부르고 문단 번역은 그 앞에서 빠져나간다. `PATCH /metadata`는 "채팅 기본 번역 끄기/켜기" 확인 응답일 뿐(A5), `extra.translation`은 A20으로 만든다 |
+| d | 그룹 채팅 화자 이름·말투 자료 | **미해결(호스트 사실 부족)**: 원작은 메시지별 `characterId`와 채팅의 `characterIds`(최대 12)로 화자 이름·말투 자료(최대 6)를 만든다. 스핀들 문서(`lumiverse-spindle-types` 0.6.59)는 채팅의 그룹 구성원 목록과 메시지별 캐릭터 id를 알려 주지 않는다(`ChatDTO`는 `character_id` 하나, 메시지엔 `name`뿐). 추측하지 않고 지금처럼 채팅의 대표 캐릭터 하나로 둔다. 화면 요소가 아니라 문맥 속 이름 표기라 숨길 것이 없다 |
+

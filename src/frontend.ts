@@ -18,7 +18,9 @@ import { checkMarkers, ExcludeRuleError, MARKER_INSTRUCTION, parseTags, protect,
 import { parseGlossary } from './translate/glossary';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
-import type { HostBridge } from './host-emu/api';
+import type { HostBridge, MessageRow } from './host-emu/api';
+import { MessageCache } from './host-emu/message-cache';
+import { watchVisibleMessages } from './host-emu/visible-messages';
 import { createSettingsHost, nativePrompts, startOriginal } from './host-emu/boot';
 import { GenerationDriver, GenerationHub } from './host-emu/generation';
 import type { MarinaraStorage } from './host-emu/runtime';
@@ -167,11 +169,24 @@ export function setup(ctx: SpindleFrontendContext) {
   const CONTEXT_READ_TAIL = 40;
   let outgoingInFlight = 0;
   const hub = new GenerationHub();
+  /** The message list the original takes from "the app's cache": rows read for it, kept current by the backend's message events. */
+  const cache = new MessageCache();
   const bridge: HostBridge = {
     getChat: (c) => call('getChat', [c]),
-    // The original's "이전 대화 참고" asks for the chat without a limit; while my message is being translated only the end is read.
-    listMessages: (c, n) => call('listMessages', [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0)]),
-    getMessage: (c, m) => call('getMessage', [c, m]),
+    // `n` 0 is a read with no limit: the original's "모두 번역" (the whole chat, at most 1000) or its own background read after a
+    // generation (`auto`: the backend answers with the end of the chat). While my message is being translated only the end is read.
+    listMessages: async (c, n, auto) => {
+      const since = cache.mark();
+      const rows = await call<MessageRow[]>('listMessages', [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0), auto === true]);
+      cache.seed(c, rows, since);
+      return rows;
+    },
+    getMessage: async (c, m) => {
+      const since = cache.mark();
+      const row = await call<MessageRow>('getMessage', [c, m]);
+      cache.seed(c, [row], since);
+      return row;
+    },
     updateContent: (c, m, content) => call('updateContent', [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call('patchExtra', [c, m, patch, swipe]),
     generateRaw: (req, signal) => call('generateRaw', [req], signal),
@@ -190,9 +205,19 @@ export function setup(ctx: SpindleFrontendContext) {
   };
   const original = startOriginal({
     bridge,
+    cache,
     storage: emuStorage,
     activeChatId: () => chatId,
     addStyle: (css) => ctx.dom.addStyle(css),
+  });
+  const visible = watchVisibleMessages({
+    chat: () => chatId,
+    known: (c, id) => cache.has(c, id),
+    lookup: async (c, ids) => {
+      const since = cache.mark();
+      cache.seed(c, await call<MessageRow[]>('messagesFor', [c, ids]), since);
+    },
+    log: (text, error) => console.warn(`[translator] ${text}`, error),
   });
   const settingsElement = createSettingsHost();
   const settingsHost = { element: settingsElement, ...nativePrompts(settingsElement) };
@@ -233,6 +258,8 @@ export function setup(ctx: SpindleFrontendContext) {
     const settings = store ? settingsFor(store, forChat) : DEFAULT_SETTINGS;
     const row = await bridge.getChat(forChat);
     const connectionId = String(row.metadata?.translationConnectionId ?? '');
+    // The chat's own prompts (0.4.0 kept them per chat): the original's "채팅 설정 유지" preset means these.
+    settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ''), String(row.metadata?.translationOutputPrompt ?? ''));
     const held = protect(text, settings);
     // The prompt lives in the original's field (a hidden one here; in Marinara it is the 유저 입력 번역 프롬프트 field).
     let systemPrompt = settingsHost.prompts().outgoing.trim();
@@ -267,7 +294,10 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function resetChat(next: string | null): void {
     // Before the original sees the new chat id (it reads it from here): the old chat's prompt must not stay in its fields.
-    if (next !== chatId) settingsHost.reset();
+    if (next !== chatId) {
+      settingsHost.reset();
+      visible.reset();
+    }
     chatId = next;
     renderDraftButton();
     renderPanel();
@@ -357,7 +387,7 @@ export function setup(ctx: SpindleFrontendContext) {
     id: 'translator',
     title: '양방향 번역',
     shortName: '번역',
-    description: '양방향 번역: 프리셋, 단어장, 자동 번역, 이어서 번역',
+    description: '양방향 번역: 문단 번역 보기·대조·수정, 프리셋, 단어장, 응답·내 메시지 번역(원작 Translation Tools 1.10.0)',
     keywords: ['translate', 'translation', 'glossary', '번역', '단어장'],
     headerTitle: '양방향 번역',
     iconSvg: ICON,
@@ -595,6 +625,11 @@ export function setup(ctx: SpindleFrontendContext) {
         renderDraftButton();
         return;
       }
+      case 'msg_event': {
+        if (msg.kind === 'upsert') cache.upsert(msg.chatId, msg.row as MessageRow);
+        else cache.remove(msg.chatId, msg.messageId);
+        return;
+      }
       case 'emu_result': {
         const waiter = rpc.get(msg.id);
         if (!waiter) return;
@@ -615,6 +650,7 @@ export function setup(ctx: SpindleFrontendContext) {
     clearInterval(routeTimer);
     document.removeEventListener('visibilitychange', onVisible);
     window.removeEventListener('beforeunload', onBeforeUnload);
+    visible.destroy();
     original.stop();
     offEvents.forEach((off) => off());
     offBackend();

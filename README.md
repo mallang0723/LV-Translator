@@ -1,14 +1,22 @@
 # 양방향 번역 — Lumiverse 확장
 
-[Lumiverse](https://lumiverse.chat/)에서 응답과 내 메시지를 AI로 번역하는 양방향 번역 Spindle 확장입니다. Marinara Engine의 번역 기능을 참고해 만들었고, 아래 세 가지를 합쳤습니다.
+[Lumiverse](https://lumiverse.chat/)에서 응답과 내 메시지를 AI로 번역하는 양방향 번역 Spindle 확장입니다. Marinara Engine의 번역 기능을 참고해 만들었고, 아래를 합쳤습니다.
 
-- Marinara Engine의 기본 AI 번역: 응답 자동 번역, 내 메시지 번역, 번역문만 보기, 입력창 번역 버튼
-- 번역 프리셋·단어장 **1.8.0** ([tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools), 원작 [minikkuen/Marinara-Translation-Tools](https://github.com/minikkeuen/Marinara-Translation-Tools)): 프리셋 전체, 채팅별 단어장, 기타 지침과 보관함, 대사 지침, 이전 대화 참고, 번역 고치기. 원저작자의 허락을 받아 업데이트를 이어서 따라갑니다. 이 확장은 원본이 아니며 원저작자의 것을 제 것이라 주장하지 않습니다.
-- **끊긴 번역 이어서 하기**와 긴 지문 나눠 번역 (번역 다듬기 0.2.3에서 착안, 코드는 새로 작성)
-
-여기에 Lumiverse용 기능을 더했습니다: 번역하지 않을 부분(상태창 등) 지정, HTML 구조 보존, 번역문의 HTML 렌더링.
+- 번역 프리셋·단어장 **1.10.0**의 화면과 기능([tlsiddl/marinara-translation-tools](https://github.com/tlsiddl/marinara-translation-tools), 원작 [minikkuen/Marinara-Translation-Tools](https://github.com/minikkeuen/Marinara-Translation-Tools)): 문단별 번역 보기, 대조·수정(문단별 **다시 번역**), 프리셋, 채팅별 단어장, 기타 지침과 보관함, 대사 지침, 이전 대화 참고, 말투·단어·세계관 자동 정리, NPC 자동 수집, 설정 백업. 원작 `extension.js`를 `src/vendor/tt-1.10.0/`에 **바이트 그대로** 두고 통째로 실행합니다(`npm run verify:original`로 원작과 비교). 호스트 차이는 `src/host-emu/`에서만 흡수합니다. 원저작자의 허락을 받아 업데이트를 이어서 따라가며, 이 확장은 원본이 아니고 원저작자의 것을 제 것이라 주장하지 않습니다.
+- Marinara Engine의 기본 AI 번역에서 가져온 것: 응답 자동 번역, 내 메시지 번역, 입력창 번역 버튼
+- Lumiverse용으로 더한 것: 번역하지 않을 부분(상태창 등) 지정, HTML 구조 보존(내 메시지 번역), 번역 지침 묶음, 기억 서재 연동(lv-tx v1)
 
 Lumiverse에는 기본 채팅 번역 기능이 없어서, 번역은 이 확장이 모두 맡습니다.
+
+## 0.5.2
+
+허니 검수(SYHO-229) 조건 해소. 원작 `extension.js`는 그대로다(`verify:original` 9개 동일).
+
+- **연 뒤 수정·스와이프가 낡은 원문을 덮어쓰지 않습니다.** 호스트의 메시지 변경(`MESSAGE_EDITED`·`SWIPED`·`SWIPE_EDITED`·`SENT`·`DELETED`)을 원작이 보는 메시지 캐시로 넘깁니다. "영어 원문도 같이 고치기"가 수정을 지우던 문제, 스와이프를 넘긴 뒤 번역하면 다른 스와이프 기록이 섞이던 문제가 닫힙니다.
+- **0.4.0 단어장이 원작 설정으로 한 번 옮겨집니다**(원본 보존). 원작 단어장이 비어 있는 동안엔 기억 서재에 이미 공개된 단어장을 비우지 않습니다.
+- **채팅 전체를 자동으로 읽지 않습니다.** 생성 뒤 원작의 자동 읽기는 끝 16개로 줄었고, 1000개까지 읽는 것은 사용자가 누른 "번역 안 된 메시지 모두 번역"뿐입니다.
+- **되살린 것:** 화면에 들어온 옛 메시지(끝 80개 밖)의 저장된 번역·번역 버튼, 문맥 "번역문 포함", "채팅 설정 유지" 프리셋(0.4.0 채팅별 프롬프트 연결). **숨긴 것:** 후처리 후 번역(루미버스에 후처리 단계가 없음). 정리는 [docs/tt-1.10.0-ui-parity.md](docs/tt-1.10.0-ui-parity.md).
+- 아직 못 한 것: 그룹 채팅의 화자 이름·말투 자료(호스트가 구성원·메시지별 캐릭터 id를 알려 주지 않음), 브라우저가 닫혀 있을 때의 서버 번역.
 
 ## 0.5.1
 
@@ -57,6 +65,8 @@ Translation Tools 1.8.0을 Lumiverse판으로 옮겼습니다. 프리셋·요청
 3. 서랍(drawer)의 **번역** 탭, 또는 입력창 Extras 메뉴의 **번역 설정**에서 설정합니다.
 
 ## 사용법
+
+> 0.5.0부터 응답 번역의 화면(번역문 표시·대조·수정·프롬프트·단어장·지침·말투 정리)은 원작 1.10.0 화면이고, 아래 "메시지별 버튼"·"문단 대조"·"프롬프트 프리셋"·"단어장"·"긴 지문" 절은 0.4.0 기준 설명이라 현행과 다릅니다. 현행은 위 버전별 안내와 [docs/tt-1.10.0-ui-parity.md](docs/tt-1.10.0-ui-parity.md)를 보세요.
 
 연결 선택은 바로 저장되고, 나머지 설정은 **저장** 버튼을 눌러야 적용됩니다. 저장하지 않은 변경이 있으면 저장 줄이 강조되고 "저장하지 않은 변경이 있어요"가 표시되며, 번역을 시작하거나 페이지를 떠날 때 한 번 더 물어봅니다.
 

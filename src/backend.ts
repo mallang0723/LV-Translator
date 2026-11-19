@@ -8,7 +8,8 @@ import { classifyPeer, glossaryText, handshake, PEER_ID, type PeerState, planGlo
 import { buildPubFromTt, keptTagNames } from './adapter/pub';
 import { deleteBundle, saveBundle } from './bundles';
 import { type ConnectionHint, friendlyError, resolveConnection } from './connection';
-import { createEmuBridge, type EmuHost, TT_KEY } from './host-emu/backend-ops';
+import { createEmuBridge, type EmuHost, eventMsg, eventRow, TT_KEY, WideReads } from './host-emu/backend-ops';
+import { planGlossaryMigration } from './adapter/migrate';
 import {
   type ConnectionSummary,
   effectiveConnectionId,
@@ -91,7 +92,7 @@ async function readTtConfig(uid: Uid, fresh = false): Promise<TtConfig> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.5.1';
+const SELF_VERSION = '0.5.2';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -123,6 +124,23 @@ try {
   spindle.rpcPool?.sync('contract', handshake(SELF_VERSION, PROVIDES), { requires: [] });
 } catch (e) {
   spindle.log.warn(`[translator] contract handshake not published: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+/**
+ * 0.5.2, once: the glossaries 0.4.0 kept (per chat and the default, with the bundle's words merged as 0.4.0 published them) become the
+ * original's own, in `tt-config.json`, before the original first reads that file. translator.json is left as it was. Done before the
+ * original loads because its next save would otherwise overwrite what is added here; never replaces a glossary the original already has.
+ */
+async function migrateGlossary(uid: Uid): Promise<void> {
+  try {
+    const file = await readTtConfig(uid, true);
+    const next = planGlossaryMigration(file as Record<string, unknown>, await loadStore(uid), new Date().toISOString());
+    if (!next) return;
+    await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
+    configCache.set(userKey(uid), { at: Date.now(), value: next as TtConfig });
+  } catch (e) {
+    spindle.log.warn(`[translator] 0.4.0 glossary not carried over (will retry): ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 let warnedGlossary = false;
@@ -215,12 +233,42 @@ async function refreshPub(uid: Uid, chatId: string, raw: { id?: string; content?
   await (spindle.chat.updateMessage as unknown as (id: string, mid: string, patch: Record<string, unknown>) => Promise<void>)(chatId, raw.id, patch);
 }
 
-for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED'] as const) {
+/** Wide reads of old messages (src/host-emu/backend-ops.ts WideReads), shared by the stand-in's calls and kept current from the events below. */
+const wideReads = new WideReads();
+
+/**
+ * A message changed after the page read it (edit, swipe, new): the page's message cache follows, which is the only way the
+ * original (it takes its message list from a cache it expects the app to keep) learns of it. See src/host-emu/message-cache.ts.
+ */
+async function forwardMessage(uid: Uid, chatId: string, raw: Record<string, any>): Promise<void> {
+  if (!raw?.id) return;
+  wideReads.update(chatId, eventMsg(raw));
+  let character: string | null = null;
+  try {
+    character = (await spindle.chats.get(chatId, uid))?.character_id ?? null;
+  } catch {
+    // the speaker is a nicety
+  }
+  const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags);
+  send({ type: 'msg_event', chatId, kind: 'upsert', row: eventRow(chatId, raw, character, kept) }, uid);
+}
+
+for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAGE_SENT'] as const) {
   spindle.on(event as never, ((payload: { chatId?: string; messageId?: string; message?: Parameters<typeof refreshPub>[2] }, userId?: string) => {
     if (!payload?.chatId || !payload.message) return;
-    void refreshPub(userId, payload.chatId, { ...payload.message, id: payload.message.id ?? payload.messageId }).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
+    const message = { ...payload.message, id: payload.message.id ?? payload.messageId };
+    void forwardMessage(userId, payload.chatId, message as Record<string, any>).catch((e) => spindle.log.warn(`[translator] message event not forwarded: ${errorText(e)}`));
+    if (event === 'MESSAGE_SENT') return;
+    void refreshPub(userId, payload.chatId, message).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
   }) as never);
 }
+
+spindle.on('MESSAGE_DELETED' as never, ((payload: { chatId?: string; messageId?: string; message?: { id?: string } }, userId?: string) => {
+  if (!payload?.chatId) return;
+  wideReads.drop(payload.chatId);
+  const id = payload.messageId ?? payload.message?.id;
+  if (id) send({ type: 'msg_event', chatId: payload.chatId, kind: 'delete', messageId: id }, userId);
+}) as never);
 
 // ---- host stand-in for the original screens ----
 
@@ -243,6 +291,7 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
       return;
     }
     if (msg.op === 'storage.get') {
+      await migrateGlossary(uid);
       reply({ ok: true, data: await readTtConfig(uid, true) });
       return;
     }
@@ -271,8 +320,10 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
         } catch {
           // no connection at all: the original then shows its own "번역 연결을 지정해 주세요" message
         }
-        return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate };
+        return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate, outgoingPrompt: settings.outgoingPrompt, incomingPrompt: settings.incomingPrompt };
       },
+      wide: wideReads,
+      keptTags: async () => keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags),
       projection: (chatId) => projectionFor(uid, chatId),
       async legacy(chatId) {
         const store = await loadStore(uid);

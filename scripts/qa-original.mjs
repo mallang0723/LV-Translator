@@ -97,9 +97,11 @@ if (await barCompare.count()) {
 // createEmuBridge on a fake spindle host. Same original, same screens, now through the RPC the extension really uses. ----
 writeFileSync(join(work, 'entry2.ts'), `
 import { setup } from '${root}src/frontend';
-import { createEmuBridge } from '${root}src/host-emu/backend-ops';
+import * as backendOps from '${root}src/host-emu/backend-ops';
 import { normalizeStore, sourceHash } from '${root}src/shared';
-(window as any).LVInt = { setup, createEmuBridge, normalizeStore, sourceHash };
+import { blockKey } from '${root}src/adapter/keys';
+// eventRow: how the backend turns a host message event into the row the page's message cache takes (absent before 0.5.2).
+(window as any).LVInt = { setup, createEmuBridge: backendOps.createEmuBridge, eventRow: (backendOps as any).eventRow, blockKey, normalizeStore, sourceHash };
 (window as any).__LVSetup = setup;
 `);
 execFileSync('bun', ['build', join(work, 'entry2.ts'), '--outfile', join(work, 'int.js'), '--target', 'browser'], { stdio: 'inherit' });
@@ -116,7 +118,7 @@ await page2.evaluate(() => {
   window.__writes = [];
   const host = {
     chats: { get: async (id) => ({ id, name: 'QA', character_id: 'ch1', metadata: {} }) },
-    chat: { getMessages: async () => messages, updateMessage: async (c, id, patch) => { window.__writes.push(patch); const m = messages.find((x) => x.id === id); if (patch.metadata_patch) m.metadata = { ...m.metadata, ...patch.metadata_patch }; if (patch.metadata) m.metadata = patch.metadata; if (patch.content) m.content = patch.content; } },
+    chat: { getMessages: async (_c, o) => { (window.__reads ||= []).push(o?.tail ?? null); return o?.tail ? messages.slice(-o.tail) : messages; }, updateMessage: async (c, id, patch) => { window.__writes.push(patch); const m = messages.find((x) => x.id === id); if (patch.metadata_patch) m.metadata = { ...m.metadata, ...patch.metadata_patch }; if (patch.metadata) m.metadata = patch.metadata; if (patch.content) { m.content = patch.content; m.swipes[m.swipe_id] = patch.content; } } },
     characters: { get: async () => ({ name: 'Mina', world_book_ids: [] }) }, personas: { get: async () => ({ name: 'Ethan' }), getActive: async () => null },
     world_books: { list: async () => ({ data: [] }), entries: { list: async () => ({ data: [] }) } },
     generate: { quiet: async (i) => {
@@ -124,6 +126,7 @@ await page2.evaluate(() => {
       const user = i.messages.find((m) => m.role === 'user')?.content ?? '';
       const ids = [...user.matchAll(/<segment id="(\d+)">/g)].map((m) => m[1]);
       if (ids.length) return { content: ids.map((n) => `<segment id="${n}">번역 ${n}</segment>`).join('\n') };
+      if (/^\[Original English\]/.test(user)) return { content: 'Alpha one revised.' }; // 영어 원문도 같이 고치기
       if (/^Translate the following text to /.test(user)) return { content: 'EN: ' + user.split('\n\n').slice(1).join('\n\n') };
       return { content: '{"characters":[],"terms":[]}' };
     } },
@@ -154,7 +157,7 @@ await page2.evaluate(() => {
       } catch (e) { reply({ type: 'emu_result', id: msg.id, ok: false, error: String(e.message || e) }); }
     },
   };
-  localStorage.setItem('translation-presets-glossary-debug', '1'); window.__ops = ops; window.__ctx = ctx; window.__dbg = true; window.__setStorage = (v) => { storage = v; }; window.__emit = (name, p) => (window.__handlers?.[name] || []).forEach((h) => h(p)); window.__messages = messages; window.__cleanup = LVInt.setup(ctx);
+  localStorage.setItem('translation-presets-glossary-debug', '1'); window.__ops = ops; window.__reply = reply; window.__ctx = ctx; window.__dbg = true; window.__setStorage = (v) => { storage = v; }; window.__emit = (name, p) => (window.__handlers?.[name] || []).forEach((h) => h(p)); window.__messages = messages; window.__cleanup = LVInt.setup(ctx);
 });
 await page2.waitForTimeout(2500);
 if (process.env.QA_DEBUG) console.log(await page2.evaluate(() => JSON.stringify({ tab: document.querySelector('#tab')?.innerHTML.slice(0, 400), ls: [...document.querySelectorAll('.mari-message-actions')].length, sec: document.querySelectorAll('[data-chat-settings-section]').length, w: window.__writes })));
@@ -198,7 +201,7 @@ await page2.waitForTimeout(4500); // the original's own start-up catch-up (3 s) 
 const quiet0 = await page2.evaluate(() => window.__quiet.length);
 check('N8: a 0.4.0 translation is shown by the original (view on screen) with no model call', (await page2.locator('[data-message-id="m3"] .ptx-view').count()) >= 1 && quiet0 === 0, `views=${await page2.locator('[data-message-id="m3"] .ptx-view').count()} calls=${quiet0}`);
 check('N8: the converted record was saved beside the 0.4.0 one (which is kept)', await page2.evaluate(() => { const m = window.__messages.find((x) => x.id === 'm3'); return !!m.metadata.st_translator_tt?.['0']?.map && Object.keys(m.metadata.st_translator.entries).length === 1; }));
-await page2.evaluate(() => window.__emit('GENERATION_STARTED', { generationId: 'g1', chatId: 'c1', generationType: 'normal' }));
+await page2.evaluate(() => { window.__reads = []; window.__emit('GENERATION_STARTED', { generationId: 'g1', chatId: 'c1', generationType: 'normal' }); });
 await page2.waitForTimeout(400);
 await page2.evaluate(() => {
   window.__messages.push({ id: 'm2', role: 'assistant', content: 'A second reply, quiet and slow.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
@@ -211,6 +214,9 @@ await page2.waitForTimeout(4500); // NPC auto collect waits 3 s after the genera
 const collectCalls = await page2.evaluate((n) => window.__quiet.slice(n).filter((c) => !c.messages.some((m) => /<segment id=/.test(m.content))).length, quiet0);
 if (process.env.QA_DEBUG) console.log('quiet calls:', JSON.stringify(await page2.evaluate((n) => window.__quiet.slice(n).map((c) => [c.messages.map((m) => m.role + ':' + m.content.slice(0, 70))]), quiet0)));
 check('N1: onGenerated ran the NPC auto collect (말투·단어장 scans) after the generation', collectCalls >= 2, `scan calls=${collectCalls}`);
+const genReads = await page2.evaluate(() => window.__reads.slice());
+console.log(`READS per generation (host getMessages tail sizes, in order): ${JSON.stringify(genReads)}  count=${genReads.length} rows=${genReads.reduce((a, b) => a + (b ?? 0), 0)}`);
+check('0.5.2 cond 3: no read of a whole chat after a generation (every read is screen-sized, at most 60 rows)', genReads.length > 0 && genReads.every((n) => n !== null && n <= 60), JSON.stringify(genReads));
 // Stop: the original must neither translate nor collect
 const quiet1 = await page2.evaluate(() => window.__quiet.length);
 await page2.evaluate(() => window.__emit('GENERATION_STARTED', { generationId: 'g2', chatId: 'c1', generationType: 'normal' }));
@@ -222,6 +228,108 @@ check('N1: after the user pressed Stop nothing is translated and nothing is coll
 await page2.evaluate(() => { window.__emit('GENERATION_STARTED', { generationId: 'g1', chatId: 'c1', generationType: 'normal' }); });
 await page2.waitForTimeout(300);
 check('lease: a generation already taken (by another page) is not replayed again', await page2.evaluate(() => window.__quiet.length) === quiet1);
+
+// ---- 0.5.2 condition 1: a message changed after the chat was opened must reach the original's own cache path ----
+// (hand-made message elements below; the original learns them when it starts, as it does when a chat is opened)
+const paras = (id, list) => page2.evaluate(([id, list]) => {
+  let row = document.querySelector(`[data-message-id="${id}"]`);
+  if (!row) {
+    row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', id);
+    row.innerHTML = '<div><div data-component="MessageContent"></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    document.querySelector('#chat').append(row);
+  }
+  row.querySelector('[data-component="MessageContent"]').innerHTML = list.map((t) => `<p>${t}</p>`).join('');
+}, [id, list]);
+const old = Math.floor(Date.now() / 1000) - 9000;
+const S0 = 'Swipe zero one.\n\nSwipe zero two.', S1 = 'Swipe one first.\n\nSwipe one second.';
+const C0 = 'Alpha one.\n\nBeta two.\n\nGamma three.', C1 = 'Alpha one.\n\nBeta two.\n\nGamma three EDITED.';
+await page2.evaluate(([S0, S1, C0, old]) => {
+  window.__cleanup();
+  window.__auto = false;
+  window.__setStorage({ config: { defaults: { translateMyMessages: false }, chats: {}, presets: [] } });
+  const mk = (id, swipes) => ({ id, role: 'assistant', content: swipes[0], swipes, swipe_id: 0, extra: {}, metadata: {}, send_date: old, swipe_dates: swipes.map(() => old) });
+  window.__messages.push(mk('m6', [C0]), mk('m7', [S0, S1]));
+  window.__wire = (m) => { const { metadata, ...rest } = JSON.parse(JSON.stringify(m)); return { ...rest, extra: { ...rest.extra, spindle_metadata: metadata } }; };
+  window.__feed = (id) => { const m = window.__messages.find((x) => x.id === id); if (LVInt.eventRow) window.__reply({ type: 'msg_event', chatId: 'c1', kind: 'upsert', row: LVInt.eventRow('c1', window.__wire(m), 'ch1') }); };
+}, [S0, S1, C0, old]);
+await paras('m6', C0.split('\n\n')); await paras('m7', S0.split('\n\n'));
+await page2.evaluate(() => { window.__cleanup = window.__LVSetup(window.__ctx); });
+await page2.waitForTimeout(800);
+const tt = (id) => page2.evaluate((id) => window.__messages.find((x) => x.id === id).metadata?.st_translator_tt ?? null, id);
+
+// (1) opened -> edited elsewhere -> 영어 원문도 같이 고치기 keeps the edit
+await page2.locator('[data-message-id="m6"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForFunction(() => window.__messages.find((x) => x.id === 'm6').metadata?.st_translator_tt?.['0'], null, { timeout: 8000 }).catch(() => {});
+await page2.evaluate((C1) => { const m = window.__messages.find((x) => x.id === 'm6'); m.content = C1; m.swipes[0] = C1; window.__feed('m6'); }, C1);
+await paras('m6', C1.split('\n\n'));
+await page2.waitForTimeout(2600); // the original translates only the new paragraph (scheduleRefill, 1.2 s)
+await page2.locator('[data-message-id="m6"] .ptx-bar [data-ptx-act="compare"]').click({ timeout: 4000 }).catch(() => {});
+await page2.waitForSelector('.ptx-compare', { timeout: 3000 }).catch(() => {});
+await page2.locator('.ptx-compare .ptx-cmp-dst textarea').first().fill('수정한 첫 문단').catch(() => {});
+await page2.locator('.ptx-compare [data-sync-src]').check().catch(() => {});
+await page2.locator('.ptx-compare [data-act="save"]').click().catch(() => {});
+await page2.waitForTimeout(1500);
+const m6 = await page2.evaluate(() => window.__messages.find((x) => x.id === 'm6').content);
+check('0.5.2 cond 1: after open -> edit elsewhere -> 영어 원문도 같이 고치기, the edit is kept', /Gamma three EDITED\./.test(m6) && /Alpha one revised\./.test(m6), JSON.stringify(m6));
+check('0.5.2 cond 1: the paragraph added by the edit was translated by the original (scheduleRefill)', await page2.evaluate(() => Object.keys(window.__messages.find((x) => x.id === 'm6').metadata?.st_translator_tt?.['0']?.map ?? {}).length >= 3));
+await page2.locator('.ptx-compare [data-act="cancel"]').click({ timeout: 500 }).catch(() => {});
+
+// (2) opened -> swiped -> translate: the swipe's record holds only that swipe's paragraphs, the other swipe's record is untouched
+await page2.locator('[data-message-id="m7"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForFunction(() => window.__messages.find((x) => x.id === 'm7').metadata?.st_translator_tt?.['0'], null, { timeout: 8000 }).catch(() => {});
+const rec0 = JSON.stringify((await tt('m7'))?.['0']?.map ?? null);
+await page2.evaluate(() => { const m = window.__messages.find((x) => x.id === 'm7'); m.swipe_id = 1; m.content = m.swipes[1]; window.__feed('m7'); });
+await paras('m7', S1.split('\n\n'));
+await page2.waitForTimeout(700);
+await page2.locator('[data-message-id="m7"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForFunction(() => window.__messages.find((x) => x.id === 'm7').metadata?.st_translator_tt?.['1'], null, { timeout: 6000 }).catch(() => {});
+await page2.waitForTimeout(500);
+const t7b = await tt('m7');
+const keys1 = Object.keys(t7b?.['1']?.map ?? {});
+check('0.5.2 cond 1: after a swipe, translating saves a record for that swipe with only its own 2 paragraphs', keys1.length === 2, `swipe1 keys=${keys1.length} swipe0 keys=${Object.keys(t7b?.['0']?.map ?? {}).length}`);
+check("0.5.2 cond 1: the other swipe's record is kept as it was", JSON.stringify(t7b?.['0']?.map ?? null) === rec0 && rec0 !== 'null');
+await page2.waitForTimeout(300);
+// (3) a message older than the opening read (80) that is on screen: its stored translation is drawn, and no whole-chat read is made
+await page2.evaluate(() => {
+  window.__cleanup();
+  const k = LVInt.blockKey;
+  const rec = { v: 1, map: { [k('Old one.')]: '옛 하나', [k('Old two.')]: '옛 둘' }, edited: {}, view: '', at: 1 };
+  const t = Math.floor(Date.now() / 1000) - 99999;
+  window.__messages.unshift({ id: 'm8', role: 'assistant', content: 'Old one.\n\nOld two.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: { st_translator_tt: { 0: rec } }, send_date: t, swipe_dates: [t] });
+  for (let i = 0; i < 90; i++) window.__messages.push({ id: `f${i}`, role: 'user', content: `Filler ${i}.`, swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: t + 1 + i, swipe_dates: [t + 1 + i] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm8');
+  row.innerHTML = '<div><div data-component="MessageContent"><p>Old one.</p><p>Old two.</p></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').prepend(row);
+  window.__reads = [];
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForSelector('[data-message-id="m8"] .ptx-view', { timeout: 7000 }).catch(() => {});
+const oldReads = await page2.evaluate(() => window.__reads.slice());
+check('0.5.2 e: a message older than the opening read shows its stored translation (looked up on screen, small read)', (await page2.locator('[data-message-id="m8"] .ptx-view').count()) >= 1 && oldReads.every((n) => n !== null && n <= 500), JSON.stringify(oldReads));
+// 모두 번역 (the user's own button) still reads up to 1000, and nothing is translated when the user cancels
+await page2.evaluate(() => { window.__reads = []; });
+await page2.locator('#tab .tpg-form [data-tpg-bulk]').click();
+await page2.waitForSelector('.ptx-modal [data-no]', { timeout: 4000 }).catch(() => {});
+const bulkReads = await page2.evaluate(() => window.__reads.slice());
+check('0.5.2 cond 3: 모두 번역 (the user\'s button) keeps its read of up to 1000 rows', bulkReads.includes(1000), JSON.stringify(bulkReads));
+await page2.locator('.ptx-modal [data-no]').click({ timeout: 1000 }).catch(() => {});
+check('0.5.2 N2: the 후처리 후 번역 switch is not drawn (its input stays in the form)', (await page2.locator('#tab .tpg-form input[name="translateAfterPostProcessing"]').count()) === 1 && !(await page2.locator('#tab .tpg-form input[name="translateAfterPostProcessing"]').isVisible()));
+const presetBefore = await page2.evaluate(() => [...document.querySelectorAll('#tab .tpg-form select[name$="PresetId"]')].map((s) => s.value));
+check('0.5.2 a: "채팅 설정 유지" (the chat\'s own prompt) is still offered and selectable as the original has it', await page2.evaluate(() => [...document.querySelectorAll('#tab .tpg-form select[name="incomingPresetId"] option')].some((o) => o.value === 'builtin-inherit')), JSON.stringify(presetBefore));
+await page2.evaluate(() => {
+  window.__cleanup();
+  for (let i = window.__messages.length - 1; i >= 0; i--) if (window.__messages[i].id === 'm8' || /^f\d+$/.test(window.__messages[i].id)) window.__messages.splice(i, 1);
+  document.querySelector('[data-message-id="m8"]')?.remove();
+});
+await page2.evaluate(() => {
+  // back to the settings the N6 checks below were written for
+  window.__cleanup();
+  window.__setStorage({ config: { defaults: { autoCollectEnabled: true, autoCollectEvery: 1, glossary: 'Mina = 미나' }, chats: { c1: { outgoingPresetId: 'custom-qa1', autoCollectEnabled: true, autoCollectEvery: 1, glossary: 'Mina = 미나' } }, presets: [{ id: 'custom-qa1', name: 'QA prompt', prompt: 'CUSTOM-OUT-PROMPT for {{targetLanguage}}.' }] } });
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(500);
 
 // ---- N6: "내 메시지 번역" through the original's own /api/translate handling ----
 await page2.evaluate(() => {
