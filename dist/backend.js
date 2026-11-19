@@ -2338,6 +2338,56 @@ function planGlossaryMigration(file, store, at) {
   }
   return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [GLOSSARY_MARK]: at } };
 }
+var SCOPE_MARK = "scope053";
+var GROUPS = [
+  { name: "free", keys: ["freeContext", "freeContextEnabled"], filled: (o) => filled(o.freeContext), empty: (c) => !filled(c.freeContext) },
+  { name: "voice", keys: ["incomingVoicePrompt", "incomingVoiceEnabled"], filled: (o) => filled(o.incomingVoicePrompt), empty: (c) => !filled(c.incomingVoicePrompt) },
+  {
+    name: "context",
+    keys: ["contextEnabled", "contextIncludeOriginal", "contextIncludeTranslation", "contextIncludeUserInput", "contextMessageCount"],
+    filled: (o) => o.contextEnabled === true,
+    empty: (c) => c.contextEnabled !== true
+  }
+];
+var pick = (from, keys) => Object.fromEntries(keys.filter((k) => (k in from)).map((k) => [k, from[k]]));
+function planScopeMigration(file, store, at) {
+  const marks = isObject2(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
+  if (marks[SCOPE_MARK])
+    return null;
+  const config = isObject2(file.config) ? structuredClone(file.config) : {};
+  let changed = false;
+  const oldDefault = settingsFor(store, null);
+  for (const g of GROUPS) {
+    if (!g.filled(oldDefault))
+      continue;
+    const have = isObject2(config.defaults) ? config.defaults : {};
+    if (!g.empty(have))
+      continue;
+    config.defaults = { ...have, ...pick(oldDefault, g.keys) };
+    changed = true;
+  }
+  for (const chatId of Object.keys(store.chats)) {
+    const old = settingsFor(store, chatId);
+    for (const g of GROUPS) {
+      if (!g.filled(old))
+        continue;
+      const scope = isObject2(config.chats) && isObject2(config.chats[chatId]) ? config.chats[chatId] : null;
+      if (scope) {
+        if (!g.empty(scope))
+          continue;
+        config.chats = { ...config.chats, [chatId]: { ...scope, ...pick(old, g.keys) } };
+        changed = true;
+      } else {
+        const base = isObject2(config.defaults) ? config.defaults : {};
+        if (!g.empty(base) && JSON.stringify(pick(base, g.keys)) === JSON.stringify(pick(old, g.keys)))
+          continue;
+        config.chats = { ...isObject2(config.chats) ? config.chats : {}, [chatId]: { ...base, ...pick(old, g.keys) } };
+        changed = true;
+      }
+    }
+  }
+  return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: at } };
+}
 
 // src/backend.ts
 var STORE_PATH = "translator.json";
@@ -2417,7 +2467,12 @@ try {
 async function migrateGlossary(uid) {
   try {
     const file = await readTtConfig(uid, true);
-    const next = planGlossaryMigration(file, await loadStore(uid), new Date().toISOString());
+    const store = await loadStore(uid);
+    const at = new Date().toISOString();
+    let next = planGlossaryMigration(file, store, at);
+    const rest = planScopeMigration(next ?? file, store, at);
+    if (rest)
+      next = rest;
     if (!next)
       return;
     await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });

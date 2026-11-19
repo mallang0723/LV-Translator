@@ -62,3 +62,57 @@ describe('publishing the glossary', () => {
     expect(planGlossary({}, '', 2)).toBeNull();
   });
 });
+
+import { planScopeMigration } from '../src/adapter/migrate';
+import { withHost } from './helpers/fake-host';
+
+describe('0.4.0 기타 지침·대사 지침·이전 대화 -> the original settings (once, 0.5.3)', () => {
+  const old = { freeContext: '현대 한국 배경', freeContextEnabled: true, incomingVoicePrompt: '[Mina]\n반말', incomingVoiceEnabled: true, contextEnabled: true, contextIncludeUserInput: true, contextMessageCount: 4 };
+
+  test('the default and each chat\'s own 기타 지침 / 대사 지침 / 이전 대화 are copied where the original has none', () => {
+    const out = planScopeMigration({ config: { defaults: { glossary: 'A = B' } } }, store(old, { c1: { freeContext: '중세 판타지', freeContextEnabled: true } }), at)!;
+    const config = out.config as any;
+    expect(config.defaults).toMatchObject({ glossary: 'A = B', freeContext: '현대 한국 배경', freeContextEnabled: true, incomingVoicePrompt: '[Mina]\n반말', incomingVoiceEnabled: true, contextEnabled: true, contextIncludeUserInput: true, contextMessageCount: 4 });
+    expect(config.chats.c1.freeContext).toBe('중세 판타지');
+    expect(config.chats.c1.glossary).toBe('A = B'); // a scope made for the chat starts from the original defaults
+    expect((out.lvMigrations as any).scope053).toBe(at);
+  });
+
+  test('a value the original already has is never overwritten', () => {
+    const file = { config: { defaults: { freeContext: '원작에 있던 것', contextEnabled: true, contextMessageCount: 2 }, chats: { c1: { freeContext: '이 방 것' } } } };
+    const out = planScopeMigration(file, store(old, { c1: { freeContext: '옛 방 것', freeContextEnabled: true } }), at)!;
+    const config = out.config as any;
+    expect(config.defaults.freeContext).toBe('원작에 있던 것');
+    expect(config.defaults.contextMessageCount).toBe(2);
+    expect(config.defaults.incomingVoicePrompt).toBe('[Mina]\n반말'); // the empty group is still filled
+    expect(config.chats.c1.freeContext).toBe('이 방 것');
+  });
+
+  test('the 0.5.2 marker (glossary done) does not stop it, but its own marker does; translator.json (the store) is untouched', () => {
+    const s = store(old);
+    const before = JSON.stringify(s);
+    const file = { config: { defaults: { glossary: 'A = B' } }, lvMigrations: { glossary052: 'earlier' } };
+    const out = planScopeMigration(file, s, at)!;
+    expect((out.config as any).defaults.freeContext).toBe('현대 한국 배경');
+    expect((out.lvMigrations as any)).toEqual({ glossary052: 'earlier', scope053: at });
+    expect(planScopeMigration(out, s, at)).toBeNull();
+    expect(JSON.stringify(s)).toBe(before);
+  });
+
+  test('nothing to carry: only the marker is written', () => {
+    const out = planScopeMigration({ config: { defaults: { freeContext: 'x' } } }, store({}), at)!;
+    expect(out.config).toEqual({ defaults: { freeContext: 'x' } });
+    expect((out.lvMigrations as any).scope053).toBe(at);
+  });
+
+  test('backend: after the upgrade the original reads the 0.4.0 기타 지침 (storage.get), also when 0.5.2 had already moved the glossary', async () => {
+    await withHost({ store: { defaults: { freeContext: '현대 한국 배경', freeContextEnabled: true } }, ttConfig: { config: { defaults: { glossary: 'A = B' } }, lvMigrations: { glossary052: 'x' } } }, async (h) => {
+      await h.send({ type: 'emu', id: 's', op: 'storage.get', args: [] });
+      const data = h.sent.findLast((m: any) => m.type === 'emu_result' && m.id === 's').data;
+      expect(data.config.defaults).toMatchObject({ glossary: 'A = B', freeContext: '현대 한국 배경', freeContextEnabled: true });
+      expect(data.lvMigrations.glossary052).toBe('x');
+      expect(data.lvMigrations.scope053).toBeTruthy();
+      expect(h.store().defaults.freeContext).toBe('현대 한국 배경'); // translator.json as it was
+    });
+  });
+});

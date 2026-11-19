@@ -9,7 +9,7 @@ import { buildPubFromTt, keptTagNames } from './adapter/pub';
 import { deleteBundle, saveBundle } from './bundles';
 import { type ConnectionHint, friendlyError, resolveConnection } from './connection';
 import { createEmuBridge, type EmuHost, eventMsg, eventRow, resolveSpeakers, TT_KEY, WideReads } from './host-emu/backend-ops';
-import { planGlossaryMigration } from './adapter/migrate';
+import { planGlossaryMigration, planScopeMigration } from './adapter/migrate';
 import {
   type ConnectionSummary,
   effectiveConnectionId,
@@ -134,7 +134,12 @@ try {
 async function migrateGlossary(uid: Uid): Promise<void> {
   try {
     const file = await readTtConfig(uid, true);
-    const next = planGlossaryMigration(file as Record<string, unknown>, await loadStore(uid), new Date().toISOString());
+    const store = await loadStore(uid);
+    const at = new Date().toISOString();
+    // The glossary (0.5.2) and then the other settings with a counterpart in the original (0.5.3, its own marker): both once.
+    let next = planGlossaryMigration(file as Record<string, unknown>, store, at);
+    const rest = planScopeMigration(next ?? (file as Record<string, unknown>), store, at);
+    if (rest) next = rest;
     if (!next) return;
     await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
     configCache.set(userKey(uid), { at: Date.now(), value: next as TtConfig });
