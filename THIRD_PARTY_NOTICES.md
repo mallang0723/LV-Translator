@@ -1,6 +1,6 @@
 # Third-party notices
 
-As a whole, this extension is licensed under the GNU Affero General Public License v3.0 (`AGPL-3.0-only`, see `LICENSE`), Copyright (c) 2026 mallang0723. Part of it is derived from Marinara Engine (AGPL-3.0), and `src/vendor/tt-1.10.0/personal-extension/extension.js` contains Marinara Engine code (see the last two sections). The parts listed below also keep their own copyright and notices; the permission of the translation tool's author to port and follow updates stays as stated.
+This repository is licensed under the MIT License (see `LICENSE`, Copyright (c) 2026 mallang0723). The parts listed below keep their own copyright and license.
 
 ## Translation Tools 1.8.0 (tlsiddl/marinara-translation-tools)
 
@@ -53,7 +53,3 @@ The paragraph split, the no-text paragraph check, the HTML block grouping (`src/
 ## RP 번역표시 설정 확장 1.0.2 (Marinara 개인 확장)
 
 The excluded-tag list in `src/translate/protect.ts` (`parseTags`, `protectElements`: skipping comments and code, counting same-name nesting, void-tag list, keeping `strong`/`em`) and the choice of display modes in 0.2.0 follow "RP 번역표시 설정 확장" 1.0.2, a Marinara personal extension posted on the DCinside aifrontend mini gallery: https://gall.dcinside.com/mini/board/view/?id=aifrontend&no=4375. The code was adapted for Lumiverse (the tag-scanning regular expression is reused; the rest is rewritten). The post states "수정 재공유 자유" (free to modify and re-share); no separate license file came with it. That extension is not ours and its author keeps whatever rights they have.
-
-## tlsiddl/marinara-translation-tools 1.10.0 (whole-file copy)
-
-`src/vendor/tt-1.10.0/` holds the repository's files at commit `0ff1338`, byte for byte (`personal-extension/`, `tests/`, `README.md`, `기타 지침/`). Unlike the 0.4.0 slices of 1.8.0, `extension.js` is copied whole, so it also contains the "Game display-only compatibility snapshot from Marinara Engine" (about L647-L1100), which is AGPL-3.0 code from Marinara Engine that 0.4.0 deliberately left out. The permission described above covers the repository's own code; the Marinara Engine part carries its own license (AGPL-3.0). Decision (2026-11-19, repository owner): since 0.5.1 this whole extension is released under AGPL-3.0, so the Marinara Engine part in `extension.js` is distributed under its own license terms and the rest of the extension follows the same license. The translation tool's author keeps their rights, and the author's permission to port it and follow later updates is unchanged.

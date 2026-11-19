@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { renderMessage } from '../src/display/render';
 import { pairParagraphs } from '../src/display/paragraph-view';
 import { recordFor } from '../src/message-ui';
 import { DEFAULT_SETTINGS, DEFAULT_VIEW, DISPLAY_MODES, sourceHash, type TranslationRecord } from '../src/shared';
@@ -49,6 +50,24 @@ test('legacy raw-content records are found, stable records take precedence', () 
   expect(recordFor(mt, source)).toBe(old);
   mt.entries[sourceHash(source)] = record;
   expect(recordFor(mt, source)).toBe(record);
+});
+
+for (const mode of DISPLAY_MODES) {
+  test(`${mode}: translation uses CURRENT images at saved tag positions`, () => {
+    const rendered = renderMessage(`Before ${image} After`, record, { ...DEFAULT_SETTINGS, displayMode: mode }, DEFAULT_VIEW);
+    expect(rendered).toContain(`앞 ${image} 뒤`);
+    expect(rendered).not.toContain('<pic');
+  });
+  test(`${mode}: excess current images are appended to the translation`, () => {
+    const second = image.replaceAll('123', '456');
+    const rendered = renderMessage(`Before ${image} After ${second}`, record, { ...DEFAULT_SETTINGS, displayMode: mode }, DEFAULT_VIEW);
+    expect(rendered).toContain(`앞 ${image} 뒤\n\n${second}`);
+  });
+}
+
+test('old rendered image/status is replaced; unmatched old slots are removed', () => {
+  const stale = { ...record, parts: [`앞 ${failure} 중간 ${image} 뒤`], pieces: [] };
+  expect(renderMessage(`Before ${image} After`, stale, { ...DEFAULT_SETTINGS, displayMode: 'only' }, DEFAULT_VIEW)).toBe(`앞 ${image} 중간  뒤`);
 });
 
 test('paragraph-unit records keep exact pairing after illustration replacement', () => {

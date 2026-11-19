@@ -1,14 +1,16 @@
 // The translator side of the "LV-TX v1" contract with the memory extension (docs/translation-tools-1.8.0-map.md §4.2).
 //
 //   handshake  rpcPool endpoint `st_translator.contract` (value below); the peer's is `anon_memory_lv.contract`
-//   message    metadata.st_translator.pub = { v:1, h, lang, text, paras?, edited?, at }       (src/adapter/pub.ts: buildPubFromTt)
+//   message    metadata.st_translator.pub = { v:1, h, lang, text, paras?, edited?, at }       (this module: buildPub)
 //   chat       chat.metadata.st_translator = { v:1, glossary:{ text, hash, at } }              (this module: planGlossary)
 //
-// `h` is FNV-1a 32 of message.content exactly as stored (the original's hashText), not LV's sourceHash.
-// Since 0.5.1 both are made from the original Translation Tools 1.10.0 records (the chat glossary is the original's own).
+// `h` is FNV-1a 32 of message.content exactly as stored (upstream hashText), not LV's sourceHash.
 
+import type { ChatSettings, MessageTranslations, TranslationRecord } from '../shared';
+import { pairParagraphs } from '../display/paragraph-view';
+import { recordToText } from '../translate/engine';
 import { parseGlossary } from '../translate/glossary';
-import { hashText } from './keys';
+import { blockKey, hashText } from '../vendor/tt-1.8.0/helpers';
 
 /** Manifest identifier of the memory extension; the only place it is written. */
 export const PEER_ID = 'anon_memory_lv';
@@ -20,8 +22,8 @@ export const PUB_PARAS_MAX = 400;
 
 export const PROVIDES = ['pub-translation@1', 'glossary@1'] as const;
 
-export function handshake(version: string, provides: readonly string[] = PROVIDES) {
-  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
+export function handshake(version: string) {
+  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...PROVIDES] };
 }
 
 export type PeerState = 'none' | 'ok' | 'incompatible';
@@ -54,6 +56,55 @@ export function langCode(language: string): string {
   return l.toLowerCase();
 }
 
+/**
+ * The public projection of the translation of `content` (the visible swipe), or null when there is nothing
+ * trustworthy to publish: no record for this content, or one that is not finished.
+ */
+export function buildPub(content: string, record: TranslationRecord | undefined, settings: ChatSettings, now: number): Pub | null {
+  if (!record || record.status !== 'done' || !record.parts.some((p) => p.trim())) return null;
+  const text = recordToText(record, content);
+  if (!text.trim()) return null;
+  const pub: Pub = { v: 1, h: hashText(content), lang: langCode(settings.myLanguage), text, at: now };
+  if (record.unit === 'paragraph') {
+    try {
+      const pairing = pairParagraphs(content, record, settings);
+      if (pairing.kind !== 'whole') {
+        const edited = new Set(record.edited ?? []);
+        const entries: Array<[string, string, boolean]> = [];
+        pairing.pairs.forEach((pair, i) => {
+          if (pair.translation === null || !pair.translation.trim()) return;
+          entries.push([blockKey(pair.source), pair.translation, edited.has(i)]);
+        });
+        const kept = entries.slice(-PUB_PARAS_MAX);
+        if (kept.length) {
+          pub.paras = Object.fromEntries(kept.map(([key, translation]) => [key, translation]));
+          const marks = kept.filter(([, , wasEdited]) => wasEdited).map(([key]) => [key, 1] as const);
+          if (marks.length) pub.edited = Object.fromEntries(marks) as Record<string, 1>;
+        }
+      }
+    } catch {
+      // exclude rules that no longer parse: publish the whole text only
+    }
+  }
+  return pub;
+}
+
+/**
+ * Sets `pub` for the content it has now, or removes it. Whenever nothing is published (no peer, no finished
+ * translation of this content) any earlier `pub` goes too: it could carry old text under a still valid hash.
+ * Returns whether `pub` is set.
+ */
+export function projectPub(mt: MessageTranslations, content: string, key: string | null, settings: ChatSettings, publish: boolean, now: number): boolean {
+  const record = key ? mt.entries[key] : undefined;
+  const pub = publish ? buildPub(content, record, settings, now) : null;
+  if (pub) {
+    mt.pub = pub;
+    return true;
+  }
+  delete mt.pub;
+  return false;
+}
+
 export interface GlossaryEntry {
   text: string;
   hash: string;
@@ -76,9 +127,6 @@ export function planGlossary(meta: Record<string, unknown>, text: string, now: n
   const published = isObject(own.glossary) ? (own.glossary as Partial<GlossaryEntry>) : null;
   const hash = hashText(text);
   if (!published && !text) return null;
-  // The original's glossary starts empty (0.5.x reads it from the original's settings): an empty one must never clear a glossary
-  // that is already published (0.4.0's, or an earlier one), or the memory extension's room would lose its words.
-  if (!text && published && typeof published.text === 'string' && published.text.trim()) return null;
   if (published?.hash === hash) return null;
   const entry: GlossaryEntry = { text, hash, at: now };
   return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };

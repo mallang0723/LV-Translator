@@ -69,6 +69,25 @@
       "startLine": 2335,
       "endLine": 2353,
       "sha256": "9b15dc33d2c17273e127865c0319b64771d823f02097276f0013a5bec9ac5c4f"
+    },
+    "sync-source.ts#system": {
+      "startLine": 3009,
+      "endLine": 3011,
+      "sha256": "5dbba9e9f89d82b1dc5b31e096e4e9683e90601e12f6fb44c0ddfffd3b7a0c43"
+    },
+    "sync-source.ts#sync": {
+      "startLine": 3040,
+      "endLine": 3081,
+      "sha256": "f887d169fec4de3c1ba69549e06084eabd2adf6a49c9521151ae5770ce43610e"
+    },
+    "catch-up.ts#catch-up": {
+      "startLine": 3900,
+      "endLine": 3929,
+      "sha256": "6b985e9d30852bfb43f5dd46a0df0a0a5f8fd6f2d0dda947266949790a318590"
     }
+  },
+  "example": {
+    "path": "기타 지침/지문 문체.txt",
+    "sha256": "178c33f27392ae9d4c326bde3c938ab15fada546887e6dc9976d20ca72761649"
   }
 }

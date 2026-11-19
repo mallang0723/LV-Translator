@@ -5,8 +5,19 @@
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types';
 import {
   type ChatSettings,
+  VIEW_WINDOW,
   type ConnectionSummary,
   DEFAULT_SETTINGS,
+  DEFAULT_VIEW,
+  type DisplayMode,
+  FONT_MAX,
+  FONT_MIN,
+  normalizeView,
+  type ParagraphOrder,
+  type ViewSettings,
+  INHERIT_PRESET_ID,
+  type MessageView,
+  type PresetSummary,
   settingsFor,
   type Store,
   type ToBackend,
@@ -14,21 +25,16 @@ import {
   type UserBundle,
   effectiveConnectionId,
 } from './shared';
-import { checkMarkers, ExcludeRuleError, lenientTags, MARKER_INSTRUCTION, parseExcludeRules, protect, restore } from './translate/protect';
-import { parseGlossary } from './translate/glossary';
+import { ExcludeRuleError, parseTags } from './translate/protect';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
-import type { HostBridge, MessageRow } from './host-emu/api';
-import { MessageCache } from './host-emu/message-cache';
-import { watchVisibleMessages } from './host-emu/visible-messages';
-import { createSettingsHost, nativePrompts, startOriginal } from './host-emu/boot';
-import { GenerationDriver, GenerationHub } from './host-emu/generation';
-import type { MarinaraStorage } from './host-emu/runtime';
-import { withBatchLimit } from './host-emu/split';
-import { withExclusions } from './host-emu/exclude';
-import { type LvForm, type LvState, type LvValues, mountLvForm } from './host-emu/lv-form';
+import { NARRATION_STYLE_EXAMPLE } from './vendor/tt-1.8.0/example-narration-style';
+import { showsToggle, targetLabel, wantsBar } from './message-ui';
+import { type DecoratorSpec, mountToolbars } from './toolbar';
+import { ViewRequests, visibleMessageIds } from './view-requests';
 
-const PANEL_CSS = `
+const CSS = `
+.stt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; font-size: 0.78em; }
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
   color: var(--lumiverse-text, inherit); background: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 10%, transparent));
   border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); }
@@ -39,8 +45,45 @@ const PANEL_CSS = `
 .stt-note { color: var(--lumiverse-text-muted, inherit); opacity: 0.85; }
 .stt-note.stt-warn { color: var(--lumiverse-warning, #c90); opacity: 1; }
 .stt-note.stt-err { color: var(--lumiverse-danger, #d55); opacity: 1; }
+hr.stt-separator { border: 0; border-top: 1px dashed var(--lumiverse-border, rgba(127,127,127,0.4)); margin: 0.8em 0; }
+details.stt-translation > summary { cursor: pointer; color: var(--lumiverse-text-muted, inherit); }
 /* Paragraph Reader view (message content) */
+.stt-pr { --stt-accent: var(--lumiverse-primary, currentColor); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.stt-pr-note { font-size: 12px; color: var(--lumiverse-text-muted, inherit); margin-bottom: 12px; white-space: pre-wrap; }
+.stt-pr-pair { margin: 0 0 18px; }
+.stt-pr-pair:last-child { margin-bottom: 0; }
+.stt-pr-label { display: block; margin-bottom: 4px; font-size: 10px; letter-spacing: .06em; color: var(--lumiverse-text-muted, inherit); font-weight: 700; }
+.stt-pr-src { color: var(--lumiverse-text-muted, inherit); font-size: var(--stt-src-size, 16px); line-height: 1.75; }
+.stt-pr-tgt { font-size: var(--stt-tgt-size, 18px); line-height: 1.75; border-left: 3px solid var(--stt-accent); padding-left: 12px; margin-top: 8px; }
+.stt-pr-src > :first-child, .stt-pr-tgt > :first-child { margin-top: 0; }
+.stt-pr-src p, .stt-pr-tgt p { margin: 0 0 .4em; }
+.stt-pr-same { font-size: var(--stt-src-size, 16px); }
+.stt-pr-pending { color: var(--lumiverse-text-muted, inherit); font-style: italic; }
+.stt-pr-tap .stt-pr-tgt { margin-top: 0; }
+.stt-pr-tfirst .stt-pr-tgt { margin-top: 0; margin-bottom: 8px; }
+.stt-pr-tfirst .stt-pr-src { margin-top: 8px; }
+.stt-pr-orig { margin-top: 8px; color: var(--lumiverse-text-muted, inherit); font-size: max(13px, calc(var(--stt-src-size, 16px) * 0.85)); line-height: 1.75; }
+.stt-pr-orig > summary { cursor: pointer; font-size: 11px; color: var(--lumiverse-text-muted, inherit); }
+.stt-pr-orig[open] { border-left: 4px solid var(--stt-accent); padding: 0.4rem 0.6rem; border-radius: 2px; background-color: color-mix(in srgb, currentColor 7%, var(--lumiverse-bg, transparent)); }
+.stt-pr-orig[open] > summary { color: var(--stt-accent); margin-bottom: 4px; }
+.stt-pr-orig > summary + * { margin-top: 0; }
+.stt-pr-orig p { margin: 0 0 .4em; }
+.stt-pr-orig p:last-child { margin-bottom: 0; }
 /* Message action row buttons (bubble pill and minimal row; the host's own classes are reused where possible) */
+.stt-tb { display: inline-flex; align-items: center; justify-content: center; flex: none; padding: 0; cursor: pointer; }
+.stt-tb svg { display: block; pointer-events: none; flex: none; }
+.stt-tb[data-stt-own] { width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: var(--lumiverse-text-dim, inherit); }
+.stt-tb[data-stt-own]:hover { background: var(--lumiverse-fill-subtle, color-mix(in srgb, currentColor 12%, transparent)); color: var(--lumiverse-text, inherit); }
+.stt-tb.stt-tb-del:hover { color: var(--lumiverse-danger, #ef4444); background: var(--lumiverse-danger-015, color-mix(in srgb, var(--lumiverse-danger, currentColor) 15%, transparent)); }
+.stt-tb.stt-tb-busy { color: var(--lumiverse-primary, currentColor); animation: stt-pulse 1.1s ease-in-out infinite; }
+@keyframes stt-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .stt-tb.stt-tb-busy { animation: none; } }
+.stt-font-row { display: flex; align-items: center; gap: 7px; }
+.stt-font-label { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; }
+.stt-font-label > span { flex: none; min-width: 2.2em; }
+.stt-font-label input[type=range] { flex: 1; min-width: 0; accent-color: var(--lumiverse-primary, currentColor); }
+.stt-font-row .stt-btn { width: 34px; min-width: 34px; padding: 0; font-size: 18px; }
+.stt-font-row output { min-width: 3em; text-align: center; font-variant-numeric: tabular-nums; }
 .stt-panel { display: flex; flex-direction: column; gap: 12px; padding: 10px; color: var(--lumiverse-text, inherit); font-size: 0.92em; }
 .stt-section { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--lumiverse-border, rgba(127,127,127,0.3)); border-radius: var(--lumiverse-radius, 8px); padding: 9px; }
 .stt-section > h3 { margin: 0; font-size: 1em; }
@@ -58,6 +101,10 @@ const PANEL_CSS = `
 .stt-sticky { position: sticky; bottom: 0; background: color-mix(in srgb, var(--lumiverse-bg, Canvas) 94%, transparent); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); padding: 8px 0; }
 .stt-modal { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .stt-modal textarea { min-height: 280px; font-size: 0.85em; }
+.stt-edit-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.stt-edit-row { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--lumiverse-border, rgba(127,127,127,0.25)); }
+.stt-edit-src { white-space: pre-wrap; font-size: 0.85em; opacity: 0.8; }
+.stt-modal .stt-edit-row textarea { min-height: 64px; }
 .stt-badge { font-size: 0.75em; opacity: 0.75; }
 .stt-panel, .stt-section, .stt-field, .stt-modal { min-width: 0; overflow-wrap: anywhere; }
 .stt-row > .stt-field { flex: 1 1 130px; }
@@ -71,7 +118,9 @@ const PANEL_CSS = `
 .stt-unsaved-note[hidden] { display: none; }
 /* Phones and touch screens: readable text (15px+) and tap targets of 44px+. */
 @media (max-width: 768px), (pointer: coarse) {
-  .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
+  .stt-bar, .stt-pr-note, .stt-panel, .stt-modal, .stt-note { font-size: 15px; }
+  .stt-pr-label, .stt-pr-orig > summary { font-size: 15px !important; }
+  .stt-pr-orig { font-size: max(15px, calc(var(--stt-src-size, 16px) * 0.85)); }
   .stt-panel textarea.stt-prompt, .stt-modal textarea { font-size: 15px; }
   .stt-field > span, .stt-section > h3 { font-size: 15px; }
   .stt-btn { min-height: 44px !important; min-width: 44px; padding: 8px 14px !important; }
@@ -79,6 +128,10 @@ const PANEL_CSS = `
   .stt-check { min-height: 44px; }
   .stt-bundle-preview > summary { min-height: 44px; display: flex; align-items: center; }
   .stt-check input { width: 22px; height: 22px; flex: none; }
+  .stt-font-label input[type=range] { min-height: 44px; }
+  .stt-pr-orig > summary, details.stt-translation > summary { min-height: 44px; display: flex; align-items: center; }
+  .stt-font-row .stt-btn { width: 44px; min-width: 44px; }
+  /* .stt-tb is deliberately not enlarged: it follows the host's own action row buttons. */
 }
 `;
 
@@ -102,17 +155,44 @@ const button = (label: string, onClick: () => void, cls = '', title?: string) =>
 
 const ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
 
+const SUGGESTED_TAGS = ['choices', 'options', 'status', 'stats'];
+const parseTagsSafe = (raw: string): string[] => {
+  try {
+    return parseTags(raw);
+  } catch {
+    return [];
+  }
+};
+
+const DISPLAY_LABELS: Record<DisplayMode, string> = {
+  below: '원문 아래에 번역문',
+  above: '번역문 먼저 (번역문 아래에 원문)',
+  only: '번역문만 (원문 숨김)',
+  collapsed: '원문 + 접힌 번역문',
+  'collapsed-source': '번역문 + 접힌 원문',
+  paragraph: '문단 대조 (Paragraph Reader)',
+};
+
 export function setup(ctx: SpindleFrontendContext) {
   let store: Store | null = null;
+  let presets: PresetSummary[] = [];
   let connections: ConnectionSummary[] = [];
   let link: 'none' | 'ok' | 'incompatible' = 'none';
   let chatId: string | null = null;
+  const views = new Map<string, MessageView>();
+  const bars = new Map<string, HTMLElement>();
+  const viewRequests = new ViewRequests();
+  const plainMessages = new Set<string>();
+  const pending = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void }>();
+  let reqCounter = 0;
   let lastDraftTranslation: string | null = null;
+  let dirty = false;
+  let markDirtyUi: (() => void) | null = null;
 
   const toBackend = (msg: ToBackend) => ctx.sendToBackend(msg);
   const notify = (kind: 'info' | 'warning' | 'error', text: string) => toBackend({ type: 'notify', kind, text });
   const current = (): ChatSettings => (store ? settingsFor(store, chatId) : DEFAULT_SETTINGS);
-  const removeStyle = ctx.dom.addStyle(PANEL_CSS);
+  const removeStyle = ctx.dom.addStyle(CSS);
 
   function chatIdFromLocation(): string | null {
     const m = /^\/chat\/([^/?#]+)/.exec(location.pathname);
@@ -140,166 +220,215 @@ export function setup(ctx: SpindleFrontendContext) {
     toBackend({ type: 'hint', chatId: forChat, activeId: next.activeId, chatConnectionId: next.chatId, ...(open ? { open: true } : {}) });
   }
 
-  // ---- the original Translation Tools 1.10.0 screens (src/host-emu) ----
-  // The message view, the bar, the 대조·수정 window, the per-paragraph 다시 번역, the scans and the settings screen are the
-  // original's own code, run whole. Here only the entrance is provided: the host calls it asks for go to the backend.
-
-  const rpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  let rpcCounter = 0;
-  // Lumiverse hands every backend reply to every open page of the user, so a bare counter ("e1", "e2"...) collides between two tabs
-  // (or a reloaded page) and a reply meant for one page settles another page's call. The id carries a per-page random part.
-  const rpcPage = Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
-  const call = <T,>(op: string, args: unknown[], signal?: AbortSignal): Promise<T> => {
-    const id = `e${rpcPage}.${++rpcCounter}`;
-    return new Promise<T>((resolve, reject) => {
-      rpc.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      toBackend({ type: 'emu', id, op, args });
-      signal?.addEventListener('abort', () => {
-        rpc.delete(id);
-        toBackend({ type: 'emu_cancel', id });
-        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-      }, { once: true });
-    });
-  };
-  const CONTEXT_READ_TAIL = 40;
-  let outgoingInFlight = 0;
-  const hub = new GenerationHub();
-  /** The message list the original takes from "the app's cache": rows read for it, kept current by the backend's message events. */
-  const cache = new MessageCache();
-  const bridge: HostBridge = {
-    getChat: (c) => call('getChat', [c]),
-    // `n` 0 is a read with no limit: the original's "모두 번역" (the whole chat, at most 1000) or its own background read after a
-    // generation (`auto`: the backend answers with the end of the chat). While my message is being translated only the end is read.
-    listMessages: async (c, n, auto) => {
-      const since = cache.mark();
-      const rows = await call<MessageRow[]>('listMessages', [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0), auto === true]);
-      cache.seed(c, rows, since);
-      return rows;
-    },
-    getMessage: async (c, m) => {
-      const since = cache.mark();
-      const row = await call<MessageRow>('getMessage', [c, m]);
-      cache.seed(c, [row], since);
-      return row;
-    },
-    updateContent: (c, m, content) => call('updateContent', [c, m, content]),
-    patchExtra: (c, m, patch, swipe) => call('patchExtra', [c, m, patch, swipe]),
-    // The original's request grouping has a fixed 6000-character limit; a smaller one from the settings is applied here (split.ts).
-    generateRaw: withExclusions(withBatchLimit((req, signal) => call('generateRaw', [req], signal), () => (store ? current().batchChars : 0)), () => (store ? current().excludeRules : '')),
-    generateActive: (c) => call('generateActive', [c]),
-    connections: () => call('connections', []),
-    character: (id) => call('character', [id]),
-    persona: (id) => call('persona', [id]),
-    lorebooks: () => call('lorebooks', []),
-    lorebookEntries: (b) => call('lorebookEntries', [b]),
-    openGeneration: (c) => hub.open(c),
-    translate: (req, signal) => call('translate', [req], signal),
-  };
-  const emuStorage: MarinaraStorage = {
-    get: () => call('storage.get', []),
-    patch: (p) => call('storage.patch', [p]),
-  };
-  const original = startOriginal({
-    bridge,
-    cache,
-    storage: emuStorage,
-    activeChatId: () => chatId,
-    addStyle: (css) => ctx.dom.addStyle(css),
-  });
-  const visible = watchVisibleMessages({
-    chat: () => chatId,
-    known: (c, id) => cache.has(c, id),
-    lookup: async (c, ids) => {
-      const since = cache.mark();
-      cache.seed(c, await call<MessageRow[]>('messagesFor', [c, ids]), since);
-    },
-    log: (text, error) => console.warn(`[translator] ${text}`, error),
-  });
-  const settingsElement = createSettingsHost();
-  const settingsHost = { element: settingsElement, ...nativePrompts(settingsElement) };
-  const driver = new GenerationDriver(hub, () => original.emu.installedFetch(), (text, error) => console.warn(`[translator] ${text}`, error));
-
-  /** Lumiverse sends every generation event to every open page; one page takes each generation and replays it into the original. */
-  const leased = new Set<string>();
-  const offEvents = [
-    ctx.events.on('GENERATION_STARTED', (payload) => {
-      const p = payload as { generationId?: string; chatId?: string; generationType?: string; targetMessageId?: string } | null;
-      if (!p?.chatId || !p.generationId) return;
-      const { generationId, chatId: forChat } = p;
-      void call<boolean>('lease', [generationId])
-        .then((granted) => {
-          if (!granted) return;
-          leased.add(generationId);
-          driver.started({ chatId: forChat, generationType: p.generationType, targetMessageId: p.targetMessageId });
-        })
-        .catch(() => {});
-    }),
-    ctx.events.on('GENERATION_ENDED', (payload) => {
-      const p = payload as { generationId?: string; chatId?: string; messageId?: string; content?: string; error?: string; generationType?: string } | null;
-      if (!p?.chatId || !p.generationId || !leased.delete(p.generationId)) return;
-      driver.ended({ chatId: p.chatId, messageId: p.messageId, content: p.content, error: p.error, generationType: p.generationType });
-    }),
-    ctx.events.on('GENERATION_STOPPED', (payload) => {
-      const p = payload as { generationId?: string; chatId?: string } | null;
-      if (!p?.chatId || !p.generationId || !leased.delete(p.generationId)) return;
-      driver.stopped(p.chatId);
-    }),
-  ];
-
-  /** "내 메시지 번역": the original's own /api/translate handling (its 유저 입력 번역 프롬프트, 단어장, 기타 지침, 이전 대화), with the LV exclude rules on top. */
   async function translateText(text: string, forChat: string): Promise<string> {
     await sendHint(forChat);
-    const fetchOriginal = original.emu.installedFetch();
-    if (!fetchOriginal) throw new Error('번역 도구가 아직 시작되지 않았습니다.');
-    const settings = store ? settingsFor(store, forChat) : DEFAULT_SETTINGS;
-    const row = await bridge.getChat(forChat);
-    const connectionId = String(row.metadata?.translationConnectionId ?? '');
-    // The chat's own prompts (0.4.0 kept them per chat): the original's "채팅 설정 유지" preset means these.
-    settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ''), String(row.metadata?.translationOutputPrompt ?? ''));
-    // The tags the original's 「번역에서 제외할 태그」 holds are excluded from my messages too. It is the only tag list now (the 0.4.0 one was moved into it once), so removing a tag there removes it here.
-    const keep = await emuStorage.get().then((f) => String((f?.config as { paragraph?: { keepTags?: string } } | undefined)?.paragraph?.keepTags ?? '')).catch(() => '');
-    const held = protect(text, { ...settings, excludeTags: lenientTags(keep.replace(/;/g, ',')).join(', ') });
-    // The prompt lives in the original's field (a hidden one here; in Marinara it is the 유저 입력 번역 프롬프트 field).
-    let systemPrompt = settingsHost.prompts().outgoing.trim();
-    // LV additions on top of the original's prompt: the shared bundle's glossary / guidance (the bundle's own fields only) and the protection marker rule.
-    const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
-    const pairs = bundle ? parseGlossary(bundle.glossary) : [];
-    const extras = [
-      pairs.length ? `## Glossary (apply in both directions)\n${pairs.map((p) => `${p.left} = ${p.right}`).join('\n')}` : '',
-      bundle?.freeContext.trim() ? `## Additional guidance\n${bundle.freeContext.trim()}` : '',
-      held.pieces.length ? MARKER_INSTRUCTION : '',
-    ].filter(Boolean);
-    if (extras.length) systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim(), ...extras].join('\n\n');
-    let res: Response;
-    outgoingInFlight++;
-    try {
-      res = await fetchOriginal('/api/translate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: held.text, provider: 'ai', targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat }),
-      });
-    } finally {
-      outgoingInFlight--;
-    }
-    const data = (await res.json().catch(() => null)) as { translatedText?: string; error?: string; message?: string } | null;
-    if (!res.ok) throw new Error(friendlyError(data?.error || data?.message || `번역 요청 실패 (${res.status})`));
-    const translated = String(data?.translatedText ?? '').trim();
-    if (!translated) throw new Error('번역 결과가 비어 있습니다.');
-    const problem = held.pieces.length ? checkMarkers(held.text, translated) : null;
-    if (problem) throw new Error(problem);
-    return restore(translated, held.pieces).trim();
+    const reqId = `t${++reqCounter}`;
+    return new Promise<string>((resolve, reject) => {
+      pending.set(reqId, { resolve, reject });
+      toBackend({ type: 'translate_text', reqId, chatId: forChat, text });
+    });
   }
 
-  function resetChat(next: string | null): void {
-    // Before the original sees the new chat id (it reads it from here): the old chat's prompt must not stay in its fields.
-    if (next !== chatId) {
-      settingsHost.reset();
-      visible.reset();
+  // ---- per-message controls ----
+
+  const act = (id: string, type: 'translate' | 'continue', force = false) => () => {
+    const forChat = chatId;
+    if (!forChat) return;
+    const run = async () => {
+      await sendHint(forChat);
+      if (type === 'translate') toBackend({ type, chatId: forChat, messageId: id, force });
+      else toBackend({ type, chatId: forChat, messageId: id });
+    };
+    if (!dirty) {
+      void run();
+      return;
     }
+    // Translation uses the saved settings: do not let unsaved edits be silently ignored.
+    void ctx.ui
+      .showConfirm({ title: '저장하지 않은 변경이 있어요', message: '번역 설정을 바꾼 뒤 저장하지 않았습니다. 저장하지 않은 내용은 번역에 반영되지 않습니다.\n지금 저장하고 번역할까요?', variant: 'warning', confirmLabel: '저장하고 번역' })
+      .then(({ confirmed }) => {
+        if (!confirmed) return;
+        save(false);
+        return run();
+      });
+  };
+
+  const barWanted = (v: MessageView) => wantsBar(v, current().displayMode);
+
+  /**
+   * Slim row under a message (including collapsed-source) for what the toolbar does not cover:
+   * progress, trouble, continue, and (outside the paragraph view) showing or hiding the translation.
+   */
+  function renderBar(bar: HTMLElement, view: MessageView): void {
+    const id = view.messageId;
+    const items: Children = [];
+    if (view.busy) {
+      items.push(el('span', { class: 'stt-note' }, [view.progress ? `번역 중… ${view.progress.done}/${view.progress.total}` : '번역 중…']));
+      items.push(button('취소', () => chatId && toBackend({ type: 'cancel', chatId, messageId: id }), 'stt-danger'));
+    } else {
+      if (view.status === 'error') items.push(el('span', { class: 'stt-note stt-err', title: friendlyError(view.error ?? '') }, [`번역 오류: ${friendlyError(view.error ?? '').slice(0, 260)}`]));
+      if (view.status === 'partial') {
+        const progress = view.progress && view.progress.done < view.progress.total ? ` (${view.progress.done}/${view.progress.total})` : '';
+        items.push(el('span', { class: 'stt-note stt-warn' }, [`번역이 중간에 끊겼습니다${progress}`]));
+      }
+      if (view.hasMore) items.push(button('이어서 번역', act(id, 'continue'), 'stt-primary', '끊긴 곳부터 이어서 번역합니다'));
+      if (showsToggle(view, current().displayMode)) {
+        items.push(button(view.hidden ? '번역 보기' : '번역 숨기기', () => chatId && toBackend({ type: 'set_hidden', chatId, messageId: id, hidden: !view.hidden })));
+      }
+    }
+    bar.replaceChildren(...items.filter((c): c is Node | string => !!c));
+  }
+
+  // ---- panel: paragraph view controls ----
+
+  let fontStatusText = '모든 채팅에 적용 · 자동 저장';
+  let viewSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let localView: ViewSettings = { ...DEFAULT_VIEW };
+  let removeFontStyle: (() => void) | null = null;
+  let fontHost: HTMLElement | null = null;
+
+  function applyFontStyle(): void {
+    removeFontStyle?.();
+    removeFontStyle = ctx.dom.addStyle(`:root { --stt-src-size: ${localView.sourceFontSize}px; --stt-tgt-size: ${localView.translationFontSize}px; }`);
+  }
+
+  function changeFonts(values: Partial<ViewSettings>): void {
+    localView = normalizeView({ ...localView, ...values });
+    applyFontStyle();
+    fontStatusText = '크기 저장 중…';
+    renderFonts();
+    if (viewSaveTimer) clearTimeout(viewSaveTimer);
+    viewSaveTimer = setTimeout(() => {
+      viewSaveTimer = null;
+      toBackend({ type: 'save_view', view: localView });
+      fontStatusText = '크기를 저장했습니다.';
+      renderFonts();
+    }, 300);
+  }
+
+  /** Font sizes for the paragraph view. They apply and save at once (not part of the save button). */
+  function renderFonts(): void {
+    if (!fontHost) return;
+    const rows = ([['sourceFontSize', '원문'], ['translationFontSize', '번역']] as const).map(([key, label]) => {
+      const value = localView[key];
+      const range = el('input', { type: 'range', min: FONT_MIN, max: FONT_MAX, step: 1, value, 'aria-label': `${label} 글자 크기` });
+      range.addEventListener('change', () => changeFonts({ [key]: Number(range.value) }));
+      const minus = button('−', () => changeFonts({ [key]: value - 1 }), '', `${label} 글자 크기 줄이기`);
+      const plus = button('+', () => changeFonts({ [key]: value + 1 }), '', `${label} 글자 크기 키우기`);
+      minus.disabled = value <= FONT_MIN;
+      plus.disabled = value >= FONT_MAX;
+      return el('div', { class: 'stt-font-row' }, [el('label', { class: 'stt-font-label' }, [el('span', {}, [label]), range]), minus, el('output', {}, [`${value}px`]), plus]);
+    });
+    fontHost.replaceChildren(
+      el('span', {}, [`글자 크기 · 원문 ${localView.sourceFontSize} / 번역 ${localView.translationFontSize}`]),
+      ...rows,
+      el('div', { class: 'stt-row' }, [
+        button('기본 크기', () => changeFonts({ sourceFontSize: DEFAULT_VIEW.sourceFontSize, translationFontSize: DEFAULT_VIEW.translationFontSize })),
+        el('span', { class: 'stt-note' }, [fontStatusText]),
+      ]),
+    );
+  }
+
+  // ---- decorating messages ----
+
+  /** Translate and delete-translation buttons in the host's action row. */
+  const registerDecorator = (ctx.ui as unknown as { registerDomDecorator?: (spec: DecoratorSpec) => unknown }).registerDomDecorator;
+  const toolbars = mountToolbars({
+    registerDecorator: typeof registerDecorator === 'function' ? (spec) => registerDecorator.call(ctx.ui, spec) : null,
+    listMessageElements: () => ctx.dom.listMessageElements(),
+    getView: (id) => views.get(id),
+    canTranslate: (id) => plainMessages.has(id),
+    onTranslate: (id, force) => {
+      act(id, 'translate', force)();
+    },
+    onCancel: (id) => {
+      if (chatId) toBackend({ type: 'cancel', chatId, messageId: id });
+    },
+    onEdit: (id) => {
+      if (chatId) toBackend({ type: 'edit_open', chatId, messageId: id });
+    },
+    onDelete: (id) => {
+      const forChat = chatId;
+      const view = views.get(id);
+      if (!forChat || !view) return;
+      void ctx.ui
+        .showConfirm({ title: '번역 삭제', message: `${targetLabel(view)} 메시지에서 지금 보이는 스와이프의 번역만 지울까요?\n다른 스와이프의 번역과 메시지 원문은 그대로 남습니다.`, variant: 'danger', confirmLabel: '번역 삭제' })
+        .then(({ confirmed }) => {
+          if (confirmed) toBackend({ type: 'delete_translation', chatId: forChat, messageId: id, sourceKey: view.sourceKey });
+        });
+    },
+  });
+
+  function decorate(): void {
+    if (!chatId) return;
+    for (const view of views.values()) {
+      let bar = bars.get(view.messageId);
+      if (!barWanted(view)) {
+        if (bar) {
+          ctx.dom.uninject(bar);
+          bars.delete(view.messageId);
+        }
+        continue;
+      }
+      if (!bar) {
+        const bubble = ctx.dom.findMessageElement(view.messageId);
+        if (!bubble) continue;
+        const slot = bubble.querySelector('[data-spindle-mount="message_footer"]') ?? bubble;
+        // inject() returns the host's wrapper element; style and fill that.
+        bar = ctx.dom.inject(slot, '<div></div>', 'beforeend') as HTMLElement;
+        bar.classList.add('stt-bar');
+        bars.set(view.messageId, bar);
+      }
+      renderBar(bar, view);
+    }
+    toolbars.refresh();
+  }
+
+  function requestVisibleViews(): void {
+    if (!chatId) return;
+    const ids = visibleMessageIds(ctx.dom.listMessageElements(), window.innerHeight);
+    for (const messageIds of viewRequests.take(ids)) {
+      toBackend({ type: 'view_messages', chatId, messageIds });
+    }
+  }
+
+  let decorateTimer: ReturnType<typeof setTimeout> | null = null;
+  const queueDecorate = () => {
+    if (decorateTimer) return;
+    decorateTimer = setTimeout(() => {
+      decorateTimer = null;
+      requestVisibleViews();
+      // Our own controls mutate the DOM too; only decorate missing mounts.
+      if ([...views.values()].some((view) => barWanted(view)
+        && !bars.has(view.messageId) && ctx.dom.findMessageElement(view.messageId))) {
+        decorate();
+      }
+    }, 150);
+  };
+  // Rendering and scrolling older history request only the newly visible rows.
+  const observer = new MutationObserver(() => {
+    if (chatId) queueDecorate();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('scroll', queueDecorate, true);
+  window.addEventListener('resize', queueDecorate);
+
+  function resetChat(next: string | null): void {
+    for (const bar of bars.values()) ctx.dom.uninject(bar);
+    bars.clear();
+    views.clear();
+    plainMessages.clear();
+    viewRequests.reset();
     chatId = next;
     renderDraftButton();
     renderPanel();
-    if (next) void sendHint(next, true);
+    if (next) {
+      void sendHint(next, true);
+      const messageIds = ctx.dom.listMessageElements().slice(-VIEW_WINDOW).map(({ messageId }) => messageId);
+      viewRequests.take(messageIds);
+      toBackend({ type: 'chat', chatId: next, messageIds: messageIds.length ? messageIds : undefined });
+      queueDecorate();
+    }
   }
 
   // Back on screen: a reply that finished while the page was away may still be untranslated.
@@ -315,6 +444,37 @@ export function setup(ctx: SpindleFrontendContext) {
     const next = chatIdFromLocation();
     if (next !== chatId) resetChat(next);
   }, 700);
+
+  const refreshViews = () => requestVisibleViews();
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  const queueRefresh = () => {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshViews, 400);
+  };
+  const offEvents = ['MESSAGE_SENT', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAGE_DELETED', 'GENERATION_ENDED'].map((name) =>
+    ctx.events.on(name, (payload) => {
+      const p = payload as { chatId?: string } | null;
+      if (!p?.chatId || p.chatId === chatId) {
+        // An offscreen row may already have been requested before it changed.
+        const changed = payload as { messageId?: string; message?: { id?: string } };
+        const changedId = changed?.messageId ?? changed?.message?.id;
+        if (changedId) viewRequests.invalidate([changedId]);
+        else viewRequests.reset();
+        if (name === 'MESSAGE_DELETED') {
+          const deleted = payload as { messageId?: string; message?: { id?: string } };
+          const id = deleted?.messageId ?? deleted?.message?.id;
+          if (id) {
+            views.delete(id);
+            plainMessages.delete(id);
+            const bar = bars.get(id);
+            if (bar) ctx.dom.uninject(bar);
+            bars.delete(id);
+          }
+        }
+        queueRefresh();
+      }
+    }),
+  );
 
   // ---- outgoing message translation (Marinara "Translate My Messages") ----
 
@@ -385,34 +545,138 @@ export function setup(ctx: SpindleFrontendContext) {
     id: 'translator',
     title: '양방향 번역',
     shortName: '번역',
-    description: '양방향 번역: 문단 번역 보기·대조·수정, 프리셋, 단어장, 응답·내 메시지 번역(원작 Translation Tools 1.10.0)',
+    description: '양방향 번역: 프리셋, 단어장, 자동 번역, 이어서 번역',
     keywords: ['translate', 'translation', 'glossary', '번역', '단어장'],
     headerTitle: '양방향 번역',
     iconSvg: ICON,
   });
-  // One screen: the original's settings form (its own code) is the whole tab. Our own settings are sections inside that form
-  // (src/host-emu/lv-form.ts) and are saved by the form's one save button.
-  tab.root.replaceChildren(el('div', { class: 'stt-panel' }, [settingsHost.element]));
+  const panel = el('div', { class: 'stt-panel' });
+  tab.root.replaceChildren(panel);
+  let draft: ChatSettings = { ...DEFAULT_SETTINGS };
+  let status = '';
+
+  function check(label: string, key: keyof ChatSettings, onChange?: () => void): HTMLElement {
+    const input = el('input', { type: 'checkbox', checked: draft[key] === true });
+    input.addEventListener('change', () => {
+      (draft as unknown as Record<string, unknown>)[key] = input.checked;
+      markDirty();
+      onChange?.();
+    });
+    return el('label', { class: 'stt-check' }, [input, label]);
+  }
+
+  function text(label: string, key: keyof ChatSettings, opts: { multiline?: boolean; placeholder?: string; cls?: string } = {}): HTMLElement {
+    const input = opts.multiline
+      ? el('textarea', { value: String(draft[key] ?? ''), placeholder: opts.placeholder ?? '', class: opts.cls ?? '', spellcheck: false })
+      : el('input', { type: 'text', value: String(draft[key] ?? ''), placeholder: opts.placeholder ?? '' });
+    input.setAttribute('data-stt-field', key);
+    input.addEventListener('input', () => {
+      (draft as unknown as Record<string, unknown>)[key] = input.value;
+      // The same setting can appear in two places (내 언어 / 도착 언어): keep them equal.
+      panel.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(`[data-stt-field="${key}"]`).forEach((other) => {
+        if (other !== input) other.value = input.value;
+      });
+      markDirty();
+    });
+    return el('label', { class: 'stt-field' }, [el('span', {}, [label]), input]);
+  }
+
+  function select(label: string, value: string, options: Array<[string, string]>, onChange: (v: string) => void, unsaved = true, rerender = false): HTMLElement {
+    const s = el('select', {}, options.map(([v, l]) => el('option', { value: v, selected: v === value }, [l])));
+    s.addEventListener('change', () => {
+      onChange(s.value);
+      // Mark dirty before re-rendering: renderPanel() rebuilds the draft from the saved settings when clean.
+      if (unsaved) markDirty();
+      if (rerender) renderPanel();
+    });
+    return el('label', { class: 'stt-field' }, [el('span', {}, [label]), s]);
+  }
+
+  function promptSection(direction: 'incoming' | 'outgoing'): HTMLElement {
+    const presetKey = direction === 'incoming' ? 'incomingPresetId' : 'outgoingPresetId';
+    const promptKey = direction === 'incoming' ? 'incomingPrompt' : 'outgoingPrompt';
+    const presetId = draft[presetKey];
+    const preset = presets.find((p) => p.id === presetId);
+    const inherit = !preset || presetId === INHERIT_PRESET_ID;
+    const box = el('div', { class: 'stt-field' });
+    const options: Array<[string, string]> = presets.map((p) => [p.id, p.builtin ? p.name : `${p.name} (내 프리셋)`]);
+    box.append(
+      select(direction === 'incoming' ? '응답 번역 프롬프트 (Incoming)' : '내 메시지 번역 프롬프트 (Outgoing)', presetId, options, (v) => {
+        draft[presetKey] = v;
+      }, true, true),
+    );
+    if (inherit) {
+      box.append(text('이 채팅의 프롬프트 (비워 두면 기본 번역 프롬프트, {{targetLanguage}} 사용 가능)', promptKey, { multiline: true, cls: 'stt-prompt', placeholder: MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim() }));
+    } else {
+      box.append(el('textarea', { class: 'stt-prompt', readOnly: true, value: preset.prompt }));
+    }
+    box.append(el('span', { class: 'stt-note' }, ['저장한 뒤 새로 번역하는 메시지부터 적용됩니다. 이미 번역된 메시지는 메시지의 "다시 번역" 버튼으로 새로 번역하세요.']));
+    return box;
+  }
+
+  function editPreset(existing: PresetSummary | null): void {
+    const modal = ctx.ui.showModal({ title: existing ? '프리셋 수정' : '새 프리셋', width: 680, maxHeight: 820, persistent: true });
+    const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '프리셋 이름' });
+    const prompt = el('textarea', { value: existing?.prompt ?? '', placeholder: '번역 시스템 프롬프트. {{targetLanguage}} 는 대상 언어로 바뀝니다.', spellcheck: false });
+    modal.root.replaceChildren(
+      el('div', { class: 'stt-modal' }, [
+        el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
+        el('label', { class: 'stt-field' }, [el('span', {}, ['프롬프트 전문']), prompt]),
+        el('div', { class: 'stt-row' }, [
+          button('저장', () => {
+            if (!name.value.trim() || !prompt.value.trim()) return notify('warning', '이름과 프롬프트를 입력해 주세요.');
+            toBackend({ type: 'save_preset', preset: { id: existing?.id ?? '', name: name.value, prompt: prompt.value } });
+            modal.dismiss();
+          }, 'stt-primary'),
+          button('취소', () => modal.dismiss()),
+        ]),
+      ]),
+    );
+  }
+
+  function presetManager(): HTMLElement {
+    const mine = presets.filter((p) => !p.builtin);
+    const row = el('div', { class: 'stt-row' }, [
+      button('+ 새 프리셋', () => editPreset(null)),
+      button('기본 프리셋 복사해서 새로 만들기', () => {
+        const base = presets.find((p) => p.id === draft.incomingPresetId && p.prompt);
+        editPreset(base ? { ...base, id: '', name: `${base.name} 사본`, builtin: false } : null);
+      }, '', '응답 번역에 선택된 프리셋을 복사합니다'),
+    ]);
+    const list = mine.map((p) =>
+      el('div', { class: 'stt-row' }, [
+        el('span', { style: 'flex:1' }, [p.name]),
+        button('수정', () => editPreset(p)),
+        button('삭제', async () => {
+          const { confirmed } = await ctx.ui.showConfirm({ title: '프리셋 삭제', message: `"${p.name}" 프리셋을 삭제할까요? 이 프리셋을 쓰던 채팅은 "채팅 설정 유지"로 돌아갑니다.`, variant: 'danger', confirmLabel: '삭제' });
+          if (confirmed) toBackend({ type: 'delete_preset', id: p.id });
+        }, 'stt-danger'),
+      ]),
+    );
+    return el('div', { class: 'stt-field' }, [row, ...(list.length ? list : [el('span', { class: 'stt-note' }, ['내 프리셋이 없습니다. 기본 프리셋은 읽기 전용입니다.'])])]);
+  }
 
   function editBundle(existing: UserBundle | null): void {
     const modal = ctx.ui.showModal({ title: existing ? '묶음 편집' : '새 묶음으로 저장', width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
-    const source = existing ?? current();
+    const source = existing ?? draft;
     const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '묶음 이름' });
     const glossary = el('textarea', { value: source.glossary, spellcheck: false, placeholder: '내 언어 용어 = 모델 언어 용어' });
     const freeContext = el('textarea', { value: source.freeContext, spellcheck: false });
+    const voice = el('textarea', { value: source.incomingVoicePrompt, spellcheck: false });
     modal.root.replaceChildren(el('div', { class: 'stt-modal stt-bundle-editor' }, [
       el('div', { class: 'stt-note' }, [existing
         ? '저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다.'
-        : '이 방의 묶음 내용(단어집·추가 지침)을 복사합니다. 저장 후 목록에서 선택해 주세요.']),
+        : '이 방에 입력한 단어집·추가 지침·캐릭터 말투를 복사합니다. 저장 후 목록에서 선택해 주세요. 방의 입력 내용은 그대로 남습니다.']),
       el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['단어집']), glossary]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['추가 지침']), freeContext]),
+      el('label', { class: 'stt-field' }, [el('span', {}, ['캐릭터 말투 (응답 번역에만)']), voice]),
       el('div', { class: 'stt-row' }, [
         button('저장', () => {
           if (!name.value.trim()) return notify('warning', '묶음 이름을 입력해 주세요.');
           toBackend({ type: 'save_bundle', bundle: {
             id: existing?.id ?? '', name: name.value, glossary: glossary.value,
-            freeContext: freeContext.value, incomingVoicePrompt: existing?.incomingVoicePrompt ?? '',
+            freeContext: freeContext.value, incomingVoicePrompt: voice.value,
           } });
           modal.dismiss();
         }, 'stt-primary'),
@@ -421,40 +685,11 @@ export function setup(ctx: SpindleFrontendContext) {
     ]));
   }
 
-  function lvState(): LvState {
-    if (!store) {
-      return { ready: false, chatKey: chatId ?? '', hasChat: !!chatId, values: { connectionId: '', modelLanguage: '', myLanguage: '', batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeRules: '', bundleId: '' }, connections: [], connectionNote: { text: '', kind: '' }, linkNote: '', bundles: [] };
-    }
-    const s = current();
-    let bundleId = s.bundleId;
-    if (bundleId && !store.userBundles.some((b) => b.id === bundleId)) bundleId = '';
-    const connectionId = effectiveConnectionId(store, chatId);
-    const options: Array<[string, string]> = [['', '자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)'], ...connections.map((c): [string, string] => [c.id, `${c.name} · ${c.model}${c.isDefault ? ' (기본)' : ''}`])];
-    if (connectionId && !connections.some((c) => c.id === connectionId)) options.push([connectionId, '(삭제된 연결)']);
-    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), connectionId || undefined, hint);
-    const pickedName = picked ? (connections.find((c) => c.id === picked.id)?.name ?? picked.id) : '';
-    const note: LvState['connectionNote'] = !connections.length
-      ? { text: 'Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요.', kind: 'err' }
-      : picked?.staleId
-        ? { text: `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.`, kind: 'warn' }
-        : { text: `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? 'host']}). 아래 저장 버튼으로 적용합니다.`, kind: '' };
-    return {
-      ready: true,
-      chatKey: chatId ?? '',
-      hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId },
-      connections: options,
-      connectionNote: note,
-      linkNote: link === 'none' ? '' : link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.',
-      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext })),
-    };
-  }
-
-  const lvForm: LvForm = mountLvForm(settingsHost.element, {
-    state: lvState,
-    editBundle: (id) => editBundle(id ? (store?.userBundles.find((b) => b.id === id) ?? null) : null),
-    deleteBundle: async (id) => {
-      const selected = store?.userBundles.find((b) => b.id === id);
+  function bundleSection(): HTMLElement {
+    const bundles = store?.userBundles ?? [];
+    const selected = bundles.find((b) => b.id === draft.bundleId);
+    const edit = button('묶음 편집', () => { if (selected) editBundle(selected); });
+    const remove = button('삭제', async () => {
       if (!selected) return;
       const { confirmed } = await ctx.ui.showConfirm({
         title: '묶음 삭제',
@@ -462,23 +697,313 @@ export function setup(ctx: SpindleFrontendContext) {
         variant: 'danger', confirmLabel: '삭제',
       });
       if (confirmed) toBackend({ type: 'delete_bundle', id: selected.id });
-    },
-    async save(v: LvValues) {
-      try {
-        parseExcludeRules(v.excludeRules);
-      } catch (e) {
-        throw new Error(e instanceof ExcludeRuleError ? e.message : '제외 규칙을 확인해 주세요.');
+    }, 'stt-danger');
+    edit.disabled = remove.disabled = !selected;
+    const preview = selected ? el('details', { class: 'stt-bundle-preview' }, [
+      el('summary', {}, [`${selected.name} · 내용 보기 (읽기 전용)`]),
+      ...([
+        ['단어집', selected.glossary], ['추가 지침', selected.freeContext], ['캐릭터 말투', selected.incomingVoicePrompt],
+      ] as const).map(([label, value]) => el('label', { class: 'stt-field' }, [
+        el('span', {}, [label]), el('textarea', { readOnly: true, value, placeholder: '내용 없음' }),
+      ])),
+    ]) : null;
+    return el('div', { class: 'stt-section' }, [
+      el('h3', {}, ['번역 지침 묶음']),
+      select('이 방의 묶음', draft.bundleId, [['', '없음'], ...bundles.map((b): [string, string] => [b.id, b.name])], (value) => {
+        draft.bundleId = value;
+      }, true, true),
+      el('div', { class: 'stt-row' }, [button('새 묶음으로 저장', () => editBundle(null), '', '이 방의 현재 3개 내용으로 새 묶음 저장'), edit, remove]),
+      el('div', { class: 'stt-note' }, ['묶음 선택은 아래 저장 버튼으로 적용합니다. 추가 지침·말투의 사용 여부는 방마다 정하며, 묶음과 이 방 추가분에 함께 적용됩니다. 같은 용어는 이 방 단어장이 우선합니다.']),
+      preview,
+    ]);
+  }
+
+  // ---- 번역 고치기 ----
+
+  const SYNC_PREF = 'stt-sync-source';
+  const readSyncPref = (): boolean => {
+    try { return localStorage.getItem(SYNC_PREF) !== '0'; } catch { return true; }
+  };
+  const writeSyncPref = (on: boolean): void => {
+    try { localStorage.setItem(SYNC_PREF, on ? '1' : '0'); } catch { /* per-browser convenience only */ }
+  };
+  let editorDone: ((r: Extract<ToFrontend, { type: 'edit_result' }>) => void) | null = null;
+
+  function openEditor(forChat: string, messageId: string, sourceKey: string, pairs: Array<{ source: string; translation: string; edited: boolean }>): void {
+    const modal = ctx.ui.showModal({ title: '번역 고치기', width: Math.min(720, window.innerWidth - 32), maxHeight: 820, persistent: true });
+    const areas = pairs.map((pair) => el('textarea', { value: pair.translation, spellcheck: false, rows: 3 }));
+    const list = el('div', { class: 'stt-edit-list' }, pairs.map((pair, i) =>
+      el('div', { class: 'stt-edit-row' }, [
+        el('div', { class: 'stt-edit-src' }, [pair.source]),
+        areas[i]!,
+        pair.edited ? el('span', { class: 'stt-badge' }, ['직접 고침']) : null,
+      ])));
+    // Rewriting the English only makes sense when the translation goes into Korean (the upstream prompt).
+    const korean = /korean|한국|^ko\b/i.test(current().myLanguage);
+    const sync = el('input', { type: 'checkbox', checked: korean && readSyncPref() });
+    sync.disabled = !korean;
+    const saveButton = button('저장', () => {
+      const edits = areas.flatMap((area, index) => (area.value !== pairs[index]!.translation && area.value.trim() ? [{ index, text: area.value }] : []));
+      if (!edits.length) {
+        modal.dismiss();
+        return;
       }
-      const settings: ChatSettings = {
-        ...current(),
-        modelLanguage: v.modelLanguage, myLanguage: v.myLanguage, batchChars: v.batchChars, autoTranslate: v.autoTranslate, translateMyMessages: v.translateMyMessages,
-        showDraftButton: v.showDraftButton, protectHtml: v.protectHtml, protectCode: v.protectCode, excludeRules: v.excludeRules,
-        bundleId: v.bundleId, connectionId: v.connectionId,
+      writeSyncPref(sync.checked);
+      saveButton.disabled = true;
+      saveButton.textContent = sync.checked ? '영어 원문 고치는 중…' : '저장 중…';
+      editorDone = (result) => {
+        if (result.messageId !== messageId) return;
+        editorDone = null;
+        if (!result.ok) {
+          saveButton.disabled = false;
+          saveButton.textContent = '저장';
+          notify('error', result.error || '저장하지 못했습니다.');
+          return;
+        }
+        modal.dismiss();
+        if (result.error) notify('warning', result.error);
+        else if (sync.checked) notify('info', result.rewritten ? `영어 원문 ${result.rewritten}문단을 고쳤습니다.` : '고칠 영어 문단을 찾지 못했습니다. 번역만 저장했습니다.');
       };
-      await call('lv.save', [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
-    },
-  });
-  const renderPanel = () => lvForm.refresh();
+      toBackend({ type: 'edit_save', chatId: forChat, messageId, sourceKey, edits, syncSource: sync.checked });
+    }, 'stt-primary');
+    modal.root.replaceChildren(el('div', { class: 'stt-modal' }, [
+      el('div', { class: 'stt-note' }, ['원문 문단 아래 칸에서 번역을 고칩니다. 문단 안에 빈 줄은 넣을 수 없습니다.']),
+      list,
+      el('label', { class: 'stt-check', title: '직접 고친 번역에 맞춰 영어 원문 문단도 AI로 고쳐서 저장합니다. 되돌리는 기능은 없으니 원문을 따로 보관해 두세요.' }, [sync, '영어 원문도 같이 고치기 (AI 호출, 고친 문단마다 1회)']),
+      el('div', { class: 'stt-row' }, [saveButton, button('취소', () => { editorDone = null; modal.dismiss(); })]),
+    ]));
+  }
+
+  // ---- 저장한 기타 지침 ----
+
+  let selectedNoteId = '';
+  let lastNote: { name: string; text: string } | null = null;
+
+  function noteTools(): HTMLElement {
+    const notes = store?.notes ?? [];
+    if (!notes.some((n) => n.id === selectedNoteId)) selectedNoteId = '';
+    const picked = notes.find((n) => n.id === selectedNoteId);
+    const load = button('불러오기', async () => {
+      if (!picked) return;
+      if (draft.freeContext.trim() && draft.freeContext.trim() !== picked.text.trim()) {
+        const { confirmed } = await ctx.ui.showConfirm({ title: '기타 지침 불러오기', message: `이 채팅의 기타 지침을 "${picked.name}"의 내용으로 바꿉니다. 지금 적힌 내용은 사라집니다.`, variant: 'warning', confirmLabel: '바꾸기' });
+        if (!confirmed) return;
+      }
+      // A copy: later changes to either side do not reach the other.
+      draft.freeContext = picked.text;
+      draft.freeContextEnabled = true;
+      markDirty();
+      renderPanel();
+      notify('info', '불러왔습니다. 아래 저장 버튼을 눌러야 이 채팅에 적용됩니다.');
+    }, '', '저장한 기타 지침을 이 채팅에 복사합니다');
+    const remove = button('삭제', async () => {
+      if (!picked) return;
+      const { confirmed } = await ctx.ui.showConfirm({ title: '저장한 기타 지침 삭제', message: `"${picked.name}"을 보관함에서 지울까요? 이미 불러와 쓰는 채팅의 기타 지침은 그대로 남습니다.`, variant: 'danger', confirmLabel: '삭제' });
+      if (confirmed) toBackend({ type: 'delete_note', id: picked.id });
+    }, 'stt-danger');
+    load.disabled = remove.disabled = !picked;
+    return el('div', { class: 'stt-field' }, [
+      el('div', { class: 'stt-row' }, [
+        button('예시 넣기 (지문 문체)', () => {
+          draft.freeContext = `${draft.freeContext.trimEnd()}${draft.freeContext.trim() ? '\n\n' : ''}${NARRATION_STYLE_EXAMPLE}`;
+          draft.freeContextEnabled = true;
+          markDirty();
+          renderPanel();
+        }, '', 'tlsiddl/marinara-translation-tools의 예시 기타 지침을 아래에 이어 붙입니다. 저장 전에 고쳐 쓰세요'),
+        button('이 기타 지침 저장', () => {
+          const modal = ctx.ui.showModal({ title: '기타 지침 저장', width: Math.min(520, window.innerWidth - 32), maxHeight: 420, persistent: true });
+          const name = el('input', { type: 'text', value: '', placeholder: '이름 (최대 60자)' });
+          modal.root.replaceChildren(el('div', { class: 'stt-modal' }, [
+            el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
+            el('div', { class: 'stt-row' }, [
+              button('저장', () => {
+                if (!name.value.trim()) return notify('warning', '이름을 입력해 주세요.');
+                lastNote = { name: name.value, text: draft.freeContext };
+                toBackend({ type: 'save_note', note: lastNote });
+                modal.dismiss();
+              }, 'stt-primary'),
+              button('취소', () => modal.dismiss()),
+            ]),
+          ]));
+        }, '', '지금 적힌 기타 지침을 이름을 붙여 모든 채팅에서 쓸 수 있게 보관합니다'),
+      ]),
+      select('저장한 기타 지침', selectedNoteId, [['', notes.length ? '고르세요' : '저장한 것이 없습니다'], ...notes.map((n): [string, string] => [n.id, n.name])], (v) => {
+        selectedNoteId = v;
+      }, false, true),
+      el('div', { class: 'stt-row' }, [load, remove]),
+      el('div', { class: 'stt-note' }, ['불러오기는 복사입니다. 저장한 것과 이 채팅의 기타 지침은 서로 연결되지 않습니다. (여러 방이 함께 쓰며 같이 바뀌는 묶음은 위의 "번역 지침 묶음")']),
+    ]);
+  }
+
+  function markDirty(): void {
+    dirty = true;
+    status = '';
+    tab.setBadge('!');
+    markDirtyUi?.();
+  }
+
+  function clearDirty(): void {
+    dirty = false;
+    tab.setBadge(null);
+    markDirtyUi?.();
+  }
+
+  function save(asDefault: boolean): void {
+    try {
+      draft.excludeTags = parseTags(draft.excludeTags).join(', ');
+    } catch (e) {
+      toBackend({ type: 'notify', kind: 'error', text: e instanceof ExcludeRuleError ? e.message : '제외할 태그 이름을 확인해 주세요.' });
+      return;
+    }
+    toBackend({ type: 'save_settings', chatId, settings: draft, asDefault });
+    clearDirty();
+    status = asDefault ? '저장했습니다. 새 채팅의 기본값으로도 저장했습니다.' : '저장했습니다.';
+  }
+
+  function renderPanel(): void {
+    if (!store) {
+      panel.replaceChildren(el('div', { class: 'stt-note' }, ['불러오는 중…']));
+      return;
+    }
+    if (!dirty) {
+      draft = { ...current() };
+      draft.connectionId = effectiveConnectionId(store, chatId);
+    }
+    // A shared bundle can be deleted while this room has other unsaved edits.
+    if (draft.bundleId && !store.userBundles.some((b) => b.id === draft.bundleId)) draft.bundleId = '';
+    const connectionOptions: Array<[string, string]> = [['', '자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)'], ...connections.map((c): [string, string] => [c.id, `${c.name} · ${c.model}${c.isDefault ? ' (기본)' : ''}`])];
+    if (draft.connectionId && !connections.some((c) => c.id === draft.connectionId)) connectionOptions.push([draft.connectionId, '(삭제된 연결)']);
+    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), draft.connectionId || undefined, hint);
+    const pickedName = picked ? (connections.find((c) => c.id === picked.id)?.name ?? picked.id) : '';
+    const connectionNote = !connections.length
+      ? el('div', { class: 'stt-note stt-err' }, ['Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요.'])
+      : el('div', { class: `stt-note${picked?.staleId ? ' stt-warn' : ''}` }, [
+          picked?.staleId ? `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.` : `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? 'host']}). 연결은 고르는 즉시 저장됩니다.`,
+        ]);
+    const saveNotice = el('span', { class: 'stt-unsaved-note', role: 'status' }, ['저장하지 않은 변경이 있어요. 저장 버튼을 눌러야 적용됩니다.']);
+    const saveRow = el('div', { class: 'stt-row stt-sticky' }, [
+      saveNotice,
+      button('저장', () => save(false), 'stt-primary'),
+      chatId ? button('저장 + 새 채팅 기본값으로', () => save(true)) : null,
+      button('되돌리기', () => {
+        clearDirty();
+        renderPanel();
+      }),
+      status ? el('span', { class: 'stt-note' }, [status]) : null,
+    ]);
+    markDirtyUi = () => {
+      saveRow.classList.toggle('stt-unsaved', dirty);
+      saveNotice.hidden = !dirty;
+    };
+    markDirtyUi();
+    const contextSub = el('div', { class: 'stt-sub' }, [
+      el('div', { class: 'stt-row' }, [check('원문 포함', 'contextIncludeOriginal'), check('번역문 포함', 'contextIncludeTranslation'), check('내 메시지 번역에도 포함', 'contextIncludeUserInput')]),
+      (() => {
+        const n = el('input', { type: 'number', min: 1, max: 10, value: draft.contextMessageCount });
+        n.addEventListener('input', () => {
+          draft.contextMessageCount = Number(n.value) || 3;
+          markDirty();
+        });
+        return el('label', { class: 'stt-field' }, [el('span', {}, ['최근 메시지 수 (1~10)']), n]);
+      })(),
+    ]);
+    const split = el('input', { type: 'number', min: 0, step: 500, value: draft.longSplitChars });
+    split.addEventListener('input', () => {
+      draft.longSplitChars = Math.max(0, Number(split.value) || 0);
+      markDirty();
+    });
+    fontHost = el('div', { class: 'stt-field' });
+    const paragraphMode = draft.displayMode === 'paragraph';
+    const paragraphSection = () => el('div', { class: 'stt-section' }, [
+      el('h3', {}, ['문단 대조 (Paragraph Reader)']),
+      select('보기', localView.paragraphView, [['interleave', '원문·번역 교차'], ['tap', '눌러서 원문 (번역만 보이고, 문단마다 눌러서 원문을 펼침)']], (v) => {
+        localView = { ...localView, paragraphView: v === 'tap' ? 'tap' : 'interleave' };
+        toBackend({ type: 'save_view', view: localView });
+      }, false),
+      localView.paragraphView === 'interleave'
+        ? select('문단 안 순서', localView.paragraphOrder, [['source-first', '원문 → 번역'], ['translation-first', '번역 → 원문']], (v) => {
+            localView = { ...localView, paragraphOrder: (v === 'translation-first' ? 'translation-first' : 'source-first') as ParagraphOrder };
+            toBackend({ type: 'save_view', view: localView });
+          }, false)
+        : null,
+      text('도착 언어 (응답을 번역할 언어, "내 언어"와 같은 설정)', 'myLanguage'),
+      fontHost,
+      el('div', { class: 'stt-note' }, ['보기와 글자 크기는 바로 적용되고 저장됩니다. 도착 언어는 아래 저장 버튼으로 저장합니다.']),
+    ]);
+    panel.replaceChildren(
+      el('div', { class: 'stt-note' }, [chatId ? '지금 열린 채팅의 번역 설정입니다.' : '열린 채팅이 없어 새 채팅의 기본값을 편집합니다.']),
+      el('div', { class: 'stt-section' }, [
+        el('h3', {}, ['기본 번역']),
+        select('번역에 쓸 AI 연결', draft.connectionId, connectionOptions, (v) => {
+          draft.connectionId = v;
+          toBackend({ type: 'save_connection', chatId, connectionId: v });
+          status = '연결을 저장했습니다.';
+        }, false),
+        connectionNote,
+        link === 'none' ? null : el('div', { class: `stt-note${link === 'incompatible' ? ' stt-warn' : ''}` }, [link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.']),
+        el('div', { class: 'stt-row' }, [text('모델 언어 (내 메시지를 이 언어로)', 'modelLanguage'), text('내 언어 (응답을 이 언어로)', 'myLanguage')]),
+        check('AI 응답 자동 번역', 'autoTranslate'),
+        check('번역이 끊기면 자동으로 이어서 번역', 'autoContinue'),
+        select('번역문 표시 방식', draft.displayMode, Object.entries(DISPLAY_LABELS) as Array<[string, string]>, (v) => (draft.displayMode = v as DisplayMode), true, true),
+        select('번역 단위', draft.translationUnit, [
+          ['whole', '메시지 통째로 (1회 요청, 문단 수가 같으면 문단별로 맞춰 보여 줌)'],
+          ['paragraph', '문단별 (문단마다 1회 요청, 문단 대조가 정확히 맞음)'],
+        ], (v) => (draft.translationUnit = v === 'paragraph' ? 'paragraph' : 'whole')),
+        check('내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)', 'translateMyMessages'),
+        check('입력창 옆에 번역 버튼 표시', 'showDraftButton'),
+      ]),
+      ...(paragraphMode ? [paragraphSection()] : []),
+      el('div', { class: 'stt-section' }, [el('h3', {}, ['프롬프트 프리셋']), promptSection('incoming'), promptSection('outgoing'), presetManager()]),
+      bundleSection(),
+      el('div', { class: 'stt-section' }, [
+        el('h3', {}, ['단어장']),
+        text('이 방에만 추가 · 한 줄에 한 쌍: 내 언어 용어 = 모델 언어 용어 (양방향 적용)', 'glossary', { multiline: true, placeholder: '마리나라 = Marinara\n로어북 = lorebook' }),
+      ]),
+      el('div', { class: 'stt-section' }, [
+        el('h3', {}, ['참고 정보']),
+        check('기타 지침 추가 (장르·시대·지역·배경 등)', 'freeContextEnabled', renderPanel),
+        draft.freeContextEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 기타 지침', 'freeContext', { multiline: true }), noteTools()]) : null,
+        check('대사 지침 추가 (응답 번역에만)', 'incomingVoiceEnabled', renderPanel),
+        draft.incomingVoiceEnabled ? el('div', { class: 'stt-sub' }, [text('이 방에만 추가 · 대사 지침 (# Character Voice Instructions)', 'incomingVoicePrompt', { multiline: true })]) : null,
+        check('이전 대화를 번역 참고로 포함', 'contextEnabled', renderPanel),
+        draft.contextEnabled ? contextSub : null,
+      ]),
+      el('div', { class: 'stt-section' }, [
+        el('h3', {}, ['번역하지 않을 부분']),
+        check('HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역', 'protectHtml'),
+        check('코드 블록(```) 은 번역하지 않음', 'protectCode'),
+        el('div', { class: 'stt-field' }, [
+          text('제외할 HTML 태그 (쉼표·공백으로 구분)', 'excludeTags', { placeholder: 'choices, status, ui' }),
+          el('div', { class: 'stt-row' }, [
+            button('추천 태그 넣기', () => {
+              const have = new Set(parseTagsSafe(draft.excludeTags));
+              for (const t of SUGGESTED_TAGS) have.add(t);
+              draft.excludeTags = [...have].join(', ');
+              markDirty();
+              renderPanel();
+            }, '', `${SUGGESTED_TAGS.join(', ')} 를 목록에 더합니다`),
+          ]),
+          el('div', { class: 'stt-note' }, ['이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. <style>·<script> 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다.']),
+        ]),
+        text('제외 규칙 (한 줄에 하나)', 'excludeRules', { multiline: true, placeholder: '<status>\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]' }),
+        el('div', { class: 'stt-note' }, ['<태그> 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.']),
+      ]),
+      el('div', { class: 'stt-section' }, [
+        el('h3', {}, ['긴 지문']),
+        el('label', { class: 'stt-field' }, [el('span', {}, ['이 글자 수 이상이면 문단별로 나눠 번역 (0 = 나누지 않음)']), split]),
+      ]),
+      saveRow,
+    );
+    renderFonts();
+  }
+
+  // Leaving the page with unsaved settings loses them: let the browser ask first.
+  const onBeforeUnload = (e: BeforeUnloadEvent) => {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
 
   const action = ctx.ui.registerInputBarAction({ id: 'open-translator', label: '번역 설정' });
   const offAction = action.onClick(() => tab.activate());
@@ -489,24 +1014,83 @@ export function setup(ctx: SpindleFrontendContext) {
     const msg = raw as ToFrontend;
     switch (msg?.type) {
       case 'state': {
+        const shape = (st: Store) => JSON.stringify([st.chats, st.defaults, st.view.paragraphView, st.view.paragraphOrder]);
+        const before = store ? shape(store) : null;
         store = msg.store;
+        presets = msg.presets;
         connections = msg.connections;
         link = msg.link ?? 'none';
+        if (!viewSaveTimer) {
+          localView = { ...store.view };
+          applyFontStyle();
+        }
+        // Different display settings need the host to render the messages again.
+        if (before !== null && before !== shape(store)) ctx.display?.invalidate?.(['*']);
+        decorate();
         renderPanel();
         renderDraftButton();
         return;
       }
-      case 'msg_event': {
-        if (msg.kind === 'upsert') cache.upsert(msg.chatId, msg.row as MessageRow);
-        else cache.remove(msg.chatId, msg.messageId);
+      case 'views':
+        if (msg.chatId !== chatId) return;
+        if (msg.requestedIds) {
+          // A sparse response also acknowledges untranslated/deleted messages.
+          for (const id of msg.requestedIds) {
+            views.delete(id);
+            plainMessages.delete(id);
+          }
+          for (const id of msg.plainIds ?? []) plainMessages.add(id);
+          viewRequests.take(msg.requestedIds);
+          const keep = new Set(msg.views.map((view) => view.messageId));
+          for (const id of msg.requestedIds) if (!keep.has(id)) {
+            const bar = bars.get(id);
+            if (bar) ctx.dom.uninject(bar);
+            bars.delete(id);
+          }
+        } else if (msg.replace) {
+          const keep = new Set(msg.views.map((v) => v.messageId));
+          for (const [id, bar] of bars) if (!keep.has(id)) {
+            ctx.dom.uninject(bar);
+            bars.delete(id);
+          }
+          views.clear();
+        }
+        for (const v of msg.views) {
+          views.set(v.messageId, v);
+          viewRequests.take([v.messageId]);
+        }
+        decorate();
         return;
-      }
-      case 'emu_result': {
-        const waiter = rpc.get(msg.id);
-        if (!waiter) return;
-        rpc.delete(msg.id);
-        if (msg.ok) waiter.resolve(msg.data);
-        else waiter.reject(Object.assign(new Error(msg.error || '요청 실패'), { status: msg.status }));
+      case 'edit_data':
+        if (msg.chatId !== chatId) return;
+        if (!msg.ok || !msg.pairs || !msg.sourceKey) {
+          notify('warning', msg.error || '이 메시지는 고칠 수 없습니다.');
+          return;
+        }
+        openEditor(msg.chatId, msg.messageId, msg.sourceKey, msg.pairs);
+        return;
+      case 'edit_result':
+        editorDone?.(msg);
+        return;
+      case 'note_result':
+        if (msg.needsOverwrite && lastNote) {
+          const again = lastNote;
+          void ctx.ui
+            .showConfirm({ title: '같은 이름이 있어요', message: `"${msg.needsOverwrite}" 이름으로 저장한 기타 지침이 있습니다. 덮어쓸까요?\n이미 불러와 쓰는 채팅의 기타 지침은 그대로입니다.`, variant: 'warning', confirmLabel: '덮어쓰기' })
+            .then(({ confirmed }) => {
+              if (confirmed) toBackend({ type: 'save_note', note: again, overwrite: true });
+            });
+          return;
+        }
+        if (!msg.ok) notify('warning', msg.error || '저장하지 못했습니다.');
+        else notify('info', '기타 지침을 저장했습니다.');
+        return;
+      case 'text_result': {
+        const p = pending.get(msg.reqId);
+        if (!p) return;
+        pending.delete(msg.reqId);
+        if (msg.ok && typeof msg.text === 'string') p.resolve(msg.text);
+        else p.reject(new Error(msg.error || '번역 실패'));
         return;
       }
     }
@@ -520,16 +1104,22 @@ export function setup(ctx: SpindleFrontendContext) {
   return () => {
     clearInterval(routeTimer);
     document.removeEventListener('visibilitychange', onVisible);
-    lvForm.stop();
-    visible.destroy();
-    original.stop();
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    if (viewSaveTimer) clearTimeout(viewSaveTimer);
+    removeFontStyle?.();
+    observer.disconnect();
+    document.removeEventListener('scroll', queueDecorate, true);
+    window.removeEventListener('resize', queueDecorate);
+    if (refreshTimer) clearTimeout(refreshTimer);
+    if (decorateTimer) clearTimeout(decorateTimer);
+    toolbars.destroy();
     offEvents.forEach((off) => off());
     offBackend();
     offAction();
     action.destroy();
     tab.destroy();
     if ((window.fetch as unknown) === translatingFetch) window.fetch = originalFetch;
-    for (const p of rpc.values()) p.reject(new Error('확장이 종료되었습니다.'));
+    for (const p of pending.values()) p.reject(new Error('확장이 종료되었습니다.'));
     removeStyle();
     ctx.dom.cleanup();
   };

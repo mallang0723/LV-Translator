@@ -1,19 +1,12 @@
 {
-  "version": "0.5.3",
+  "version": "0.4.0",
   "name": "양방향 번역",
   "identifier": "st_translator",
   "author": "mallang0723",
   "github": "https://github.com/mallang0723/LV-Translator",
   "homepage": "https://github.com/mallang0723/LV-Translator",
-  "description": "Marinara Engine의 번역 기능을 참고해 만든 Lumiverse용 양방향 번역 확장입니다. 원작 번역 프리셋·단어장(Translation Tools 1.10.0)의 화면과 기능을 그대로 옮겼습니다: 문단별 번역 보기, 대조·수정(문단별 다시 번역), 말투·단어·세계관·NPC 자동 수집, 설정 백업. 내 메시지 번역과 입력창 번역 버튼을 더했습니다.",
-  "permissions": [
-    "generation",
-    "chat_mutation",
-    "chats",
-    "characters",
-    "personas",
-    "world_books"
-  ],
+  "description": "Marinara Engine의 번역 기능을 참고해 만든 Lumiverse용 양방향 번역 확장입니다. 번역 프리셋·단어장(Translation Tools 1.8.0), 응답 자동 번역, 내 메시지 번역, 끊긴 번역 이어서 하기, 번역 고치기, HTML·상태창 보호를 지원합니다.",
+  "permissions": ["generation", "chat_mutation", "chats"],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js"
 }
