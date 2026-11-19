@@ -244,7 +244,7 @@ await page2.evaluate(() => {
       const user = i.messages.find((m) => m.role === 'user')?.content ?? '';
       const ids = [...user.matchAll(/<segment id="(\d+)">/g)].map((m) => m[1]);
       // keeps every ⟦n⟧ protection marker it was given (the 제외 규칙 mask)
-      if (ids.length) return { content: [...user.matchAll(/<segment id="(\d+)">\n?([\s\S]*?)\n?<\/segment>/g)].map((m) => `<segment id="${m[1]}">번역 ${m[1]}${(m[2].match(/⟦\d+⟧/g) || []).map((k) => ' ' + k).join('')}</segment>`).join('\n') };
+      if (ids.length) return { content: [...user.matchAll(/<segment id="(\d+)">\n?([\s\S]*?)\n?<\/segment>/g)].map((m) => `<segment id="${m[1]}">번역 ${m[1]}${/Farseer\|/.test(m[2]) ? ' **번역|** "번역"' : /<x\d+>/.test(m[2]) ? ' ' + m[2].replace(/(<\/?x\d+>)|(⟪\d+⟫)|([^<⟪]+)/g, (a, t, at, tx) => (tx ? (/\S/.test(tx) ? tx.replace(/[A-Za-z][^"“”|]*/g, '번역') : tx) : a)) : ''}${(m[2].match(/⟦\d+⟧/g) || []).map((k) => ' ' + k).join('')}</segment>`).join('\n') };
       if (/^\[Original English\]/.test(user)) return { content: 'Alpha one revised.' }; // 영어 원문도 같이 고치기
       if (/^Translate the following text to /.test(user)) return { content: 'EN: ' + user.split('\n\n').slice(1).join('\n\n') };
       return { content: '{"characters":[],"terms":[]}' };
@@ -646,9 +646,10 @@ await page2.waitForSelector('[data-message-id="m11"] .ptx-view', { timeout: 8000
 await page2.waitForTimeout(900);
 const vi = await islandInfo('.ptx-view');
 const hi = await islandInfo('.mari-message-content:not(.ptx-view)');
-check('0.5.3 (7): the translated view shows all 3 status/card blocks (before, between and after the prose), same content as the original', vi.length === 3 && vi.every((x, i) => x.has && x.html === hi[i]?.html && x.html.length > 20), JSON.stringify(vi.map((x) => x.has && x.html.length)));
-check('0.5.3 (7): a card block is kept as it was (CARD text present, in place after the 2nd paragraph)', vi[1]?.html.includes('CARD: Mina, Lv 3'));
-check('0.5.3 (7): the prose around the blocks is translated (3 paragraphs)', (await page2.locator('[data-message-id="m11"] .ptx-view .ptx-u[data-k]').count()) === 3);
+check('0.5.3 (7): the translated view shows all 3 status/card blocks (before, between and after the prose) with the same <details> as the original', vi.length === 3 && vi.every((x, i) => x.has && x.html.length > 20 && (x.html.match(/<details/g) || []).length === (hi[i]?.html.match(/<details/g) || []).length), JSON.stringify(vi.map((x) => x.has && x.html.length)));
+check('0.5.3 (7): the card block is kept (still a div.card, translated, in place after the 2nd paragraph)', /class="card"/.test(vi[1]?.html ?? '') && vi[1].html.includes('번역'));
+const m11units = await page2.evaluate(() => document.querySelectorAll('[data-message-id="m11"] .ptx-view .ptx-u[data-k]').length);
+check('0.5.3 (7): the prose around the blocks is translated (3 paragraphs)', m11units === 3, `${m11units} ` + await page2.evaluate(() => JSON.stringify([...document.querySelectorAll('[data-message-id="m11"] .ptx-view .ptx-u[data-k]')].map((u) => (u.closest('[data-lv-mirror]') ? 'M:' : u.parentElement.tagName + ':') + u.textContent.slice(0, 18)))));
 check('0.5.3 (7): the blocks sit between the paragraphs in the original order', await page2.evaluate(() => { const kids = [...document.querySelector('[data-message-id="m11"] .ptx-view .body11').children].map((e) => e.hasAttribute('data-lumiverse-html-island') ? 'I' : 'P'); return kids.join('') === 'PIPIPI' || kids.join('') === 'SISISI' || kids.join('').replace(/[^IPS]/g, '').replace(/[PS]/g, 'P') === 'PIPIPI'; }));
 await page2.screenshot({ path: join(shots, '08-islands-translated.png'), fullPage: true });
 const toggled = await page2.evaluate(() => {
@@ -782,6 +783,57 @@ for (const mode of ['tr', 'both']) {
   check('0.5.3 (9): 재번역 keeps the excluded blocks in place and does not send them', sent.length > 0 && NOT_SENT.every((x) => !sent.includes(x)) && paras.length === 8 && paras[1].startsWith('Plan item A.') && paras[4].startsWith('[상태창] HP bar') && paras[6].startsWith('Card text here.'), JSON.stringify(paras));
 }
 await page2.evaluate(() => { document.querySelector('[data-message-id="m14"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm14'), 1); window.__cleanup(); window.__lvStore = null; window.__setStorage(null); window.__cleanup = window.__LVSetup(window.__ctx); });
+
+// ---- 0.5.4 (A5, A7, cyoa): blocks inside HTML islands are translated, keyed like the view, and shown in place ----
+await page2.evaluate(() => {
+  window.__cleanup();
+  const t = Math.floor(Date.now() / 1000);
+  const islands = [
+    '<div class="hdr">[ The Farseer of the north ]<br>[ The Stargazer on the hill ]</div><div class="prose"><strong>The Stargazer|</strong> "<span style="color:#a8c6df">Head up and look at the sky.</span>"</div>',
+    '<div class="pass">The ride was smooth, said Mira, a bumpy ride at worst.</div><div class="fail">Loose shale gives way under his boots.</div><div class="fail2"><strong>Farseer|</strong> "<span style="color:#a8c6df">Hold on to something solid.</span>"</div>',
+    '<details class="cyoa"><summary>Action Hints for this scene</summary><div>1. Go left toward the light.<br>2. Go right into the dark.</div></details>',
+  ];
+  window.__messages.push({ id: 'm15', role: 'assistant', content: 'Opening prose of the scene.\n\n[ The Farseer of the north ]\n[ The Stargazer on the hill ]\n**The Stargazer|** "Head up and look at the sky."\n\nThe ride was smooth.\n</pass>\n<fail>Loose shale gives way under his boots.\n\nClosing prose of the scene.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: t + 1100, swipe_dates: [t + 1100] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm15');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="b15"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  const body = row.querySelector('.b15');
+  const mk = (text) => { const p = document.createElement('p'); p.textContent = text; return p; };
+  const isl = (html) => { const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = html; return d; };
+  body.append(mk('Opening prose of the scene.'), isl(islands[0]), isl(islands[1]), isl(islands[2]), mk('Closing prose of the scene.'));
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(1500);
+const q15 = await page2.evaluate(() => window.__quiet.length);
+await page2.locator('[data-message-id="m15"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m15"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(1200);
+const shadowBlocks = () => page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].map((e) => ({ text: (e.shadowRoot?.textContent ?? '').replace(/\s+/g, ' '), blocks: [...(e.shadowRoot?.querySelectorAll('.hdr, .prose, .pass, .fail, .fail2, summary, details > div') ?? [])].map((b) => [...b.querySelectorAll('.ptx-t')].map((t) => t.textContent).join('').replace(/\s+/g, ' ').trim()) })));
+const sb = await shadowBlocks();
+const sent15 = await page2.evaluate((n) => window.__quiet.slice(n).map((c) => c.messages.find((m) => m.role === 'user').content).join('\n'), q15);
+check('0.5.4 (A5/A7/cyoa): the text inside every island (header lines, dialogue, pass/fail, summary, hints) was sent as units', ['Farseer of the north', 'Head up and look', 'bumpy ride', 'Loose shale', 'Hold on to something', 'Action Hints', 'Go left'].every((x) => sent15.includes(x)), sent15.slice(0, 200));
+check('0.5.4 (A5): every block of the header+dialogue island shows its translation (no English left)', sb[0]?.blocks.length === 2 && sb[0].blocks.every((b) => b.includes('번역')) && !sb[0].blocks.some((b) => /Farseer of the north|Head up|[a-z]{4}/.test(b.replace(/번역/g, ''))), JSON.stringify(sb[0]));
+check('0.5.4 (A7): pass, fail and the dialogue after them each show a translation', sb[1]?.blocks.length === 3 && sb[1].blocks.every((b) => b.includes('번역')) && !sb[1].blocks.some((b) => /[a-z]{4}/.test(b)), JSON.stringify(sb[1]));
+check('0.5.4 (cyoa): the <details> shows a translated summary title and body', sb[2]?.blocks.length >= 2 && sb[2].blocks.every((b) => b.includes('번역')) && !sb[2].blocks.some((b) => /[a-z]{4}/.test(b)), JSON.stringify(sb[2]));
+check('0.5.4 (A7): a translation that came back as markdown (**name|**) is drawn as bold, not as literal asterisks', await page2.evaluate(() => { const sh = [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')][1].shadowRoot; return !!sh.querySelector('.ptx-t strong') && [...sh.querySelectorAll('.ptx-t strong')].some((x) => x.textContent === '번역|'); }));
+check('0.5.4: no literal markdown (**) anywhere in the translated message', !(await page2.evaluate(() => document.querySelector('[data-message-id="m15"] .ptx-view').textContent + [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].map((e) => e.shadowRoot?.textContent ?? '').join('')).then((t) => t.includes('**'))));
+check('0.5.4: the dialogue colour span keeps its colour inside the translated island', await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].every((e, i) => i === 2 || [...e.shadowRoot.querySelectorAll('span')].some((sp) => getComputedStyle(sp).color === 'rgb(168, 198, 223)'))));
+check('0.5.4 (cyoa): the translated <details> is still collapsible', await page2.evaluate(() => { const d = document.querySelector('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]:nth-of-type(3)')?.shadowRoot?.querySelector('details') ?? [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')][2].shadowRoot.querySelector('details'); const a = d.open; d.querySelector('summary').click(); const b = d.open; d.querySelector('summary').click(); return a === false && b === true && d.open === false; }));
+await page2.screenshot({ path: join(shots, '10-islands-translated-units.png'), fullPage: true });
+// the compare window and the reading view agree: one row per translated unit shown
+const unitsShown = await page2.evaluate(() => document.querySelectorAll('[data-message-id="m15"] .ptx-view .ptx-u[data-k]').length + [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].reduce((n, e) => n + e.shadowRoot.querySelectorAll('.ptx-u[data-k]').length, 0));
+await page2.locator('[data-message-id="m15"] .ptx-bar [data-ptx-act="compare"]').click({ timeout: 3000 }).catch(() => {});
+await page2.waitForSelector('.ptx-compare', { timeout: 4000 }).catch(() => {});
+const rows15 = await page2.locator('.ptx-compare [data-act="row"]').count();
+check('0.5.4: the compare window and the reading view agree (same number of units)', rows15 === unitsShown && rows15 >= 9, `${rows15} rows / ${unitsShown} shown`);
+await page2.evaluate(() => document.querySelectorAll('.ptx-modal-root').forEach((e) => e.remove()));
+// show original: the real islands are intact, the mirror stays hidden
+await page2.locator('[data-message-id="m15"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForTimeout(700);
+const origIsl = await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m15"] [data-lumiverse-html-island]')].map((e) => ({ inView: !!e.closest('.ptx-view'), latin: /[A-Za-z]{4}/.test(e.shadowRoot?.textContent ?? ''), ko: (e.shadowRoot?.textContent ?? '').includes('번역'), mirror: e.querySelector('[data-lv-mirror]') ? (e.querySelector('[data-lv-mirror]').getClientRects().length ? 'shown' : 'none') : 'none-absent' })));
+check('0.5.4: showing the original, the islands are the original ones and the mirrors are hidden', origIsl.length === 3 && origIsl.every((x) => !x.inView && x.latin && !x.ko && (x.mirror === 'none' || x.mirror === 'none-absent')), JSON.stringify(origIsl));
+await page2.evaluate(() => { document.querySelector('[data-message-id="m15"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm15'), 1); });
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));

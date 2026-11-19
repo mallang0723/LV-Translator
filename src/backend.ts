@@ -92,7 +92,7 @@ async function readTtConfig(uid: Uid, fresh = false): Promise<TtConfig> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.5.3';
+const SELF_VERSION = '0.5.4';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;

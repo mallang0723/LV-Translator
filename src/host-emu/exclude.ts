@@ -11,6 +11,7 @@ import { checkMarkers, MARKER_INSTRUCTION, parseExcludeRules, restore } from '..
 import { extractSegments, parseBatch, type RawGenerate, withPrefill } from './split';
 
 const MARK = (n: number) => `⟦${n}⟧`;
+const TRIVIAL = /^[\s\-*•·–—]*(?:none|n\/a|nil|없음|해당 없음)?[\s.]*$/i;
 
 export function excludedRanges(joined: string, rules: RegExp[]): Array<[number, number]> {
   const all: Array<[number, number]> = [];
@@ -31,16 +32,15 @@ export function excludedRanges(joined: string, rules: RegExp[]): Array<[number, 
 export function withExclusions(generate: RawGenerate, rulesText: () => string): RawGenerate {
   return async (req, signal) => {
     const raw = rulesText();
-    if (!raw.trim()) return generate(req, signal);
-    let rules: RegExp[];
+    let rules: RegExp[] = [];
     try {
-      rules = parseExcludeRules(raw);
+      rules = raw.trim() ? parseExcludeRules(raw) : [];
     } catch {
-      return generate(req, signal); // an invalid rule is reported when the setting is saved
+      rules = []; // an invalid rule is reported when the setting is saved
     }
     const userIndex = req.messages.map((m: { role: string }) => m.role).lastIndexOf('user');
     const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex]!.content) : null;
-    if (!parsed || !rules.length) return generate(req, signal);
+    if (!parsed) return generate(req, signal);
 
     // A prefill that is itself a piece of a segment tag cannot be put in front of a rebuilt reply (see split.ts): the request goes as it is.
     const lastMsg = req.messages[req.messages.length - 1];
@@ -48,10 +48,9 @@ export function withExclusions(generate: RawGenerate, rulesText: () => string): 
 
     const SEP = '\n\n';
     const joined = parsed.segments.map((s) => s.text).join(SEP);
-    const ranges = excludedRanges(joined, rules);
-    if (!ranges.length) return generate(req, signal);
+    const ranges = rules.length ? excludedRanges(joined, rules) : [];
 
-    interface Item { id: number; source: string; masked: string; pieces: string[]; full: boolean }
+    interface Item { id: number; source: string; masked: string; pieces: string[]; full: boolean; trivial: boolean }
     const items: Item[] = [];
     let at = 0;
     for (const seg of parsed.segments) {
@@ -70,9 +69,11 @@ export function withExclusions(generate: RawGenerate, rulesText: () => string): 
       }
       masked += joined.slice(cursor, to);
       const left = masked.replace(/⟦\d+⟧/g, '');
-      items.push({ id: seg.id, source: seg.text, masked, pieces, full: pieces.length > 0 && !/[\p{L}\p{N}]/u.test(left) });
+      // An empty bottom-block line ("- 없음", "- None") is not worth a model call: it is answered with its own text.
+      const trivial = TRIVIAL.test(seg.text.replace(/<\/?x\d+>|⟪\d+⟫/g, ''));
+      items.push({ id: seg.id, source: seg.text, masked, pieces, trivial, full: trivial || (pieces.length > 0 && !/[\p{L}\p{N}]/u.test(left)) });
     }
-    if (items.every((i) => !i.pieces.length)) return generate(req, signal);
+    if (items.every((i) => !i.pieces.length && !i.trivial)) return generate(req, signal);
 
     const send = items.filter((i) => !i.full);
     const done = new Map<number, string>();
