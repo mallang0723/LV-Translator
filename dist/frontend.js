@@ -8605,17 +8605,26 @@ function forwardLongMessageToggle(e) {
     real.click();
 }
 var mirrored = new WeakMap;
-var watched = new WeakSet;
 var MIRROR = "data-lv-mirror";
-function syncMirror(island, onChange) {
+var DOCUMENT_WIDE = "style, link, meta, base, title, script, template";
+function mirrorHtml(shadow) {
+  const box = document.createElement("div");
+  for (const node of Array.from(shadow.childNodes))
+    box.append(node.cloneNode(true));
+  for (const el of Array.from(box.querySelectorAll(DOCUMENT_WIDE)))
+    el.remove();
+  return box.innerHTML;
+}
+function syncMirror(island, onChange, observers) {
   const shadow = island.shadowRoot;
   if (!shadow)
     return;
-  if (!watched.has(shadow)) {
-    watched.add(shadow);
-    new MutationObserver(onChange).observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true });
+  if (!observers.has(shadow)) {
+    const o = new MutationObserver(onChange);
+    o.observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true });
+    observers.set(shadow, o);
   }
-  const html = shadow.innerHTML;
+  const html = mirrorHtml(shadow);
   let mirror = island.querySelector(`:scope > [${MIRROR}]`);
   if (mirror && mirrored.get(mirror) === html)
     return;
@@ -8683,7 +8692,9 @@ function restoreIslands(view) {
       const shadow = target.attachShadow({ mode: "open" });
       const style = document.createElement("style");
       style.textContent = VIEW_CSS;
-      shadow.append(style, ...Array.from(mirror.childNodes));
+      const real = from.length === to.length ? from[i].shadowRoot : null;
+      const styles = real ? Array.from(real.querySelectorAll("style")).map((st) => st.cloneNode(true)) : [];
+      shadow.append(...styles, style, ...Array.from(mirror.childNodes));
       mirror.remove();
       renderInlineMarkdown(shadow);
       shadow.addEventListener("click", (e) => {
@@ -8747,6 +8758,7 @@ function startDomBridge(root = document) {
   let timer = null;
   let destroyed = false;
   const added = new Set;
+  const shadowObservers = new Map;
   function tag(message) {
     for (const body of Array.from(message.querySelectorAll('[data-component="MessageContent"]'))) {
       if (body.closest("[data-message-id]") === message && !body.classList.contains("mari-message-content")) {
@@ -8780,7 +8792,7 @@ function startDomBridge(root = document) {
       tag(m);
     for (const island of Array.from(root.querySelectorAll(".mari-message-content [data-lumiverse-html-island]"))) {
       if (!island.closest(".ptx-view"))
-        syncMirror(island, queue);
+        syncMirror(island, queue, shadowObservers);
     }
     for (const v of Array.from(root.querySelectorAll(".ptx-view"))) {
       restoreIslands(v);
@@ -8811,6 +8823,11 @@ function startDomBridge(root = document) {
       if (timer)
         clearTimeout(timer);
       observer.disconnect();
+      for (const o of shadowObservers.values())
+        o.disconnect();
+      shadowObservers.clear();
+      for (const m of Array.from(document.querySelectorAll(`[${MIRROR}]`)))
+        m.remove();
       for (const el of added) {
         if (el.hasAttribute("data-ptx-host-button"))
           el.remove();

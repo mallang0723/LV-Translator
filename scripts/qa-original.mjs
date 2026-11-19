@@ -789,7 +789,7 @@ await page2.evaluate(() => {
   window.__cleanup();
   const t = Math.floor(Date.now() / 1000);
   const islands = [
-    '<div class="hdr">[ The Farseer of the north ]<br>[ The Stargazer on the hill ]</div><div class="prose"><strong>The Stargazer|</strong> "<span style="color:#a8c6df">Head up and look at the sky.</span>"</div>',
+    '<style data-lumi-island-base>*{box-sizing:border-box} img{max-height:240px} p{color:rgb(255,0,0)}</style><div class="hdr">[ The Farseer of the north ]<br>[ The Stargazer on the hill ]</div><div class="prose"><strong>The Stargazer|</strong> "<span style="color:#a8c6df">Head up and look at the sky.</span>"</div>',
     '<div class="pass">The ride was smooth, said Mira, a bumpy ride at worst.</div><div class="fail">Loose shale gives way under his boots.</div><div class="fail2"><strong>Farseer|</strong> "<span style="color:#a8c6df">Hold on to something solid.</span>"</div>',
     '<details class="cyoa"><summary>Action Hints for this scene</summary><div>1. Go left toward the light.<br>2. Go right into the dark.</div></details>',
   ];
@@ -802,9 +802,13 @@ await page2.evaluate(() => {
   const isl = (html) => { const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = html; return d; };
   body.append(mk('Opening prose of the scene.'), isl(islands[0]), isl(islands[1]), isl(islands[2]), mk('Closing prose of the scene.'));
   document.querySelector('#chat').append(row);
+  const pg = document.createElement('p'); pg.id = 'pageui'; pg.textContent = 'page text outside any message'; document.body.append(pg);
   window.__cleanup = window.__LVSetup(window.__ctx);
 });
 await page2.waitForTimeout(1500);
+const leakState = () => page2.evaluate(() => ({ mirrors: document.querySelectorAll('[data-lv-mirror]').length, styleInMirror: document.querySelectorAll('[data-lv-mirror] style, [data-lv-mirror] link').length, lightStyles: document.querySelectorAll('[data-message-id="m15"] style').length, pageColor: getComputedStyle(document.querySelector('#pageui')).color }));
+const leak0 = await leakState();
+check('0.5.5 (CSS leak): islands have mirrors, but no <style>/<link> is in the light DOM and the page is not restyled by an island\'s CSS', leak0.mirrors === 3 && leak0.styleInMirror === 0 && leak0.lightStyles === 0 && leak0.pageColor !== 'rgb(255, 0, 0)', JSON.stringify(leak0));
 const q15 = await page2.evaluate(() => window.__quiet.length);
 await page2.locator('[data-message-id="m15"] .mari-message-actions button:has(svg.lucide-languages)').click();
 await page2.waitForSelector('[data-message-id="m15"] .ptx-view', { timeout: 8000 }).catch(() => {});
@@ -820,6 +824,10 @@ check('0.5.4 (A7): a translation that came back as markdown (**name|**) is drawn
 check('0.5.4: no literal markdown (**) anywhere in the translated message', !(await page2.evaluate(() => document.querySelector('[data-message-id="m15"] .ptx-view').textContent + [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].map((e) => e.shadowRoot?.textContent ?? '').join('')).then((t) => t.includes('**'))));
 check('0.5.4: the dialogue colour span keeps its colour inside the translated island', await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].every((e, i) => i === 2 || [...e.shadowRoot.querySelectorAll('span')].some((sp) => getComputedStyle(sp).color === 'rgb(168, 198, 223)'))));
 check('0.5.4 (cyoa): the translated <details> is still collapsible', await page2.evaluate(() => { const d = document.querySelector('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]:nth-of-type(3)')?.shadowRoot?.querySelector('details') ?? [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')][2].shadowRoot.querySelector('details'); const a = d.open; d.querySelector('summary').click(); const b = d.open; d.querySelector('summary').click(); return a === false && b === true && d.open === false; }));
+const leak1 = await leakState();
+const keptStyles = await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].map((e) => [...e.shadowRoot.querySelectorAll('style')].some((st) => st.textContent.includes('max-height:240px'))));
+check('0.5.5 (CSS leak): while and after translating, still no <style> in the light DOM and the page is not restyled', leak1.styleInMirror === 0 && leak1.lightStyles === 0 && leak1.pageColor !== 'rgb(255, 0, 0)', JSON.stringify(leak1));
+check('0.5.5 (CSS leak): the translated island keeps its own <style> (taken from the real island) inside its shadow root', keptStyles[0] === true, JSON.stringify(keptStyles));
 await page2.screenshot({ path: join(shots, '10-islands-translated-units.png'), fullPage: true });
 // the compare window and the reading view agree: one row per translated unit shown
 const unitsShown = await page2.evaluate(() => document.querySelectorAll('[data-message-id="m15"] .ptx-view .ptx-u[data-k]').length + [...document.querySelectorAll('[data-message-id="m15"] .ptx-view [data-lumiverse-html-island]')].reduce((n, e) => n + e.shadowRoot.querySelectorAll('.ptx-u[data-k]').length, 0));
@@ -833,7 +841,36 @@ await page2.locator('[data-message-id="m15"] .mari-message-actions button:has(sv
 await page2.waitForTimeout(700);
 const origIsl = await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m15"] [data-lumiverse-html-island]')].map((e) => ({ inView: !!e.closest('.ptx-view'), latin: /[A-Za-z]{4}/.test(e.shadowRoot?.textContent ?? ''), ko: (e.shadowRoot?.textContent ?? '').includes('번역'), mirror: e.querySelector('[data-lv-mirror]') ? (e.querySelector('[data-lv-mirror]').getClientRects().length ? 'shown' : 'none') : 'none-absent' })));
 check('0.5.4: showing the original, the islands are the original ones and the mirrors are hidden', origIsl.length === 3 && origIsl.every((x) => !x.inView && x.latin && !x.ko && (x.mirror === 'none' || x.mirror === 'none-absent')), JSON.stringify(origIsl));
-await page2.evaluate(() => { document.querySelector('[data-message-id="m15"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm15'), 1); });
+// destroy(): every mirror is removed and every shadow observer is disconnected
+{
+  const r = await page2.evaluate(async () => {
+    window.__cleanup();
+    window.__cleanup = null;
+    // observers watching an island's shadow root, recorded as the bridge starts
+    const watching = [];
+    const origObserve = MutationObserver.prototype.observe, origDisc = MutationObserver.prototype.disconnect;
+    const state = new Map();
+    MutationObserver.prototype.observe = function (t, o) { if (t instanceof ShadowRoot) { watching.push(this); state.set(this, false); } return origObserve.call(this, t, o); };
+    MutationObserver.prototype.disconnect = function () { if (state.has(this)) state.set(this, true); return origDisc.call(this); };
+    try {
+      window.__cleanup = window.__LVSetup(window.__ctx);
+      await new Promise((r) => setTimeout(r, 400));
+      const before = document.querySelectorAll('[data-lv-mirror]').length;
+      window.__cleanup();
+      window.__cleanup = null;
+      const after = document.querySelectorAll('[data-lv-mirror]').length;
+      // a change in the real island after destroy must not bring a mirror back
+      const isl = document.querySelector('[data-message-id="m15"] [data-lumiverse-html-island]');
+      isl.shadowRoot.append(document.createElement('span'));
+      await new Promise((r) => setTimeout(r, 300));
+      return { before, after, later: document.querySelectorAll('[data-lv-mirror]').length, observers: watching.length, disconnected: [...state.values()].filter(Boolean).length };
+    } finally { MutationObserver.prototype.observe = origObserve; MutationObserver.prototype.disconnect = origDisc; }
+  });
+  check('0.5.5 (destroy): all mirrors are removed, and stay gone', r.before === 3 && r.after === 0 && r.later === 0, JSON.stringify(r));
+  check('0.5.5 (destroy): every shadow MutationObserver is disconnected', r.observers >= 3 && r.disconnected === r.observers, JSON.stringify(r));
+  await page2.evaluate(() => { window.__cleanup = window.__LVSetup(window.__ctx); });
+}
+await page2.evaluate(() => { document.querySelector('#pageui')?.remove(); document.querySelector('[data-message-id="m15"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm15'), 1); });
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
