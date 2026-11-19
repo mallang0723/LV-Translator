@@ -92,7 +92,7 @@ async function readTtConfig(uid: Uid, fresh = false): Promise<TtConfig> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.5.2';
+const SELF_VERSION = '0.5.3';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -288,6 +288,22 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
         if (leasedGenerations.size > 200) leasedGenerations.delete(leasedGenerations.values().next().value as string);
       }
       reply({ ok: true, data: granted });
+      return;
+    }
+    if (msg.op === 'lv.save') {
+      // Our own settings, saved by the original form's one save button (src/host-emu/lv-form.ts). Answers only once they are stored.
+      const arg = (msg.args[0] ?? {}) as { chatId?: string | null; settings?: unknown; asDefault?: boolean; connectionId?: string };
+      const chatId = typeof arg.chatId === 'string' && arg.chatId ? arg.chatId : null;
+      const store = await loadStore(uid);
+      const settings = normalizeSettings(arg.settings, store.defaults, store.userBundles);
+      const id = typeof arg.connectionId === 'string' ? arg.connectionId.trim() : settings.connectionId;
+      settings.connectionId = id;
+      if (chatId) store.chats[chatId] = settings;
+      if (arg.asDefault || !chatId) store.defaults = settings;
+      else store.defaults = { ...store.defaults, connectionId: id };
+      await saveStore(uid, store);
+      reply({ ok: true, data: true });
+      await sendState(uid);
       return;
     }
     if (msg.op === 'storage.get') {

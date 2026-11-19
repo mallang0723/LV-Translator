@@ -33,6 +33,86 @@ const TRANSLATE_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-languages" aria-hidden="true">' +
   '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
 
+/**
+ * Lumiverse folds a long message behind a "더보기" button (MessageContent.tsx `data-long-message-toggle`, a React button inside the
+ * message content). The original shows a translation as a CLONE of that whole content next to the (hidden) real one, so the clone
+ * carries a copy of the button that React knows nothing about: clicking it does nothing. The click is passed on to the real button
+ * in the hidden content; React then redraws the real content and the original rebuilds its clone from it (same open/closed state).
+ * (The real button also has to stay laid out for its overflow measurement: see HIDDEN in shim-css.ts.)
+ */
+function forwardLongMessageToggle(e: MouseEvent): void {
+  const target = e.target as Element | null;
+  const copy = target?.closest?.('[data-long-message-toggle]') as HTMLElement | null;
+  const view = copy?.closest('.ptx-view') as (HTMLElement & { _ptxFor?: HTMLElement }) | null;
+  if (!copy || !view) return;
+  const host = view._ptxFor ?? (view.previousElementSibling as HTMLElement | null);
+  const real = host?.querySelector<HTMLElement>('[data-long-message-toggle]');
+  e.preventDefault();
+  e.stopPropagation();
+  if (real && real !== copy) real.click();
+}
+
+/**
+ * Lumiverse draws HTML in a message (status windows, cards, `<details>` blocks) in an "HTML island": an empty `<div data-lumiverse-html-island>`
+ * whose content lives in an open SHADOW ROOT (MessageContent.tsx IsolatedHtml). The original shows a translation as `cloneNode(true)` of the
+ * message content, and a clone does not carry shadow roots: every island came out empty, so those blocks were gone from the translated view.
+ * They are not translatable text, so they must show as they were, in place: each empty island of a translated view gets a copy of the
+ * shadow content of the island it was cloned from (the n-th island of the hidden real content). Native `<details>` keeps working.
+ */
+function restoreIslands(view: HTMLElement & { _ptxFor?: HTMLElement }): void {
+  const host = view._ptxFor;
+  if (!host?.isConnected) return;
+  const from = host.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]');
+  const to = view.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]');
+  if (!to.length || from.length !== to.length) return;
+  to.forEach((target, i) => {
+    const source = from[i]!.shadowRoot;
+    if (!source || target.shadowRoot) return;
+    const shadow = target.attachShadow({ mode: 'open' });
+    for (const node of Array.from(source.childNodes)) shadow.append(node.cloneNode(true));
+  });
+}
+
+const PLAY_ICON = '<polygon points="6 3 20 12 6 21 6 3"/>';
+
+/**
+ * "이어서 번역": a button in the original's own bar (대조·수정 / 재번역 / 지우기) that appears only while the message has translated AND untranslated
+ * paragraphs. It does nothing of its own: it presses the host's translate button, which the original answers (primaryAction) by translating
+ * just the paragraphs that have no translation yet, through its own per-paragraph path.
+ */
+function syncContinueButton(view: HTMLElement): void {
+  const bar = view.querySelector<HTMLElement>('.ptx-bar');
+  if (!bar) return;
+  const want = !!view.querySelector('.ptx-u.is-missing') && !!view.querySelector('.ptx-u[data-k]');
+  const have = bar.querySelector<HTMLElement>('[data-lv-act="continue"]');
+  if (!want) {
+    have?.remove();
+    return;
+  }
+  if (have) return;
+  const base = bar.querySelector<HTMLElement>('[data-ptx-act="retranslate"]') ?? bar.querySelector<HTMLElement>('button');
+  if (!base) return;
+  const button = base.cloneNode(true) as HTMLElement;
+  button.removeAttribute('data-ptx-act');
+  button.setAttribute('data-lv-act', 'continue');
+  button.setAttribute('title', '번역이 없는 문단만 이어서 번역');
+  const svg = button.querySelector('svg');
+  if (svg) svg.innerHTML = PLAY_ICON;
+  const label = button.querySelector('span');
+  if (label) label.textContent = '이어서 번역';
+  bar.prepend(button);
+}
+
+function onContinueClick(e: MouseEvent): void {
+  const button = (e.target as Element | null)?.closest?.('[data-lv-act="continue"]');
+  if (!button) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const message = button.closest('[data-message-id]');
+  const native = message?.querySelector<HTMLElement>('.mari-message-actions button:has(svg.lucide-languages)');
+  native?.click();
+}
+
 export interface DomBridge {
   /** Re-tags messages now (also runs on DOM changes). */
   scan(): void;
@@ -73,6 +153,10 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
   function scan(): void {
     if (destroyed) return;
     for (const m of Array.from(root.querySelectorAll('[data-message-id]'))) tag(m);
+    for (const v of Array.from(root.querySelectorAll<HTMLElement>('.ptx-view'))) {
+      restoreIslands(v);
+      syncContinueButton(v);
+    }
   }
   const queue = () => {
     if (timer || destroyed) return;
@@ -84,10 +168,15 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
   const observer = new MutationObserver(queue);
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
   scan();
+  document.addEventListener('click', forwardLongMessageToggle, true);
+  document.addEventListener('click', onContinueClick, true);
   return {
     scan,
     destroy() {
       destroyed = true;
+      document.removeEventListener('click', forwardLongMessageToggle, true);
+      document.removeEventListener('click', onContinueClick, true);
+      for (const b of Array.from(document.querySelectorAll('[data-lv-act="continue"]'))) b.remove();
       if (timer) clearTimeout(timer);
       observer.disconnect();
       for (const el of added) {

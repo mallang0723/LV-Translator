@@ -24,6 +24,8 @@ import { watchVisibleMessages } from './host-emu/visible-messages';
 import { createSettingsHost, nativePrompts, startOriginal } from './host-emu/boot';
 import { GenerationDriver, GenerationHub } from './host-emu/generation';
 import type { MarinaraStorage } from './host-emu/runtime';
+import { withBatchLimit } from './host-emu/split';
+import { type LvForm, type LvState, type LvValues, mountLvForm } from './host-emu/lv-form';
 
 const PANEL_CSS = `
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
@@ -114,8 +116,6 @@ export function setup(ctx: SpindleFrontendContext) {
   let link: 'none' | 'ok' | 'incompatible' = 'none';
   let chatId: string | null = null;
   let lastDraftTranslation: string | null = null;
-  let dirty = false;
-  let markDirtyUi: (() => void) | null = null;
 
   const toBackend = (msg: ToBackend) => ctx.sendToBackend(msg);
   const notify = (kind: 'info' | 'warning' | 'error', text: string) => toBackend({ type: 'notify', kind, text });
@@ -154,8 +154,11 @@ export function setup(ctx: SpindleFrontendContext) {
 
   const rpc = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   let rpcCounter = 0;
+  // Lumiverse hands every backend reply to every open page of the user, so a bare counter ("e1", "e2"...) collides between two tabs
+  // (or a reloaded page) and a reply meant for one page settles another page's call. The id carries a per-page random part.
+  const rpcPage = Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
   const call = <T,>(op: string, args: unknown[], signal?: AbortSignal): Promise<T> => {
-    const id = `e${++rpcCounter}`;
+    const id = `e${rpcPage}.${++rpcCounter}`;
     return new Promise<T>((resolve, reject) => {
       rpc.set(id, { resolve: resolve as (v: unknown) => void, reject });
       toBackend({ type: 'emu', id, op, args });
@@ -189,7 +192,8 @@ export function setup(ctx: SpindleFrontendContext) {
     },
     updateContent: (c, m, content) => call('updateContent', [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call('patchExtra', [c, m, patch, swipe]),
-    generateRaw: (req, signal) => call('generateRaw', [req], signal),
+    // The original's request grouping has a fixed 6000-character limit; a smaller one from the settings is applied here (split.ts).
+    generateRaw: withBatchLimit((req, signal) => call('generateRaw', [req], signal), () => (store ? current().batchChars : 0)),
     generateActive: (c) => call('generateActive', [c]),
     connections: () => call('connections', []),
     character: (id) => call('character', [id]),
@@ -392,56 +396,13 @@ export function setup(ctx: SpindleFrontendContext) {
     headerTitle: '양방향 번역',
     iconSvg: ICON,
   });
-  const panel = el('div', { class: 'stt-panel' });
-  // The original's settings screen (its own code) goes below ours; it finds this container by its own selector.
-  const originalSettings = el('div', { class: 'stt-panel' }, [
-    el('div', { class: 'stt-note' }, ['아래는 원작 번역 도구(Translation Tools 1.10.0)의 설정 화면입니다. 응답과 내 메시지 번역의 프롬프트·단어장·지침·말투 정리·백업은 여기서 합니다. 위의 설정은 연결·언어·자동 번역·내 메시지 번역·제외 규칙·묶음에 쓰입니다.']),
-    settingsHost.element,
-  ]);
-  tab.root.replaceChildren(panel, originalSettings);
-  let draft: ChatSettings = { ...DEFAULT_SETTINGS };
-  let status = '';
-
-  function check(label: string, key: keyof ChatSettings, onChange?: () => void): HTMLElement {
-    const input = el('input', { type: 'checkbox', checked: draft[key] === true });
-    input.addEventListener('change', () => {
-      (draft as unknown as Record<string, unknown>)[key] = input.checked;
-      markDirty();
-      onChange?.();
-    });
-    return el('label', { class: 'stt-check' }, [input, label]);
-  }
-
-  function text(label: string, key: keyof ChatSettings, opts: { multiline?: boolean; placeholder?: string; cls?: string } = {}): HTMLElement {
-    const input = opts.multiline
-      ? el('textarea', { value: String(draft[key] ?? ''), placeholder: opts.placeholder ?? '', class: opts.cls ?? '', spellcheck: false })
-      : el('input', { type: 'text', value: String(draft[key] ?? ''), placeholder: opts.placeholder ?? '' });
-    input.setAttribute('data-stt-field', key);
-    input.addEventListener('input', () => {
-      (draft as unknown as Record<string, unknown>)[key] = input.value;
-      // The same setting can appear in two places (내 언어 / 도착 언어): keep them equal.
-      panel.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(`[data-stt-field="${key}"]`).forEach((other) => {
-        if (other !== input) other.value = input.value;
-      });
-      markDirty();
-    });
-    return el('label', { class: 'stt-field' }, [el('span', {}, [label]), input]);
-  }
-
-  function select(label: string, value: string, options: Array<[string, string]>, onChange: (v: string) => void, unsaved = true, rerender = false): HTMLElement {
-    const s = el('select', {}, options.map(([v, l]) => el('option', { value: v, selected: v === value }, [l])));
-    s.addEventListener('change', () => {
-      onChange(s.value);
-      // Mark dirty before re-rendering: renderPanel() rebuilds the draft from the saved settings when clean.
-      if (unsaved) markDirty();
-      if (rerender) renderPanel();
-    });
-    return el('label', { class: 'stt-field' }, [el('span', {}, [label]), s]);
-  }
+  // One screen: the original's settings form (its own code) is the whole tab. Our own settings are sections inside that form
+  // (src/host-emu/lv-form.ts) and are saved by the form's one save button.
+  tab.root.replaceChildren(el('div', { class: 'stt-panel' }, [settingsHost.element]));
 
   function editBundle(existing: UserBundle | null): void {
     const modal = ctx.ui.showModal({ title: existing ? '묶음 편집' : '새 묶음으로 저장', width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
-    const source = existing ?? draft;
+    const source = existing ?? current();
     const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '묶음 이름' });
     const glossary = el('textarea', { value: source.glossary, spellcheck: false, placeholder: '내 언어 용어 = 모델 언어 용어' });
     const freeContext = el('textarea', { value: source.freeContext, spellcheck: false });
@@ -466,11 +427,41 @@ export function setup(ctx: SpindleFrontendContext) {
     ]));
   }
 
-  function bundleSection(): HTMLElement {
-    const bundles = store?.userBundles ?? [];
-    const selected = bundles.find((b) => b.id === draft.bundleId);
-    const edit = button('묶음 편집', () => { if (selected) editBundle(selected); });
-    const remove = button('삭제', async () => {
+  function lvState(): LvState {
+    if (!store) {
+      return { ready: false, chatKey: chatId ?? '', hasChat: !!chatId, values: { connectionId: '', modelLanguage: '', myLanguage: '', batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeTags: '', excludeRules: '', bundleId: '' }, connections: [], connectionNote: { text: '', kind: '' }, linkNote: '', bundles: [] };
+    }
+    const s = current();
+    let bundleId = s.bundleId;
+    if (bundleId && !store.userBundles.some((b) => b.id === bundleId)) bundleId = '';
+    const connectionId = effectiveConnectionId(store, chatId);
+    const options: Array<[string, string]> = [['', '자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)'], ...connections.map((c): [string, string] => [c.id, `${c.name} · ${c.model}${c.isDefault ? ' (기본)' : ''}`])];
+    if (connectionId && !connections.some((c) => c.id === connectionId)) options.push([connectionId, '(삭제된 연결)']);
+    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), connectionId || undefined, hint);
+    const pickedName = picked ? (connections.find((c) => c.id === picked.id)?.name ?? picked.id) : '';
+    const note: LvState['connectionNote'] = !connections.length
+      ? { text: 'Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요.', kind: 'err' }
+      : picked?.staleId
+        ? { text: `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.`, kind: 'warn' }
+        : { text: `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? 'host']}). 아래 저장 버튼으로 적용합니다.`, kind: '' };
+    return {
+      ready: true,
+      chatKey: chatId ?? '',
+      hasChat: !!chatId,
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeTags: s.excludeTags, excludeRules: s.excludeRules, bundleId },
+      connections: options,
+      connectionNote: note,
+      linkNote: link === 'none' ? '' : link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.',
+      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext })),
+    };
+  }
+
+  const lvForm: LvForm = mountLvForm(settingsHost.element, {
+    state: lvState,
+    suggestedTags: SUGGESTED_TAGS,
+    editBundle: (id) => editBundle(id ? (store?.userBundles.find((b) => b.id === id) ?? null) : null),
+    deleteBundle: async (id) => {
+      const selected = store?.userBundles.find((b) => b.id === id);
       if (!selected) return;
       const { confirmed } = await ctx.ui.showConfirm({
         title: '묶음 삭제',
@@ -478,136 +469,24 @@ export function setup(ctx: SpindleFrontendContext) {
         variant: 'danger', confirmLabel: '삭제',
       });
       if (confirmed) toBackend({ type: 'delete_bundle', id: selected.id });
-    }, 'stt-danger');
-    edit.disabled = remove.disabled = !selected;
-    const preview = selected ? el('details', { class: 'stt-bundle-preview' }, [
-      el('summary', {}, [`${selected.name} · 내용 보기 (읽기 전용)`]),
-      ...([
-        ['단어집', selected.glossary], ['추가 지침', selected.freeContext],
-      ] as const).map(([label, value]) => el('label', { class: 'stt-field' }, [
-        el('span', {}, [label]), el('textarea', { readOnly: true, value, placeholder: '내용 없음' }),
-      ])),
-    ]) : null;
-    return el('div', { class: 'stt-section' }, [
-      el('h3', {}, ['번역 지침 묶음']),
-      select('이 방의 묶음', draft.bundleId, [['', '없음'], ...bundles.map((b): [string, string] => [b.id, b.name])], (value) => {
-        draft.bundleId = value;
-      }, true, true),
-      el('div', { class: 'stt-row' }, [button('새 묶음 만들기', () => editBundle(null), '', '새 묶음 저장'), edit, remove]),
-      el('div', { class: 'stt-note' }, ['묶음의 단어집·추가 지침은 **내 메시지 번역**에 더해집니다(응답 번역의 단어장·기타 지침·말투는 아래 원작 설정 화면에서 합니다). 선택은 아래 저장 버튼으로 적용합니다.']),
-      preview,
-    ]);
-  }
-
-  function markDirty(): void {
-    dirty = true;
-    status = '';
-    tab.setBadge('!');
-    markDirtyUi?.();
-  }
-
-  function clearDirty(): void {
-    dirty = false;
-    tab.setBadge(null);
-    markDirtyUi?.();
-  }
-
-  function save(asDefault: boolean): void {
-    try {
-      draft.excludeTags = parseTags(draft.excludeTags).join(', ');
-    } catch (e) {
-      toBackend({ type: 'notify', kind: 'error', text: e instanceof ExcludeRuleError ? e.message : '제외할 태그 이름을 확인해 주세요.' });
-      return;
-    }
-    toBackend({ type: 'save_settings', chatId, settings: draft, asDefault });
-    clearDirty();
-    status = asDefault ? '저장했습니다. 새 채팅의 기본값으로도 저장했습니다.' : '저장했습니다.';
-  }
-
-  function renderPanel(): void {
-    if (!store) {
-      panel.replaceChildren(el('div', { class: 'stt-note' }, ['불러오는 중…']));
-      return;
-    }
-    if (!dirty) {
-      draft = { ...current() };
-      draft.connectionId = effectiveConnectionId(store, chatId);
-    }
-    // A shared bundle can be deleted while this room has other unsaved edits.
-    if (draft.bundleId && !store.userBundles.some((b) => b.id === draft.bundleId)) draft.bundleId = '';
-    const connectionOptions: Array<[string, string]> = [['', '자동 (채팅에 지정된 연결 → 지금 쓰는 연결 → 기본 연결)'], ...connections.map((c): [string, string] => [c.id, `${c.name} · ${c.model}${c.isDefault ? ' (기본)' : ''}`])];
-    if (draft.connectionId && !connections.some((c) => c.id === draft.connectionId)) connectionOptions.push([draft.connectionId, '(삭제된 연결)']);
-    const picked = pickConnection(connections.map((c) => ({ id: c.id, name: c.name, is_default: c.isDefault })), draft.connectionId || undefined, hint);
-    const pickedName = picked ? (connections.find((c) => c.id === picked.id)?.name ?? picked.id) : '';
-    const connectionNote = !connections.length
-      ? el('div', { class: 'stt-note stt-err' }, ['Lumiverse에 AI 연결이 없습니다. Lumiverse 설정의 연결에서 연결을 하나 만들어 주세요.'])
-      : el('div', { class: `stt-note${picked?.staleId ? ' stt-warn' : ''}` }, [
-          picked?.staleId ? `고른 연결이 삭제돼 대신 "${pickedName}" (${SOURCE_LABELS[picked.source]})으로 번역합니다. 다시 골라 주세요.` : `번역에 쓰일 연결: ${pickedName} (${SOURCE_LABELS[picked?.source ?? 'host']}). 연결은 고르는 즉시 저장됩니다.`,
-        ]);
-    const saveNotice = el('span', { class: 'stt-unsaved-note', role: 'status' }, ['저장하지 않은 변경이 있어요. 저장 버튼을 눌러야 적용됩니다.']);
-    const saveRow = el('div', { class: 'stt-row stt-sticky' }, [
-      saveNotice,
-      button('저장', () => save(false), 'stt-primary'),
-      chatId ? button('저장 + 새 채팅 기본값으로', () => save(true)) : null,
-      button('되돌리기', () => {
-        clearDirty();
-        renderPanel();
-      }),
-      status ? el('span', { class: 'stt-note' }, [status]) : null,
-    ]);
-    markDirtyUi = () => {
-      saveRow.classList.toggle('stt-unsaved', dirty);
-      saveNotice.hidden = !dirty;
-    };
-    markDirtyUi();
-    panel.replaceChildren(
-      el('div', { class: 'stt-note' }, [chatId ? '지금 열린 채팅의 번역 설정입니다.' : '열린 채팅이 없어 새 채팅의 기본값을 편집합니다.']),
-      el('div', { class: 'stt-section' }, [
-        el('h3', {}, ['기본 번역']),
-        select('번역에 쓸 AI 연결', draft.connectionId, connectionOptions, (v) => {
-          draft.connectionId = v;
-          toBackend({ type: 'save_connection', chatId, connectionId: v });
-          status = '연결을 저장했습니다.';
-        }, false),
-        connectionNote,
-        link === 'none' ? null : el('div', { class: `stt-note${link === 'incompatible' ? ' stt-warn' : ''}` }, [link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.']),
-        el('div', { class: 'stt-row' }, [text('모델 언어 (내 메시지를 이 언어로)', 'modelLanguage'), text('내 언어 (응답을 이 언어로)', 'myLanguage')]),
-        check('AI 응답 자동 번역', 'autoTranslate'),
-        check('내 메시지를 보내기 전에 번역 (채팅에는 번역문이 남습니다)', 'translateMyMessages'),
-        check('입력창 옆에 번역 버튼 표시', 'showDraftButton'),
-      ]),
-      bundleSection(),
-      el('div', { class: 'stt-section' }, [
-        el('h3', {}, ['번역하지 않을 부분']),
-        check('HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역', 'protectHtml'),
-        check('코드 블록(```) 은 번역하지 않음', 'protectCode'),
-        el('div', { class: 'stt-field' }, [
-          text('제외할 HTML 태그 (쉼표·공백으로 구분)', 'excludeTags', { placeholder: 'choices, status, ui' }),
-          el('div', { class: 'stt-row' }, [
-            button('추천 태그 넣기', () => {
-              const have = new Set(parseTagsSafe(draft.excludeTags));
-              for (const t of SUGGESTED_TAGS) have.add(t);
-              draft.excludeTags = [...have].join(', ');
-              markDirty();
-              renderPanel();
-            }, '', `${SUGGESTED_TAGS.join(', ')} 를 목록에 더합니다`),
-          ]),
-          el('div', { class: 'stt-note' }, ['이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. <style>·<script> 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다.']),
-        ]),
-        text('제외 규칙 (한 줄에 하나)', 'excludeRules', { multiline: true, placeholder: '<status>\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]' }),
-        el('div', { class: 'stt-note' }, ['<태그> 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.']),
-      ]),
-      saveRow,
-    );
-  }
-
-  // Leaving the page with unsaved settings loses them: let the browser ask first.
-  const onBeforeUnload = (e: BeforeUnloadEvent) => {
-    if (!dirty) return;
-    e.preventDefault();
-    e.returnValue = '';
-  };
-  window.addEventListener('beforeunload', onBeforeUnload);
+    },
+    async save(v: LvValues) {
+      let tags: string;
+      try {
+        tags = parseTags(v.excludeTags).join(', ');
+      } catch (e) {
+        throw new Error(e instanceof ExcludeRuleError ? e.message : '제외할 태그 이름을 확인해 주세요.');
+      }
+      const settings: ChatSettings = {
+        ...current(),
+        modelLanguage: v.modelLanguage, myLanguage: v.myLanguage, batchChars: v.batchChars, autoTranslate: v.autoTranslate, translateMyMessages: v.translateMyMessages,
+        showDraftButton: v.showDraftButton, protectHtml: v.protectHtml, protectCode: v.protectCode, excludeTags: tags, excludeRules: v.excludeRules,
+        bundleId: v.bundleId, connectionId: v.connectionId,
+      };
+      await call('lv.save', [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
+    },
+  });
+  const renderPanel = () => lvForm.refresh();
 
   const action = ctx.ui.registerInputBarAction({ id: 'open-translator', label: '번역 설정' });
   const offAction = action.onClick(() => tab.activate());
@@ -649,7 +528,7 @@ export function setup(ctx: SpindleFrontendContext) {
   return () => {
     clearInterval(routeTimer);
     document.removeEventListener('visibilitychange', onVisible);
-    window.removeEventListener('beforeunload', onBeforeUnload);
+    lvForm.stop();
     visible.destroy();
     original.stop();
     offEvents.forEach((off) => off());

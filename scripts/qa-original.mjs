@@ -32,6 +32,7 @@ const HTML = `<!doctype html><meta charset=utf-8><style>:root{--lumiverse-bg:#1b
 <div id="settings" style="width:420px"></div>`;
 
 const page = await browser.newPage({ viewport: { width: 1000, height: 900 } });
+page.setDefaultTimeout(6000);
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -58,10 +59,17 @@ await page.evaluate(() => {
     lorebookEntries: async () => [],
   };
   let stored = null;
-  const storage = { get: async () => ({ config: stored }), patch: async (p) => { if (p.config) stored = p.config; return { config: stored }; } };
+  window.__patchMode = 'ok'; window.__stored = () => stored;
+  const storage = { get: async () => ({ config: stored }), patch: async (p) => {
+    // 'lost': the write happens but the answer never comes back; 'hang': neither (0.5.3: the original's save must still end)
+    if (window.__patchMode === 'hang') return new Promise(() => {});
+    if (p.config) stored = p.config;
+    if (window.__patchMode === 'lost') return new Promise(() => {});
+    return { config: stored };
+  } };
   document.querySelector('#settings').append(LVEmu.createSettingsHost());
   window.__emu = LVEmu.startOriginal({
-    bridge, storage, activeChatId: () => 'c1',
+    bridge, storage, storageTimeoutMs: 600, activeChatId: () => 'c1',
     addStyle: (css) => { const s = document.createElement('style'); s.textContent = css; document.head.append(s); return () => s.remove(); },
   });
 });
@@ -93,6 +101,115 @@ if (await barCompare.count()) {
   await page.screenshot({ path: join(shots, '03-compare.png'), fullPage: true });
 }
 
+
+// ---- 0.5.3: the save button always ends, and its label can be read ----
+
+// ---- 0.5.3 (2): every button of the original shows its label: walk the settings form, the bar, the compare window and the confirm dialog in 4 themes ----
+const THEMES = [
+  ['dark / purple primary', { '--lumiverse-bg': '#1b1b22', '--lumiverse-text': '#dddddd', '--lumiverse-text-muted': '#9a9aa6', '--lumiverse-border': '#3a3a46', '--lumiverse-fill-subtle': '#2a2a33', '--lumiverse-primary': 'rgba(147,112,219,.9)', '--lumiverse-primary-text': 'rgba(186,135,255,.95)' }, '#1b1b22', '#dddddd'],
+  ['dark / light-blue primary', { '--lumiverse-bg': '#1b1b22', '--lumiverse-text': '#dddddd', '--lumiverse-text-muted': '#9a9aa6', '--lumiverse-border': '#3a3a46', '--lumiverse-fill-subtle': '#2a2a33', '--lumiverse-primary': '#a8d4f0', '--lumiverse-primary-text': '#bcdcf5' }, '#1b1b22', '#dddddd'],
+  ['light / light-blue primary', { '--lumiverse-bg': '#ffffff', '--lumiverse-text': '#222222', '--lumiverse-text-muted': '#666666', '--lumiverse-border': '#cccccc', '--lumiverse-fill-subtle': '#eeeeee', '--lumiverse-primary': '#a8d4f0', '--lumiverse-primary-text': '#2a6fb0' }, '#ffffff', '#222222'],
+  ['light / navy primary', { '--lumiverse-bg': '#ffffff', '--lumiverse-text': '#222222', '--lumiverse-text-muted': '#666666', '--lumiverse-border': '#cccccc', '--lumiverse-fill-subtle': '#eeeeee', '--lumiverse-primary': '#1d2f6f', '--lumiverse-primary-text': '#1d2f6f' }, '#ffffff', '#222222'],
+];
+const setTheme = async ([, vars, bg, fg]) => { await page.evaluate(([v, b, f]) => { for (const [k, val] of Object.entries(v)) document.documentElement.style.setProperty(k, val); document.body.style.background = b; document.body.style.color = f; }, [vars, bg, fg]); await page.waitForTimeout(450); };
+const lowContrastButtons = () => page.evaluate(() => {
+  const canvas = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  const rgba = (css) => { canvas.clearRect(0, 0, 1, 1); canvas.fillStyle = '#000'; canvas.fillStyle = css; canvas.fillRect(0, 0, 1, 1); const d = canvas.getImageData(0, 0, 1, 1).data; return [d[0], d[1], d[2], d[3] / 255]; };
+  const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat([1]);
+  const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const L = (c) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+  const bad = []; let seen = 0;
+  const sel = '.ptx-modal-root button, .tpg-form button, .ptx-bar button, .ptx-toasts button, .ptx-menu button, .ptx-view button';
+  for (const b of document.querySelectorAll(sel)) {
+    const label = b.textContent.trim();
+    if (!label || !b.getClientRects().length || getComputedStyle(b).visibility === 'hidden') continue;
+    seen++;
+    let bg = rgba(getComputedStyle(document.body).backgroundColor); if (bg[3] === 0) bg = [255, 255, 255, 1];
+    const chain = []; for (let e = b; e; e = e.parentElement) chain.unshift(e);
+    for (const e of chain) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] > 0) bg = over(c, bg); }
+    const fg = over(rgba(getComputedStyle(b).color), bg);
+    const [hi, lo] = [L(fg), L(bg)].sort((x, y) => y - x);
+    const ratio = (hi + 0.05) / (lo + 0.05);
+    if (ratio < 3) bad.push(`${label.slice(0, 14)} ${ratio.toFixed(1)}:1 (${getComputedStyle(b).color} on ${getComputedStyle(b).backgroundColor})`);
+  }
+  return { seen, bad };
+});
+for (const theme of THEMES) {
+  await setTheme(theme);
+  const r = await lowContrastButtons();
+  check(`0.5.3 (2): all ${r.seen} buttons of the original (form, bar, compare window) have a readable label: ${theme[0]}`, r.seen >= 8 && r.bad.length === 0, r.bad.join(' | '));
+}
+await page.keyboard.press('Escape'); await page.evaluate(() => document.querySelectorAll('.ptx-modal-root').forEach((e) => e.remove()));
+await page.locator('.ptx-bar [data-ptx-act="clear"]').click().catch(() => {});
+await page.waitForSelector('.ptx-modal [data-yes]', { timeout: 3000 }).catch(() => {});
+check('0.5.3 (2): the confirm dialog ("이 메시지의 문단 번역을 지울까요?") opened for the check', (await page.locator('.ptx-modal [data-yes]').count()) === 1);
+for (const theme of THEMES) {
+  await setTheme(theme);
+  const r = await lowContrastButtons();
+  const yes = await page.locator('.ptx-modal [data-yes]').textContent();
+  check(`0.5.3 (2): the confirm dialog's primary button label is readable ("${yes.trim()}"): ${theme[0]}`, r.bad.length === 0 && yes.trim().length > 0, r.bad.join(' | '));
+}
+await page.locator('.ptx-modal [data-no]').click().catch(() => {});
+await page.evaluate(() => { for (const k of ['--lumiverse-bg', '--lumiverse-text', '--lumiverse-text-muted', '--lumiverse-border', '--lumiverse-fill-subtle', '--lumiverse-primary', '--lumiverse-primary-text']) document.documentElement.style.removeProperty(k); document.body.style.background = '#1b1b22'; document.body.style.color = '#ddd'; });
+
+await page.keyboard.press('Escape'); await page.evaluate(() => document.querySelectorAll('.ptx-modal-root .ptx-scrim').forEach((e) => e.click()));
+await page.evaluate(() => document.querySelectorAll('.ptx-modal-root').forEach((e) => e.remove()));
+const savePage = async () => { await page.locator('.tpg-save').click(); };
+const statusText = () => page.locator('.tpg-form [data-tpg-status]').first().textContent();
+const btnText = () => page.locator('.tpg-save').textContent();
+await page.locator('.tpg-form textarea[name="freeContext"]').evaluate((e) => { e.value = '현대 한국 배경'; });
+await page.locator('.tpg-form input[name="freeContextEnabled"]').evaluate((e) => { e.checked = true; e.dispatchEvent(new Event('change', { bubbles: true })); });
+await savePage();
+await page.waitForFunction(() => /저장했습니다|응답이 없습니다/.test(document.querySelector('.tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 4000 }).catch(() => {});
+check('0.5.3 (1): a normal save ends with "저장했습니다." and the button is "저장" again', (await statusText()) === '저장했습니다.' && (await btnText()) === '저장' && !(await page.locator('.tpg-save').isDisabled()));
+await page.evaluate(() => { window.__patchMode = 'lost'; });
+await page.locator('.tpg-form textarea[name="freeContext"]').evaluate((e) => { e.value = '중세 판타지 배경'; });
+await savePage();
+await page.waitForFunction(() => /저장했습니다|응답이 없습니다/.test(document.querySelector('.tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 4000 }).catch(() => {});
+check('0.5.3 (1): the answer to the save is lost on the way but the data was written: the save still ends "저장했습니다." (read back)', (await statusText()) === '저장했습니다.' && (await btnText()) === '저장' && !(await page.locator('.tpg-save').isDisabled()), `${await statusText()} / ${await btnText()}`);
+await page.evaluate(() => { window.__patchMode = 'ok'; });
+await page.locator('.tpg-form textarea[name="freeContext"]').evaluate((e) => { e.value = '세 번째 기타 지침'; });
+await savePage();
+await page.waitForFunction(() => window.__stored()?.defaults?.freeContext === '세 번째 기타 지침' || window.__stored()?.chats?.c1?.freeContext === '세 번째 기타 지침', null, { timeout: 4000 }).catch(() => {});
+check('0.5.3 (3): the 기타 지침 saved after a save whose answer was lost is written too (the write queue is not stuck behind it)', await page.evaluate(() => { const c = window.__stored(); return c?.chats?.c1?.freeContext === '세 번째 기타 지침'; }), JSON.stringify(await page.evaluate(() => window.__stored()?.chats?.c1?.freeContext)));
+await page.evaluate(() => { window.__patchMode = 'hang'; });
+await page.locator('.tpg-form textarea[name="freeContext"]').evaluate((e) => { e.value = '저장되지 않을 네 번째 지침'; });
+await savePage();
+await page.waitForFunction(() => /응답이 없습니다|저장했습니다/.test(document.querySelector('.tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 4000 }).catch(() => {});
+check('0.5.3 (1): a save nobody answers ends with the original\'s error line, and the button is "저장" and enabled again', /응답이 없습니다/.test(await statusText()) && (await page.locator('.tpg-form [data-tpg-status]').first().getAttribute('data-kind')) === 'error' && (await btnText()) === '저장' && !(await page.locator('.tpg-save').isDisabled()), `${await statusText()} / ${await btnText()}`);
+await page.evaluate(() => { window.__patchMode = 'ok'; });
+await savePage();
+await page.waitForFunction(() => /저장했습니다/.test(document.querySelector('.tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 4000 }).catch(() => {});
+check('0.5.3 (1): and the next save works again', (await statusText()) === '저장했습니다.');
+
+const contrast = () => page.evaluate(() => {
+  const b = document.querySelector('.tpg-save');
+  const probe = (css) => { const c = document.createElement('canvas').getContext('2d'); c.clearRect(0, 0, 1, 1); c.fillStyle = css; c.fillRect(0, 0, 1, 1); const [r, g, bl, a] = c.getImageData(0, 0, 1, 1).data; return [r, g, bl, a]; };
+  const cs = getComputedStyle(b);
+  const page = probe(getComputedStyle(document.body).backgroundColor);
+  const over = (fg, bg) => [0, 1, 2].map((i) => fg[i] * (fg[3] / 255) + bg[i] * (1 - fg[3] / 255));
+  const bg = over(probe(cs.backgroundColor), page); const fg = over(probe(cs.color), bg);
+  const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const L = (c) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+  const [hi, lo] = [L(fg), L(bg)].sort((x, y) => y - x);
+  return { ratio: (hi + 0.05) / (lo + 0.05), color: cs.color, bg: cs.backgroundColor, text: b.textContent };
+});
+for (const [name, vars, pageBg] of [
+  ['dark theme, light-blue primary (the user\'s screenshot)', { '--lumiverse-primary': '#a8d4f0', '--lumiverse-primary-text': 'rgba(186,215,255,.95)', '--lumiverse-bg': '#1b1b22' }, '#1b1b22'],
+  ['dark theme, purple primary', { '--lumiverse-primary': 'rgba(147,112,219,.9)', '--lumiverse-primary-text': 'rgba(186,135,255,.95)', '--lumiverse-bg': '#1b1b22' }, '#1b1b22'],
+  ['light theme, light-blue primary', { '--lumiverse-primary': '#a8d4f0', '--lumiverse-primary-text': '#2a6fb0', '--lumiverse-bg': '#ffffff' }, '#ffffff'],
+  ['light theme, dark navy primary', { '--lumiverse-primary': '#1d2f6f', '--lumiverse-primary-text': '#1d2f6f', '--lumiverse-bg': '#ffffff' }, '#ffffff'],
+]) {
+  await page.evaluate(([v, bgc]) => { for (const [k, val] of Object.entries(v)) document.documentElement.style.setProperty(k, val); document.body.style.background = bgc; }, [vars, pageBg]);
+  await page.waitForTimeout(400);
+  const on = await contrast();
+  await page.locator('.tpg-save').evaluate((b) => { b.disabled = true; });
+  const off = await contrast();
+  await page.locator('.tpg-save').evaluate((b) => { b.disabled = false; });
+  check(`0.5.3 (2): the save label is readable: ${name} (enabled ${on.ratio.toFixed(1)}:1, disabled ${off.ratio.toFixed(1)}:1)`, on.text === '저장' && on.ratio >= 4 && off.ratio >= 4, JSON.stringify(on));
+}
+await page.evaluate(() => { for (const k of ['--lumiverse-primary', '--lumiverse-primary-text', '--lumiverse-bg']) document.documentElement.style.removeProperty(k); document.body.style.background = '#1b1b22'; });
+
 // ---- integrated: the built frontend (src/frontend.ts) with a fake Lumiverse context; the backend half is the real
 // createEmuBridge on a fake spindle host. Same original, same screens, now through the RPC the extension really uses. ----
 writeFileSync(join(work, 'entry2.ts'), `
@@ -107,6 +224,7 @@ import { blockKey } from '${root}src/adapter/keys';
 execFileSync('bun', ['build', join(work, 'entry2.ts'), '--outfile', join(work, 'int.js'), '--target', 'browser'], { stdio: 'inherit' });
 const intJs = readFileSync(join(work, 'int.js'), 'utf8');
 const page2 = await browser.newPage({ viewport: { width: 420, height: 900 } });
+page2.setDefaultTimeout(6000);
 const errors2 = [];
 if (process.env.QA_DEBUG) page2.on('console', (m) => console.log('console2', m.type(), m.text().slice(0, 300)));
 page2.on('pageerror', (e) => errors2.push(String(e)));
@@ -145,24 +263,70 @@ await page2.evaluate(() => {
     onBackendMessage: (h) => { handlers.push(h); return noop; },
     sendToBackend: async (msg) => {
       if (window.__dbg) console.log('send', msg.type, msg.op);
-      if (msg.type === 'hello') return reply({ type: 'state', store: LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English' } }), connections: [{ id: 'conn1', name: 'Fake', model: 'none', isDefault: true }], link: 'none' });
+      if (msg.type === 'hello') return reply({ type: 'state', store: window.__lvStore ||= LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English' } }), connections: [{ id: 'conn1', name: 'Fake', model: 'none', isDefault: true }], link: 'none' });
       if (msg.type !== 'emu') return;
       await new Promise((r) => setTimeout(r, 0)); // a real backend answers later
       try {
         let data;
         if (msg.op === 'lease') data = !(window.__leased ||= new Set()).has(msg.args[0]) && !!window.__leased.add(msg.args[0]);
+        else if (msg.op === 'lv.save') {
+          if (window.__lvFail) throw new Error('연결 설정을 저장하지 못했습니다.');
+          const a = msg.args[0]; (window.__lvSaves ||= []).push(a);
+          const base = window.__lvStore || LVInt.normalizeStore(null);
+          window.__lvStore = LVInt.normalizeStore({ ...base, defaults: a.asDefault || !a.chatId ? a.settings : base.defaults, chats: a.chatId ? { ...base.chats, [a.chatId]: a.settings } : base.chats });
+          data = true;
+          setTimeout(() => reply({ type: 'state', store: window.__lvStore, connections: [{ id: 'conn1', name: 'Fake', model: 'none', isDefault: true }], link: 'none' }), 0);
+        }
         else if (msg.op === 'storage.get') data = storage; else if (msg.op === 'storage.patch') data = storage = { ...storage, ...msg.args[0] };
         else data = await ops[msg.op](...(msg.op === 'generateRaw' || msg.op === 'translate' ? [msg.args[0], msg.id] : msg.args));
         reply({ type: 'emu_result', id: msg.id, ok: true, data });
       } catch (e) { reply({ type: 'emu_result', id: msg.id, ok: false, error: String(e.message || e) }); }
     },
   };
-  localStorage.setItem('translation-presets-glossary-debug', '1'); window.__ops = ops; window.__reply = reply; window.__ctx = ctx; window.__dbg = true; window.__setStorage = (v) => { storage = v; }; window.__emit = (name, p) => (window.__handlers?.[name] || []).forEach((h) => h(p)); window.__messages = messages; window.__cleanup = LVInt.setup(ctx);
+  localStorage.setItem('translation-presets-glossary-debug', '1'); window.__ops = ops; window.__reply = reply; window.__ctx = ctx; window.__dbg = true; window.__setStorage = (v) => { storage = v; }; window.__getStorage = () => storage; window.__emit = (name, p) => (window.__handlers?.[name] || []).forEach((h) => h(p)); window.__messages = messages; window.__cleanup = LVInt.setup(ctx);
 });
 await page2.waitForTimeout(2500);
 if (process.env.QA_DEBUG) console.log(await page2.evaluate(() => JSON.stringify({ tab: document.querySelector('#tab')?.innerHTML.slice(0, 400), ls: [...document.querySelectorAll('.mari-message-actions')].length, sec: document.querySelectorAll('[data-chat-settings-section]').length, w: window.__writes })));
 check('integrated: original settings screen shows inside the extension tab', (await page2.locator('#tab .tpg-form').count()) === 1);
-check('integrated: our own settings (연결·언어) are still there', (await page2.locator('#tab .stt-panel h3', { hasText: '기본 번역' }).count()) === 1);
+// ---- 0.5.3: one settings panel. Our own settings are sections inside the original's form, with one save button ----
+check('0.5.3 merge: one panel only (no separate LV panel: no stt-section, no second save row)', (await page2.locator('#tab .stt-section, #tab .stt-row, #tab h3').count()) === 0 && (await page2.locator('#tab form.tpg-form').count()) === 1 && (await page2.locator('#tab .tpg-save').count()) === 1);
+check('0.5.3 merge: the LV sections (연결·언어, 번역하지 않을 부분, 지침 묶음) are inside the original form, above its save bar', await page2.evaluate(() => {
+  const f = document.querySelector('#tab form.tpg-form'); const secs = [...f.querySelectorAll('[data-lv-section]')]; const bar = f.querySelector('.tpg-savebar');
+  return secs.length === 3 && secs.every((x) => x.classList.contains('tpg-group') && x.querySelector('h5') && !!(x.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING));
+}));
+check('0.5.3 merge: the LV fields show the saved values (모델 언어 English, 내 메시지 번역 on)', (await page2.locator('#tab [name="lv:modelLanguage"]').inputValue()) === 'English' && (await page2.locator('#tab [name="lv:translateMyMessages"]').isChecked()));
+check('0.5.3 merge: the LV switches are drawn with the original\'s switch markup and are painted by it', await page2.evaluate(() => { const r = document.querySelector('#tab [data-lv-switch="translateMyMessages"]'); return r.hasAttribute('data-tpg-switch') && r.classList.contains('bg-[var(--primary)]/10') && !!r.querySelector('[data-settings-switch-track]'); }));
+await page2.screenshot({ path: join(shots, '05-merged-settings-mobile.png'), fullPage: true });
+await page2.evaluate(() => { const r = document.documentElement.style; r.setProperty('--lumiverse-bg', '#ffffff'); r.setProperty('--lumiverse-text', '#222'); r.setProperty('--lumiverse-text-muted', '#666'); r.setProperty('--lumiverse-border', '#ccc'); r.setProperty('--lumiverse-fill-subtle', '#eee'); r.setProperty('--lumiverse-primary', '#a8d4f0'); document.body.style.background = '#fff'; document.body.style.color = '#222'; });
+await page2.waitForTimeout(400);
+await page2.screenshot({ path: join(shots, '06-merged-settings-light.png'), fullPage: true });
+await page2.evaluate(() => { const r = document.documentElement.style; for (const k of ['--lumiverse-bg', '--lumiverse-text', '--lumiverse-text-muted', '--lumiverse-border', '--lumiverse-fill-subtle', '--lumiverse-primary']) r.removeProperty(k); document.body.style.background = '#1b1b22'; document.body.style.color = '#ddd'; });
+// one click saves both: an LV field and the original's own 기타 지침
+await page2.locator('#tab [name="lv:modelLanguage"]').fill('Japanese');
+await page2.locator('#tab [data-lv-switch="autoTranslate"] label').first().click();
+await page2.locator('#tab .tpg-form textarea[name="freeContext"]').evaluate((e) => { e.value = '현대 한국 배경'; });
+await page2.locator('#tab .tpg-form input[name="freeContextEnabled"]').evaluate((e) => { e.checked = true; e.dispatchEvent(new Event('change', { bubbles: true })); });
+await page2.locator('#tab .tpg-save').click();
+await page2.waitForFunction(() => document.querySelector('#tab [data-tpg-status]')?.textContent === '저장했습니다.', null, { timeout: 5000 }).catch(() => {});
+const savedLv = await page2.evaluate(() => window.__lvSaves?.at(-1));
+const savedTt = await page2.evaluate(() => window.__getStorage()?.config);
+check('0.5.3 merge: one click saves our values (via lv.save)', savedLv?.settings?.modelLanguage === 'Japanese' && savedLv?.settings?.autoTranslate === true, JSON.stringify(savedLv?.settings?.modelLanguage));
+check('0.5.3 merge: and the original\'s own values in the same click (기타 지침 in the original\'s file)', JSON.stringify(savedTt || {}).includes('현대 한국 배경'));
+check('0.5.3 merge: the status line and button are the original\'s ("저장했습니다.", "저장")', (await page2.locator('#tab [data-tpg-status]').textContent()) === '저장했습니다.' && (await page2.locator('#tab .tpg-save').textContent()) === '저장');
+await page2.evaluate(() => { window.__cleanup(); window.__cleanup = LVInt.setup(window.__ctx); });
+await page2.waitForSelector('#tab .tpg-form [data-lv-section]', { timeout: 6000 }).catch(() => {});
+await page2.waitForTimeout(800);
+check('0.5.3 merge: after a reload both are still there (LV 모델 언어, original 기타 지침, 자동 번역 switch)', (await page2.locator('#tab [name="lv:modelLanguage"]').inputValue()) === 'Japanese' && (await page2.locator('#tab .tpg-form textarea[name="freeContext"]').inputValue()) === '현대 한국 배경' && (await page2.locator('#tab [name="lv:autoTranslate"]').isChecked()), `${await page2.locator('#tab [name="lv:modelLanguage"]').inputValue()} / ${await page2.locator('#tab .tpg-form textarea[name="freeContext"]').inputValue()}`);
+check('0.5.3 merge: the form is not drawn twice after a re-render (one set of LV sections)', (await page2.locator('#tab [data-lv-section]').count()) === 3);
+// an LV save error is shown by the original's status line; the button comes back; the original's own save is not run
+await page2.evaluate(() => { window.__lvFail = true; });
+await page2.locator('#tab [name="lv:modelLanguage"]').fill('Korean');
+const patchesBefore = JSON.stringify(await page2.evaluate(() => window.__getStorage()?.config?.defaults?.freeContext));
+await page2.locator('#tab .tpg-save').click();
+await page2.waitForFunction(() => /저장하지 못했습니다/.test(document.querySelector('#tab [data-tpg-status]')?.textContent || ''), null, { timeout: 4000 }).catch(() => {});
+check('0.5.3 merge: an LV save error appears in the original status line (error), the button is "저장" and enabled', (await page2.locator('#tab [data-tpg-status]').getAttribute('data-kind')) === 'error' && (await page2.locator('#tab .tpg-save').textContent()) === '저장' && !(await page2.locator('#tab .tpg-save').isDisabled()), await page2.locator('#tab [data-tpg-status]').textContent());
+await page2.evaluate(() => { window.__lvFail = false; window.__lvStore = null; });
+
 check('integrated: old per-message toolbar/bar/pencil UI is gone', (await page2.locator('.stt-tb, .stt-bar, .stt-edit-row').count()) === 0);
 await page2.locator('.mari-message-actions button:has(svg.lucide-languages)').click();
 await page2.waitForTimeout(800);
@@ -355,6 +519,206 @@ await page2.evaluate(() => fetch('/api/v1/chats/c2/messages', { method: 'POST', 
 await page2.waitForTimeout(1500);
 const secondChatCall = await page2.evaluate((n) => window.__quiet.slice(n).find((c) => c.messages.some((m) => /^Translate the following text to English/.test(m.content))), quiet3);
 check('N6: in another chat that keeps the default prompt, the first chat\'s preset is gone', !!secondChatCall && !secondChatCall.messages.some((m) => m.content.includes('CUSTOM-OUT-PROMPT')), JSON.stringify(secondChatCall?.messages?.map((m) => m.content.slice(0, 60))));
+
+// ---- 0.5.3 (4): a Lumiverse long message ("더보기") keeps opening after the original shows a fresh translation ----
+// Host-like markup and behaviour from Lumiverse's MessageContent.tsx: a viewport with a max height and overflow hidden around the body;
+// a React-owned toggle button after it that exists only while the BODY measures taller than the max height (measure on mount and on
+// every re-render, e.g. when the message is updated), and flips an expanded state when clicked.
+await page2.evaluate(() => history.pushState({}, '', '/chat/c1'));
+await page2.waitForTimeout(1500);
+await page2.evaluate(() => {
+  window.__cleanup();
+  const paras = Array.from({ length: 14 }, (_, i) => `Long reply line number ${i + 1} of the scene.`);
+  const t = Math.floor(Date.now() / 1000);
+  window.__messages.push({ id: 'm9', role: 'assistant', content: paras.join('\n\n'), swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: t + 500, swipe_dates: [t + 500] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm9');
+  row.innerHTML = '<div><div data-component="MessageContent" id="mc9"><div class="lm-viewport" style="position:relative;overflow:hidden;max-height:90px"><div class="lm-body" style="display:flow-root">' + paras.map((x) => `<p>${x}</p>`).join('') + '<details class="lm-details"><summary>상태창</summary><div>HP 10</div></details></div></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').append(row);
+  const root = row.querySelector('[data-component="MessageContent"]');
+  const state = { expanded: false };
+  window.__lm = state;
+  // the host's own measurement + toggle, as React does it (it always works on the REAL content node)
+  window.__lmMeasure = () => {
+    const vp = root.querySelector('.lm-viewport'); const body = root.querySelector('.lm-body');
+    const over = !state.expanded ? Math.max(body.scrollHeight, body.offsetHeight) > 90 : root.querySelector('[data-long-message-toggle]') !== null;
+    vp.style.maxHeight = state.expanded ? '' : '90px';
+    let tg = root.querySelector(':scope > [data-long-message-toggle]');
+    if (over && !tg) {
+      tg = document.createElement('button'); tg.type = 'button'; tg.setAttribute('data-long-message-toggle', 'true');
+      // React attaches handlers through its own bookkeeping on the node: a cloned copy of this button has none
+      tg.__react = true;
+      tg.addEventListener('click', (e) => { if (!e.currentTarget.__react) return; state.expanded = !state.expanded; window.__lmMeasure(); });
+      root.append(tg);
+    } else if (!over && tg) tg.remove();
+    if (tg) tg.textContent = state.expanded ? '접기' : '더보기';
+  };
+  window.__lmMeasure();
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(2000);
+const lmToggleCount = () => page2.evaluate(() => document.querySelectorAll('[data-message-id="m9"] [data-long-message-toggle]').length);
+const lmVisible = () => page2.evaluate(() => {
+  // what the user can click: the toggle that is not inside display:none / visibility:hidden
+  return [...document.querySelectorAll('[data-message-id="m9"] [data-long-message-toggle]')].filter((b) => { const r = b.getBoundingClientRect(); return b.checkVisibility?.({ visibilityProperty: true }) !== false && r.width > 0 && r.height > 0; }).map((b) => ({ text: b.textContent, inView: !!b.closest('.ptx-view') }));
+});
+check('0.5.3 (4) setup: before translating, the long message has its 더보기 button', (await lmVisible()).length === 1 && (await lmVisible())[0].text === '더보기', JSON.stringify(await lmVisible()));
+await page2.locator('[data-message-id="m9"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m9"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(600);
+// the host re-renders the message after the translation is saved (message updated): it measures again
+await page2.evaluate(() => window.__lmMeasure());
+await page2.waitForTimeout(600);
+let vis = await lmVisible();
+check('0.5.3 (4): after a fresh translation, a 더보기 button is on screen (in the translated view)', vis.length === 1 && vis[0].text === '더보기' && vis[0].inView, JSON.stringify(vis));
+await page2.screenshot({ path: join(shots, '07-long-message-translated.png'), fullPage: true });
+const viewHeight = () => page2.evaluate(() => document.querySelector('[data-message-id="m9"] .ptx-view .lm-viewport')?.getBoundingClientRect().height ?? -1);
+const h0 = await viewHeight();
+await page2.locator('[data-message-id="m9"] .ptx-view [data-long-message-toggle]').click({ timeout: 2000 }).catch(() => {});
+await page2.waitForTimeout(700);
+const h1 = await viewHeight();
+vis = await lmVisible();
+check('0.5.3 (4): 더보기 opens the translated message (taller) and the button turns into 접기', h1 > h0 + 40 && vis.length === 1 && vis[0].text === '접기', `${h0} -> ${h1} ${JSON.stringify(vis)}`);
+await page2.locator('[data-message-id="m9"] .ptx-view [data-long-message-toggle]').click({ timeout: 2000 }).catch(() => {});
+await page2.waitForTimeout(700);
+const h2 = await viewHeight();
+check('0.5.3 (4): 접기 closes it again', h2 < h1 - 40 && (await lmVisible())[0]?.text === '더보기', `${h1} -> ${h2}`);
+// the original's <details> inside the translated view still toggles
+await page2.locator('[data-message-id="m9"] .ptx-view details summary').click({ timeout: 2000 }).catch(() => {});
+const d1 = await page2.evaluate(() => document.querySelector('[data-message-id="m9"] .ptx-view details')?.open);
+await page2.locator('[data-message-id="m9"] .ptx-view details summary').click({ timeout: 2000 }).catch(() => {});
+const d2 = await page2.evaluate(() => document.querySelector('[data-message-id="m9"] .ptx-view details')?.open);
+check('0.5.3 (4) guard: a <details> block in the translated message still opens and closes', d1 === true && d2 === false, `${d1}/${d2}`);
+// show original -> show translation: the native translate button toggles the view
+const nativeBtn = page2.locator('[data-message-id="m9"] .mari-message-actions button:has(svg.lucide-languages)');
+await nativeBtn.click();
+await page2.waitForTimeout(700);
+await page2.evaluate(() => window.__lmMeasure());
+vis = await lmVisible();
+check('0.5.3 (4): showing the original, the host\'s own 더보기 is back and works', (await page2.locator('[data-message-id="m9"] .ptx-view').count()) === 0 && vis.length === 1 && !vis[0].inView, JSON.stringify(vis));
+await page2.locator('[data-message-id="m9"] [data-long-message-toggle]').click({ timeout: 2000 }).catch(() => {});
+await page2.waitForTimeout(400);
+check('0.5.3 (4): the original opens with it (접기)', (await lmVisible())[0]?.text === '접기');
+await page2.locator('[data-message-id="m9"] [data-long-message-toggle]').click({ timeout: 2000 }).catch(() => {});
+await nativeBtn.click();
+await page2.waitForSelector('[data-message-id="m9"] .ptx-view', { timeout: 5000 }).catch(() => {});
+await page2.waitForTimeout(600);
+await page2.evaluate(() => window.__lmMeasure());
+await page2.waitForTimeout(400);
+vis = await lmVisible();
+await page2.locator('[data-message-id="m9"] .ptx-view [data-long-message-toggle]').click({ timeout: 2000 }).catch(() => {});
+await page2.waitForTimeout(700);
+check('0.5.3 (4): back to the translation, 더보기 still opens it', vis.length === 1 && vis[0].inView && (await lmVisible())[0]?.text === '접기', JSON.stringify(vis));
+// a message that is not collapsed is unaffected
+check('0.5.3 (4): a short (not collapsed) message has no toggle and still translates (m1 view present or none)', (await page2.locator('[data-message-id="m1"] [data-long-message-toggle]').count()) === 0);
+await page2.evaluate(() => { document.querySelector('[data-message-id="m9"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm9'), 1); });
+
+// ---- 0.5.3 (7): HTML islands (status windows, cards, <details>) stay in the translated view, in place, and still open ----
+await page2.evaluate(() => {
+  window.__cleanup();
+  const t = Math.floor(Date.now() / 1000);
+  const parts = [
+    { p: 'The first paragraph of the scene.' },
+    { island: '<details class="st"><summary>상태창 A</summary><div class="body">HP 10 / MP 5</div></details>' },
+    { p: 'The second paragraph, between two windows.' },
+    { island: '<details class="st"><summary>상태창 B</summary><div>Gold 30</div></details><div class="card" style="border:1px solid #888;padding:4px">CARD: Mina, Lv 3</div>' },
+    { p: 'The third paragraph closes the scene.' },
+    { island: '<details class="st"><summary>상태창 C</summary><div>Day 4</div></details>' },
+  ];
+  const content = parts.map((x) => x.p ?? x.island).join('\n\n');
+  window.__messages.push({ id: 'm11', role: 'assistant', content, swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: t + 700, swipe_dates: [t + 700] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm11');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="body11"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  const body = row.querySelector('.body11');
+  for (const x of parts) {
+    if (x.p) { const p = document.createElement('p'); p.textContent = x.p; body.append(p); }
+    else { const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = x.island; body.append(d); }
+  }
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(1500);
+const islandInfo = (scope) => page2.evaluate((sc) => [...document.querySelectorAll(`[data-message-id="m11"] ${sc} [data-lumiverse-html-island]`)].map((e) => ({ has: !!e.shadowRoot, html: e.shadowRoot?.innerHTML ?? '', open: [...(e.shadowRoot?.querySelectorAll('details') ?? [])].map((d) => d.open) })), scope);
+await page2.locator('[data-message-id="m11"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m11"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(900);
+const vi = await islandInfo('.ptx-view');
+const hi = await islandInfo('.mari-message-content:not(.ptx-view)');
+check('0.5.3 (7): the translated view shows all 3 status/card blocks (before, between and after the prose), same content as the original', vi.length === 3 && vi.every((x, i) => x.has && x.html === hi[i]?.html && x.html.length > 20), JSON.stringify(vi.map((x) => x.has && x.html.length)));
+check('0.5.3 (7): a card block is kept as it was (CARD text present, in place after the 2nd paragraph)', vi[1]?.html.includes('CARD: Mina, Lv 3'));
+check('0.5.3 (7): the prose around the blocks is translated (3 paragraphs)', (await page2.locator('[data-message-id="m11"] .ptx-view .ptx-u[data-k]').count()) === 3);
+check('0.5.3 (7): the blocks sit between the paragraphs in the original order', await page2.evaluate(() => { const kids = [...document.querySelector('[data-message-id="m11"] .ptx-view .body11').children].map((e) => e.hasAttribute('data-lumiverse-html-island') ? 'I' : 'P'); return kids.join('') === 'PIPIPI' || kids.join('') === 'SISISI' || kids.join('').replace(/[^IPS]/g, '').replace(/[PS]/g, 'P') === 'PIPIPI'; }));
+await page2.screenshot({ path: join(shots, '08-islands-translated.png'), fullPage: true });
+const toggled = await page2.evaluate(() => {
+  const res = [];
+  for (const isl of document.querySelectorAll('[data-message-id="m11"] .ptx-view [data-lumiverse-html-island]')) for (const d of isl.shadowRoot.querySelectorAll('details')) { const a = d.open; d.querySelector('summary').click(); const b = d.open; d.querySelector('summary').click(); res.push([a, b, d.open]); }
+  return res;
+});
+check('0.5.3 (7): every <details> in the translated view opens and closes again', toggled.length === 3 && toggled.every(([a, b, c]) => a === false && b === true && c === false), JSON.stringify(toggled));
+await page2.locator('[data-message-id="m11"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForTimeout(900);
+const orig1 = await islandInfo('.mari-message-content');
+check('0.5.3 (7): showing the original, the real blocks are intact', (await page2.locator('[data-message-id="m11"] .ptx-view').count()) === 0 && orig1.length === 3 && orig1.every((x) => x.has && x.html.length > 20));
+await page2.locator('[data-message-id="m11"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m11"] .ptx-view', { timeout: 5000 }).catch(() => {});
+await page2.waitForTimeout(900);
+const vi2 = await islandInfo('.ptx-view');
+check('0.5.3 (7): back to the translation, the blocks are there again and still toggle', vi2.length === 3 && vi2.every((x) => x.has && x.html.length > 20) && await page2.evaluate(() => { const d = document.querySelector('[data-message-id="m11"] .ptx-view [data-lumiverse-html-island]').shadowRoot.querySelector('details'); d.querySelector('summary').click(); const o = d.open; d.querySelector('summary').click(); return o && !d.open; }));
+await page2.evaluate(() => { document.querySelector('[data-message-id="m11"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm11'), 1); });
+
+// ---- 0.5.3 (6): "이어서 번역" ----
+await page2.evaluate(() => {
+  window.__cleanup();
+  const k = LVInt.blockKey;
+  const paras = ['Alpha was already done.', 'Beta was already done.', 'Gamma was never translated.'];
+  const rec = { v: 1, map: { [k(paras[0])]: '알파는 이미 됨', [k(paras[1])]: '베타는 이미 됨' }, edited: {}, view: '', at: 1 };
+  const t = Math.floor(Date.now() / 1000);
+  window.__messages.push({ id: 'm12', role: 'assistant', content: paras.join('\n\n'), swipes: ['x'], swipe_id: 0, extra: {}, metadata: { st_translator_tt: { 0: rec } }, send_date: t + 800, swipe_dates: [t + 800] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm12');
+  row.innerHTML = '<div><div data-component="MessageContent">' + paras.map((x) => `<p>${x}</p>`).join('') + '</div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForSelector('[data-message-id="m12"] .ptx-view', { timeout: 7000 }).catch(() => {});
+await page2.waitForTimeout(900);
+check('0.5.3 (6): a half-translated message shows the 이어서 번역 button in the original bar (with the original\'s 3 buttons)', (await page2.locator('[data-message-id="m12"] .ptx-bar [data-lv-act="continue"]').count()) === 1 && (await page2.locator('[data-message-id="m12"] .ptx-bar [data-ptx-act]').count()) === 3 && (await page2.locator('[data-message-id="m12"] .ptx-u.is-missing').count()) === 1);
+check('0.5.3 (6): it is drawn like the original buttons (same classes as the 재번역 button)', await page2.evaluate(() => { const bar = document.querySelector('[data-message-id="m12"] .ptx-bar'); return bar.querySelector('[data-lv-act]').className === bar.querySelector('[data-ptx-act="retranslate"]').className; }));
+check('0.5.3 (6): a fully translated message has no such button (m9-like complete messages)', (await page2.locator('[data-message-id="m1"] [data-lv-act="continue"]').count()) === 0);
+const q0 = await page2.evaluate(() => window.__quiet.length);
+await page2.locator('[data-message-id="m12"] [data-lv-act="continue"]').click();
+await page2.waitForFunction(() => window.__messages.find((x) => x.id === 'm12').metadata?.st_translator_tt?.['0']?.map && Object.keys(window.__messages.find((x) => x.id === 'm12').metadata.st_translator_tt['0'].map).length >= 3, null, { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(800);
+const sent = await page2.evaluate((n) => window.__quiet.slice(n).map((c) => c.messages.find((m) => m.role === 'user').content), q0);
+check('0.5.3 (6): it translates only the missing paragraph, through the original\'s own request path', sent.length >= 1 && sent.every((u) => u.includes('Gamma was never translated.') && !u.includes('Alpha was already') && !u.includes('Beta was already')), JSON.stringify(sent).slice(0, 300));
+check('0.5.3 (6): afterwards all 3 paragraphs have a translation and the button is gone', (await page2.locator('[data-message-id="m12"] .ptx-u.is-missing').count()) === 0 && (await page2.locator('[data-message-id="m12"] [data-lv-act="continue"]').count()) === 0 && (await page2.locator('[data-message-id="m12"] .ptx-u[data-k]').count()) === 3);
+await page2.evaluate(() => { document.querySelector('[data-message-id="m12"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm12'), 1); });
+
+// ---- 0.5.3 (8): 한 번에 번역할 글자수 ----
+await page2.locator('#tab [name="lv:batchChars"]').fill('700');
+await page2.locator('#tab .tpg-save').click();
+await page2.waitForFunction(() => document.querySelector('#tab [data-tpg-status]')?.textContent === '저장했습니다.', null, { timeout: 5000 }).catch(() => {});
+check('0.5.3 (8): the limit is saved with the one save button', (await page2.evaluate(() => window.__lvSaves?.at(-1)?.settings?.batchChars)) === 700);
+await page2.evaluate(() => {
+  window.__cleanup();
+  const paras = Array.from({ length: 6 }, (_, i) => `Segment ${i + 1} ` + 'word '.repeat(60));
+  const t = Math.floor(Date.now() / 1000);
+  window.__messages.push({ id: 'm13', role: 'assistant', content: paras.join('\n\n'), swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: t + 900, swipe_dates: [t + 900] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm13');
+  row.innerHTML = '<div><div data-component="MessageContent">' + paras.map((x) => `<p>${x}</p>`).join('') + '</div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(1500);
+const q1 = await page2.evaluate(() => window.__quiet.length);
+await page2.locator('[data-message-id="m13"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForFunction(() => Object.keys(window.__messages.find((x) => x.id === 'm13').metadata?.st_translator_tt?.['0']?.map || {}).length >= 6, null, { timeout: 10000 }).catch(() => {});
+const calls13 = await page2.evaluate((n) => window.__quiet.slice(n).map((c) => c.messages.find((m) => m.role === 'user').content).filter((u) => /<segment id=/.test(u)).map((u) => [...u.matchAll(/<segment id="\d+">\n([\s\S]*?)\n<\/segment>/g)].reduce((a, m) => a + m[1].length, 0)), q1);
+check('0.5.3 (8): a long message with the limit 700 is sent as several requests, each at or under 700 characters', calls13.length >= 3 && calls13.every((c) => c <= 700), JSON.stringify(calls13));
+check('0.5.3 (8): and the result is the same as one request: all 6 paragraphs translated', Object.keys(await page2.evaluate(() => window.__messages.find((x) => x.id === 'm13').metadata?.st_translator_tt?.['0']?.map || {})).length === 6);
+await page2.evaluate(() => { document.querySelector('[data-message-id="m13"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm13'), 1); });
 check('integrated: no page errors', errors2.length === 0, errors2.slice(0, 3).join(' | '));
 
 check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
