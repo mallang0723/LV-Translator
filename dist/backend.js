@@ -1152,179 +1152,6 @@ function restoreCurrentIllustrations(translated, content) {
 ${rest}` : text;
 }
 
-// src/translate/chunk.ts
-var TRANSLATION_CHUNK_CHARS = 3200;
-var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
-function findCut(text, from, limit) {
-  const end = from + limit;
-  const span = text.slice(from, end + 1);
-  let best = -1;
-  for (const m of span.matchAll(SENTENCE_BREAK)) {
-    const at = m.index + m[0].length;
-    if (at <= limit)
-      best = Math.max(best, at);
-  }
-  const newline = span.lastIndexOf(`
-`, limit);
-  if (newline > 0)
-    best = Math.max(best, newline);
-  if (best <= 0) {
-    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
-      if (/\s/.test(span[i])) {
-        best = i;
-        break;
-      }
-    }
-  }
-  let cut = best > 0 ? from + best : end;
-  const open = text.lastIndexOf("\u27E6", cut - 1);
-  if (open >= from) {
-    const close = text.indexOf("\u27E7", open);
-    if (close >= cut)
-      cut = open > from ? open : close + 1;
-  }
-  return cut;
-}
-function cutParagraph(paragraph, limit) {
-  const pieces = [];
-  let from = 0;
-  while (paragraph.length - from > limit) {
-    const cut = findCut(paragraph, from, limit);
-    pieces.push(paragraph.slice(from, cut));
-    from = cut;
-    while (from < paragraph.length && /\s/.test(paragraph[from]))
-      from++;
-  }
-  pieces.push(paragraph.slice(from));
-  return pieces;
-}
-function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
-  const max = Math.max(1, Math.floor(limit));
-  const pieces = String(text).replace(/\r\n?/g, `
-`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
-  const parts = [];
-  for (const raw of pieces) {
-    const piece = raw.trim();
-    if (!piece)
-      continue;
-    const last = parts.length - 1;
-    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
-      parts[last] += `
-
-${piece}`;
-    else
-      parts.push(piece);
-  }
-  return parts;
-}
-var SENTENCE_END = /[.!?\u3002\uFF01\uFF1F\u2026"\u201D\u2019'\u300D\u300F)\]]$/;
-function joinContinuation(partial, continuation) {
-  let cont = continuation.replace(/^\s*\n/, `
-`);
-  if (!cont.trim())
-    return partial;
-  const tail = partial.slice(-200);
-  for (let k = Math.min(tail.length, cont.length);k >= 8; k--) {
-    if (tail.endsWith(cont.slice(0, k))) {
-      cont = cont.slice(k);
-      break;
-    }
-  }
-  if (!cont.trim())
-    return partial;
-  if (/\s$/.test(partial) || /^\s/.test(cont))
-    return partial + cont;
-  return SENTENCE_END.test(partial) ? `${partial} ${cont}` : partial + cont;
-}
-function isTruncatedFinish(reason) {
-  if (typeof reason !== "string")
-    return false;
-  const r = reason.toLowerCase();
-  return r === "length" || r.includes("max_tokens") || r.includes("max_output") || r === "max_tokens";
-}
-
-// src/translate/clean-reply.ts
-function cleanReply(text) {
-  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
-}
-
-// src/translate/glossary.ts
-function parseGlossary(raw) {
-  const pairs = [];
-  for (const line of raw.split(/\r?\n/u)) {
-    const separator = line.indexOf("=");
-    if (separator < 1)
-      continue;
-    const left = line.slice(0, separator).trim();
-    const right = line.slice(separator + 1).trim();
-    if (left && right)
-      pairs.push({ left, right });
-  }
-  return pairs;
-}
-
-// src/bundles.ts
-function effectiveGuides(store, settings) {
-  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
-  if (!bundle)
-    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
-  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
-  const glossary = [
-    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
-    ...parseGlossary(settings.glossary)
-  ].map((p) => `${p.left} = ${p.right}`).join(`
-`);
-  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
-
-`);
-  return {
-    glossary,
-    freeContext: join(bundle.freeContext, settings.freeContext),
-    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
-  };
-}
-function newBundleId(cryptoApi = globalThis.crypto) {
-  if (typeof cryptoApi?.randomUUID === "function")
-    return `bundle-${cryptoApi.randomUUID()}`;
-  const bytes = new Uint8Array(16);
-  if (typeof cryptoApi?.getRandomValues === "function")
-    cryptoApi.getRandomValues(bytes);
-  else
-    for (let i = 0;i < bytes.length; i++)
-      bytes[i] = Math.floor(Math.random() * 256);
-  bytes[6] = bytes[6] & 15 | 64;
-  bytes[8] = bytes[8] & 63 | 128;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-function saveBundle(store, value) {
-  if (!value || typeof value.name !== "string" || !value.name.trim())
-    throw new Error("\uBB36\uC74C \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
-  const existing = store.userBundles.findIndex((b) => b.id === value.id);
-  let id = existing >= 0 ? store.userBundles[existing].id : newBundleId();
-  while (existing < 0 && store.userBundles.some((b) => b.id === id))
-    id = newBundleId();
-  const bundle = {
-    id,
-    name: value.name.trim(),
-    glossary: typeof value.glossary === "string" ? value.glossary : "",
-    freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
-    incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
-  };
-  if (existing >= 0)
-    store.userBundles[existing] = bundle;
-  else
-    store.userBundles.push(bundle);
-  return bundle;
-}
-function deleteBundle(store, id) {
-  store.userBundles = store.userBundles.filter((b) => b.id !== id);
-  for (const settings of [store.defaults, ...Object.values(store.chats)]) {
-    if (settings.bundleId === id)
-      settings.bundleId = "";
-  }
-}
-
 // src/translate/protect.ts
 class ExcludeRuleError extends Error {
   constructor(message) {
@@ -1837,6 +1664,239 @@ function recordHasMore(r) {
   return r.truncatedPart >= 0 || r.parts.length < r.total;
 }
 
+// src/message-ui.ts
+function isTranslationHidden(hidden, mode) {
+  return mode !== "paragraph" && hidden === true;
+}
+function skipFresh(mode, existing, force) {
+  const status = existing?.status;
+  return mode === "fresh" && status === "done" && !force;
+}
+function recordFor(mt, content) {
+  const key = recordKeyFor(mt, content);
+  return key ? mt?.entries?.[key] ?? null : null;
+}
+function recordKeyFor(mt, content) {
+  for (const key of [sourceHash(content), rawSourceHash(content)]) {
+    if (mt?.entries?.[key])
+      return key;
+  }
+  const current = [];
+  replaceIllustrations(content, (piece) => {
+    current.push(piece);
+    return piece;
+  });
+  if (current.length) {
+    const entries = Object.entries(mt?.entries ?? {}).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+    for (const [key, record] of entries) {
+      const original = [];
+      replaceIllustrations(restore(record.parts.join(`
+
+`), record.pieces), (piece) => {
+        original.push(piece);
+        return piece;
+      });
+      if (original.length !== current.length)
+        continue;
+      const candidate = replaceIllustrations(content, (_piece, index) => original[index]);
+      if (rawSourceHash(candidate) === key)
+        return key;
+    }
+  }
+  return null;
+}
+function clearTranslation(mt, key) {
+  delete mt.entries[key];
+  if (Object.keys(mt.entries).length === 0)
+    mt.hidden = false;
+}
+function stripReasoning(content) {
+  const closed = content.replace(/\s*<(think|thinking|reasoning)>([\s\S]*?)<\/\1>\s*/gi, "");
+  return closed.replace(/\s*<(think|thinking|reasoning)>([\s\S]*)$/i, "").trim();
+}
+function renderSourceFor(mt, content, stored) {
+  if (recordKeyFor(mt, content))
+    return content;
+  for (const candidate of stored) {
+    if (typeof candidate === "string" && candidate !== content && stripReasoning(candidate) === content && recordKeyFor(mt, candidate))
+      return candidate;
+  }
+  return null;
+}
+
+// src/translate/chunk.ts
+var TRANSLATION_CHUNK_CHARS = 3200;
+var SENTENCE_BREAK = /[.!?\u2026]+["'\u201D\u2019\u300D\u300F)\]]*(?=\s)|[\u3002\uFF01\uFF1F]+["'\u201D\u2019\u300D\u300F)\]]*/g;
+function findCut(text, from, limit) {
+  const end = from + limit;
+  const span = text.slice(from, end + 1);
+  let best = -1;
+  for (const m of span.matchAll(SENTENCE_BREAK)) {
+    const at = m.index + m[0].length;
+    if (at <= limit)
+      best = Math.max(best, at);
+  }
+  const newline = span.lastIndexOf(`
+`, limit);
+  if (newline > 0)
+    best = Math.max(best, newline);
+  if (best <= 0) {
+    for (let i = Math.min(limit, span.length - 1);i > 0; i--) {
+      if (/\s/.test(span[i])) {
+        best = i;
+        break;
+      }
+    }
+  }
+  let cut = best > 0 ? from + best : end;
+  const open = text.lastIndexOf("\u27E6", cut - 1);
+  if (open >= from) {
+    const close = text.indexOf("\u27E7", open);
+    if (close >= cut)
+      cut = open > from ? open : close + 1;
+  }
+  return cut;
+}
+function cutParagraph(paragraph, limit) {
+  const pieces = [];
+  let from = 0;
+  while (paragraph.length - from > limit) {
+    const cut = findCut(paragraph, from, limit);
+    pieces.push(paragraph.slice(from, cut));
+    from = cut;
+    while (from < paragraph.length && /\s/.test(paragraph[from]))
+      from++;
+  }
+  pieces.push(paragraph.slice(from));
+  return pieces;
+}
+function splitForTranslation(text, limit = TRANSLATION_CHUNK_CHARS) {
+  const max = Math.max(1, Math.floor(limit));
+  const pieces = String(text).replace(/\r\n?/g, `
+`).split(/\n[ \t]*\n/).flatMap((paragraph) => paragraph.length > max ? cutParagraph(paragraph, max) : [paragraph]);
+  const parts = [];
+  for (const raw of pieces) {
+    const piece = raw.trim();
+    if (!piece)
+      continue;
+    const last = parts.length - 1;
+    if (last >= 0 && parts[last].length + 2 + piece.length <= max)
+      parts[last] += `
+
+${piece}`;
+    else
+      parts.push(piece);
+  }
+  return parts;
+}
+var SENTENCE_END = /[.!?\u3002\uFF01\uFF1F\u2026"\u201D\u2019'\u300D\u300F)\]]$/;
+function joinContinuation(partial, continuation) {
+  let cont = continuation.replace(/^\s*\n/, `
+`);
+  if (!cont.trim())
+    return partial;
+  const tail = partial.slice(-200);
+  for (let k = Math.min(tail.length, cont.length);k >= 8; k--) {
+    if (tail.endsWith(cont.slice(0, k))) {
+      cont = cont.slice(k);
+      break;
+    }
+  }
+  if (!cont.trim())
+    return partial;
+  if (/\s$/.test(partial) || /^\s/.test(cont))
+    return partial + cont;
+  return SENTENCE_END.test(partial) ? `${partial} ${cont}` : partial + cont;
+}
+function isTruncatedFinish(reason) {
+  if (typeof reason !== "string")
+    return false;
+  const r = reason.toLowerCase();
+  return r === "length" || r.includes("max_tokens") || r.includes("max_output") || r === "max_tokens";
+}
+
+// src/translate/clean-reply.ts
+function cleanReply(text) {
+  return text.replace(/^(?:\s*\[\s*(?:Text to Translate|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+/i, "").replace(/(?:\s*\[\s*(?:End Text|Previous Context\s*\u2014\s*Reference Only)\s*\]\s*)+$/i, "");
+}
+
+// src/translate/glossary.ts
+function parseGlossary(raw) {
+  const pairs = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator < 1)
+      continue;
+    const left = line.slice(0, separator).trim();
+    const right = line.slice(separator + 1).trim();
+    if (left && right)
+      pairs.push({ left, right });
+  }
+  return pairs;
+}
+
+// src/bundles.ts
+function effectiveGuides(store, settings) {
+  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
+  if (!bundle)
+    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
+  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
+  const glossary = [
+    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
+    ...parseGlossary(settings.glossary)
+  ].map((p) => `${p.left} = ${p.right}`).join(`
+`);
+  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
+
+`);
+  return {
+    glossary,
+    freeContext: join(bundle.freeContext, settings.freeContext),
+    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
+  };
+}
+function newBundleId(cryptoApi = globalThis.crypto) {
+  if (typeof cryptoApi?.randomUUID === "function")
+    return `bundle-${cryptoApi.randomUUID()}`;
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoApi?.getRandomValues === "function")
+    cryptoApi.getRandomValues(bytes);
+  else
+    for (let i = 0;i < bytes.length; i++)
+      bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function saveBundle(store, value) {
+  if (!value || typeof value.name !== "string" || !value.name.trim())
+    throw new Error("\uBB36\uC74C \uC774\uB984\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
+  const existing = store.userBundles.findIndex((b) => b.id === value.id);
+  let id = existing >= 0 ? store.userBundles[existing].id : newBundleId();
+  while (existing < 0 && store.userBundles.some((b) => b.id === id))
+    id = newBundleId();
+  const bundle = {
+    id,
+    name: value.name.trim(),
+    glossary: typeof value.glossary === "string" ? value.glossary : "",
+    freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
+    incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
+  };
+  if (existing >= 0)
+    store.userBundles[existing] = bundle;
+  else
+    store.userBundles.push(bundle);
+  return bundle;
+}
+function deleteBundle(store, id) {
+  store.userBundles = store.userBundles.filter((b) => b.id !== id);
+  for (const settings of [store.defaults, ...Object.values(store.chats)]) {
+    if (settings.bundleId === id)
+      settings.bundleId = "";
+  }
+}
+
 // src/translate/prompt.ts
 var SYSTEM_PROMPT_MAX = 200000;
 var TRANSLATION_TEXT_MAX = 50000;
@@ -2288,9 +2348,26 @@ ${body}
 
 </div>`;
 }
-function buildParagraphView(content, record, settings, view, order = "source-first") {
-  const pairing = pairParagraphs(content, record, settings);
-  const pairs = groupPairs(pairing.pairs);
+var UNCLOSED_REASONING = /<(think|thinking|reasoning)>/i;
+function stripPairs(pairs) {
+  const out = [];
+  let open = false;
+  for (const pair of pairs) {
+    if (open)
+      continue;
+    const source = stripReasoning(pair.source);
+    if (UNCLOSED_REASONING.test(pair.source.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "")))
+      open = true;
+    if (!source)
+      continue;
+    const translation = pair.translation === null ? null : stripReasoning(pair.translation);
+    out.push({ source, translation: translation === "" ? null : translation });
+  }
+  return out;
+}
+function buildParagraphView(content, record, settings, view, order = "source-first", stored) {
+  const pairing = pairParagraphs(stored ?? content, record, settings);
+  const pairs = groupPairs(stored === undefined ? pairing.pairs : stripPairs(pairing.pairs));
   const whole = pairing.kind === "whole";
   const out = [`<div class="stt-pr${view === "tap" ? " stt-pr-tap" : ""}${view !== "tap" && order === "translation-first" ? " stt-pr-tfirst" : ""}">`];
   if (NOTES[pairing.kind])
@@ -2547,12 +2624,14 @@ async function quietComplete(host, args) {
 }
 
 // src/display/render.ts
-function renderMessage(content, record, settings, view) {
+function renderMessage(content, record, settings, view, stored) {
   if (!record || !record.parts.some((p) => cleanReply(p).trim()))
     return content;
   if (settings.displayMode === "paragraph")
-    return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
-  const text = recordToText(record, content);
+    return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder, stored);
+  const text = stored === undefined ? recordToText(record, content) : stripReasoning(recordToText(record, stored));
+  if (!text.trim())
+    return content;
   switch (settings.displayMode) {
     case "above":
       return `${text}
@@ -2585,66 +2664,6 @@ ${content}
 
 ${text}`;
   }
-}
-
-// src/message-ui.ts
-function isTranslationHidden(hidden, mode) {
-  return mode !== "paragraph" && hidden === true;
-}
-function skipFresh(mode, existing, force) {
-  const status = existing?.status;
-  return mode === "fresh" && status === "done" && !force;
-}
-function recordFor(mt, content) {
-  const key = recordKeyFor(mt, content);
-  return key ? mt?.entries?.[key] ?? null : null;
-}
-function recordKeyFor(mt, content) {
-  for (const key of [sourceHash(content), rawSourceHash(content)]) {
-    if (mt?.entries?.[key])
-      return key;
-  }
-  const current = [];
-  replaceIllustrations(content, (piece) => {
-    current.push(piece);
-    return piece;
-  });
-  if (current.length) {
-    const entries = Object.entries(mt?.entries ?? {}).sort((a, b) => b[1].updatedAt - a[1].updatedAt);
-    for (const [key, record] of entries) {
-      const original = [];
-      replaceIllustrations(restore(record.parts.join(`
-
-`), record.pieces), (piece) => {
-        original.push(piece);
-        return piece;
-      });
-      if (original.length !== current.length)
-        continue;
-      const candidate = replaceIllustrations(content, (_piece, index) => original[index]);
-      if (rawSourceHash(candidate) === key)
-        return key;
-    }
-  }
-  return null;
-}
-function clearTranslation(mt, key) {
-  delete mt.entries[key];
-  if (Object.keys(mt.entries).length === 0)
-    mt.hidden = false;
-}
-function stripReasoning(content) {
-  const closed = content.replace(/\s*<(think|thinking|reasoning)>([\s\S]*?)<\/\1>\s*/gi, "");
-  return closed.replace(/\s*<(think|thinking|reasoning)>([\s\S]*)$/i, "").trim();
-}
-function renderSourceFor(mt, content, stored) {
-  if (recordKeyFor(mt, content))
-    return content;
-  for (const candidate of stored) {
-    if (typeof candidate === "string" && candidate !== content && stripReasoning(candidate) === content && recordKeyFor(mt, candidate))
-      return candidate;
-  }
-  return null;
 }
 
 // src/backend.ts
@@ -2682,7 +2701,7 @@ async function sendState(uid) {
   const store = await loadStore(uid);
   send({ type: "state", store, presets: presetSummaries(store.userPresets), connections: await connections(uid), link: await peerState() }, uid);
 }
-var SELF_VERSION = "0.4.1";
+var SELF_VERSION = "0.4.2";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -3339,8 +3358,7 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   const record = recordFor(mt, source);
   if (!record || !record.parts.some((p) => p.trim()))
     return;
-  const rendered = renderMessage(source, record, settings, store.view);
-  return { content: source === ctx.content ? rendered : stripReasoning(rendered) };
+  return { content: renderMessage(ctx.content, record, settings, store.view, source === ctx.content ? undefined : source) };
 });
 spindle.on("GENERATION_STARTED", (payload) => {
   if (payload?.chatId)

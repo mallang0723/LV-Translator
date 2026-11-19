@@ -3,13 +3,19 @@
 import type { ChatSettings, TranslationRecord, ViewSettings } from '../shared';
 import { recordToText } from '../translate/engine';
 import { cleanReply } from '../translate/clean-reply';
+import { stripReasoning } from '../message-ui';
 import { buildParagraphView } from './paragraph-view';
 
-export function renderMessage(content: string, record: TranslationRecord | null | undefined, settings: ChatSettings, view: ViewSettings): string {
+/**
+ * `stored` (Auto-parse only): the full stored text the record is keyed by, when `content` is the host's think-stripped
+ * display text. `content` is then used verbatim as the source side and reasoning is cut out of the translation side only.
+ */
+export function renderMessage(content: string, record: TranslationRecord | null | undefined, settings: ChatSettings, view: ViewSettings, stored?: string): string {
   // Keep the original visible until translated text exists, as in the backend render processor.
   if (!record || !record.parts.some((p) => cleanReply(p).trim())) return content;
-  if (settings.displayMode === 'paragraph') return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder);
-  const text = recordToText(record, content);
+  if (settings.displayMode === 'paragraph') return buildParagraphView(content, record, settings, view.paragraphView, view.paragraphOrder, stored);
+  const text = stored === undefined ? recordToText(record, content) : stripReasoning(recordToText(record, stored));
+  if (!text.trim()) return content;
   switch (settings.displayMode) {
     case 'above':
       return `${text}\n\n<hr class="stt-separator">\n\n${content}`;

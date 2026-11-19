@@ -38,7 +38,7 @@ import {
 import { effectiveGuides } from './bundles';
 import { type ConnectionHint, friendlyError, quietComplete, SOURCE_LABELS } from './connection';
 import { renderMessage } from './display/render';
-import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, renderSourceFor, skipFresh, stripReasoning } from './message-ui';
+import { clearTranslation, isTranslationHidden, recordFor, recordKeyFor, renderSourceFor, skipFresh } from './message-ui';
 import { type Completion, recordToText, translate, TranslationError } from './translate/engine';
 import type { ContextMessage, Direction, TranslationRequest } from './translate/prompt';
 import { ExcludeRuleError } from './translate/protect';
@@ -103,7 +103,7 @@ async function sendState(uid: Uid): Promise<void> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.4.1';
+const SELF_VERSION = '0.4.2';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -811,9 +811,10 @@ spindle.registerMessageContentProcessor(async (ctx) => {
   if (source === null) return;
   const record = recordFor(mt, source);
   if (!record || !record.parts.some((p) => p.trim())) return;
-  const rendered = renderMessage(source, record, settings, store.view);
-  // The reasoning box already shows the thought, so the body must not bring it back (original or translated).
-  return { content: source === ctx.content ? rendered : stripReasoning(rendered) };
+  // Auto-parse: the host's own text is the source side verbatim; only the translation side is stripped of reasoning
+  // (the reasoning box already shows the thought). Stripping the combined output would eat the blank lines around the
+  // separator and cut everything after an unclosed trailing <think>.
+  return { content: renderMessage(ctx.content, record, settings, store.view, source === ctx.content ? undefined : source) };
 });
 
 // ---- events ----

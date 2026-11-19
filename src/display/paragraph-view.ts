@@ -3,6 +3,7 @@
 // paragraph render exactly like the original message. Paragraph text is kept between blank
 // lines so Markdown is parsed inside the wrapper elements.
 
+import { stripReasoning } from '../message-ui';
 import { currentIllustrations, normalizeIllustrations } from '../illustrations';
 
 import type { ChatSettings, ParagraphOrder, ParagraphView, TranslationRecord } from '../shared';
@@ -83,9 +84,29 @@ function block(cls: string, label: string, body: string): string {
   return `<div class="${cls}"><div class="stt-pr-label">${label}</div>\n\n${body}\n\n</div>`;
 }
 
-export function buildParagraphView(content: string, record: TranslationRecord, settings: ChatSettings, view: ParagraphView, order: ParagraphOrder = 'source-first'): string {
-  const pairing = pairParagraphs(content, record, settings);
-  const pairs = groupPairs(pairing.pairs);
+const UNCLOSED_REASONING = /<(think|thinking|reasoning)>/i;
+
+/**
+ * Auto-parse: pairs were made from the full stored text, so reasoning is cut out of each side per pair (a reasoning-only
+ * pair disappears; text after an unclosed <think> goes too, as the host does), never from the combined output.
+ */
+function stripPairs(pairs: Pair[]): Pair[] {
+  const out: Pair[] = [];
+  let open = false;
+  for (const pair of pairs) {
+    if (open) continue;
+    const source = stripReasoning(pair.source);
+    if (UNCLOSED_REASONING.test(pair.source.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, ''))) open = true;
+    if (!source) continue;
+    const translation = pair.translation === null ? null : stripReasoning(pair.translation);
+    out.push({ source, translation: translation === '' ? null : translation });
+  }
+  return out;
+}
+
+export function buildParagraphView(content: string, record: TranslationRecord, settings: ChatSettings, view: ParagraphView, order: ParagraphOrder = 'source-first', stored?: string): string {
+  const pairing = pairParagraphs(stored ?? content, record, settings);
+  const pairs = groupPairs(stored === undefined ? pairing.pairs : stripPairs(pairing.pairs));
   const whole = pairing.kind === 'whole';
   const out: string[] = [`<div class="stt-pr${view === 'tap' ? ' stt-pr-tap' : ''}${view !== 'tap' && order === 'translation-first' ? ' stt-pr-tfirst' : ''}">`];
   if (NOTES[pairing.kind]) out.push(`<div class="stt-pr-note">${NOTES[pairing.kind]}</div>`);
