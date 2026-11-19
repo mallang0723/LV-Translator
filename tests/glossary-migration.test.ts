@@ -94,7 +94,7 @@ describe('0.4.0 기타 지침·대사 지침·이전 대화 -> the original sett
     const file = { config: { defaults: { glossary: 'A = B' } }, lvMigrations: { glossary052: 'earlier' } };
     const out = planScopeMigration(file, s, at)!;
     expect((out.config as any).defaults.freeContext).toBe('현대 한국 배경');
-    expect((out.lvMigrations as any)).toEqual({ glossary052: 'earlier', scope053: at });
+    expect((out.lvMigrations as any)).toEqual({ glossary052: 'earlier', scope053: at, tags053: at });
     expect(planScopeMigration(out, s, at)).toBeNull();
     expect(JSON.stringify(s)).toBe(before);
   });
@@ -128,5 +128,21 @@ describe('0.4.0 제외할 태그 -> the original\'s 번역에서 제외할 태�
     expect((same.config as any).paragraph.keepTags).toBe('<scene_plan>');
     const fresh = planScopeMigration({}, store({ excludeTags: 'scene_plan' }), at)!;
     expect((fresh.config as any).paragraph.keepTags).toBe('scene_plan');
+  });
+});
+
+describe('tag migration has its own marker (0.5.3, SYHO-235)', () => {
+  test('a file that already ran the scope part (scope053, an earlier 0.5.3 build) still gets the 0.4.0 tags once', () => {
+    const file = { config: { defaults: { glossary: 'A = B' } }, lvMigrations: { glossary052: 'g', scope053: 'earlier' } };
+    const s = store({ excludeTags: 'scene_plan', freeContext: '지침', freeContextEnabled: true });
+    const out = planScopeMigration(file, s, at)!;
+    expect((out.config as any).paragraph.keepTags).toBe('scene_plan');
+    expect((out.config as any).defaults.freeContext).toBeUndefined(); // the scope part is not run again
+    expect(out.lvMigrations).toEqual({ glossary052: 'g', scope053: 'earlier', tags053: at });
+    expect(planScopeMigration(out, s, at)).toBeNull();
+  });
+  test('a file with both markers is left alone; a fresh file gets both', () => {
+    expect(planScopeMigration({ lvMigrations: { scope053: 'a', tags053: 'b' } }, store({ excludeTags: 'x' }), at)).toBeNull();
+    expect((planScopeMigration({}, store({}), at)!.lvMigrations as any)).toEqual({ scope053: at, tags053: at });
   });
 });

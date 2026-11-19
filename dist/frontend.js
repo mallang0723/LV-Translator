@@ -9538,6 +9538,9 @@ function withExclusions(generate, rulesText) {
     const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex].content) : null;
     if (!parsed || !rules.length)
       return generate(req, signal);
+    const lastMsg = req.messages[req.messages.length - 1];
+    if (lastMsg?.role === "assistant" && /<\/?segment/i.test(lastMsg.content))
+      return generate(req, signal);
     const SEP = `
 
 `;
@@ -10117,7 +10120,7 @@ function setup(ctx) {
     const connectionId = String(row.metadata?.translationConnectionId ?? "");
     settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ""), String(row.metadata?.translationOutputPrompt ?? ""));
     const keep = await emuStorage.get().then((f) => String(f?.config?.paragraph?.keepTags ?? "")).catch(() => "");
-    const held = protect(text, { ...settings, excludeTags: [settings.excludeTags, ...lenientTags(keep.replace(/;/g, ","))].filter(Boolean).join(", ") });
+    const held = protect(text, { ...settings, excludeTags: lenientTags(keep.replace(/;/g, ",")).join(", ") });
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
     const pairs = bundle ? parseGlossary(bundle.glossary) : [];
