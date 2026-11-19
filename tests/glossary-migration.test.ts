@@ -116,3 +116,17 @@ describe('0.4.0 기타 지침·대사 지침·이전 대화 -> the original sett
     });
   });
 });
+
+describe('0.4.0 제외할 태그 -> the original\'s 번역에서 제외할 태그 (0.5.3, bug 9)', () => {
+  test('the default\'s and each chat\'s excluded tags and `<tag>` rules are added to paragraph.keepTags, keeping what the original lists', () => {
+    const s = store({ excludeTags: 'scene_plan, status', excludeRules: '<my_card>\n/x/' }, { c1: { excludeTags: 'ui', excludeRules: '' } });
+    const out = planScopeMigration({ config: { paragraph: { keepTags: 'tracker status' } } }, s, at)!;
+    expect((out.config as any).paragraph.keepTags).toBe('tracker status scene_plan my_card ui');
+  });
+  test('nothing new: the original\'s list is not touched; empty original: the tags become the list', () => {
+    const same = planScopeMigration({ config: { paragraph: { keepTags: '<scene_plan>' } } }, store({ excludeTags: 'scene_plan' }), at)!;
+    expect((same.config as any).paragraph.keepTags).toBe('<scene_plan>');
+    const fresh = planScopeMigration({}, store({ excludeTags: 'scene_plan' }), at)!;
+    expect((fresh.config as any).paragraph.keepTags).toBe('scene_plan');
+  });
+});

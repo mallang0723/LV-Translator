@@ -28,7 +28,6 @@ export interface LvValues {
   showDraftButton: boolean;
   protectHtml: boolean;
   protectCode: boolean;
-  excludeTags: string;
   excludeRules: string;
   bundleId: string;
   asDefault: boolean;
@@ -40,7 +39,6 @@ export interface LvHost {
   save(values: LvValues): Promise<void>;
   editBundle(id: string | null): void;
   deleteBundle(id: string): void;
-  suggestedTags: string[];
 }
 
 // The original's own class strings (extension.js `UI`, `SWITCH_ROW`, `SWITCH_OFF`), used only when the form to copy them from
@@ -104,11 +102,9 @@ function build(cls: Classes, hasChat: boolean): string {
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
         ${switchRow(cls, 'protectHtml', 'HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역')}
         ${switchRow(cls, 'protectCode', '코드 블록(```) 은 번역하지 않음')}
-        ${field('제외할 HTML 태그 (쉼표·공백으로 구분)', input('excludeTags', 'placeholder="choices, status, ui"'))}
-        <div class="tpg-inline-actions"><button type="button" class="${cls.button}" data-lv-suggest>추천 태그 넣기</button></div>
-        <p class="${cls.help}">이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. &lt;style&gt;·&lt;script&gt; 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다.</p>
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다.</p>
         ${field('제외 규칙 (한 줄에 하나)', `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]"></textarea>`)}
-        <p class="${cls.help}">&lt;태그&gt; 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.</p>
+        <p class="${cls.help}">/정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 번역에 보내지 않고 번역 화면에 원문 그대로 둡니다(여러 문단에 걸쳐도 됩니다). {{매크로}} 는 항상 그대로 둡니다.</p>
       </section>
       <section class="tpg-group" data-lv-section="bundle">
         <h5 class="${cls.title}">번역 지침 묶음</h5>
@@ -125,6 +121,25 @@ function build(cls: Classes, hasChat: boolean): string {
         </details>
         ${hasChat ? switchRow(cls, 'asDefault', '새 채팅의 기본값으로도 저장', '위 설정을 앞으로 만드는 채팅의 기본값으로도 저장합니다.') : ''}
       </section>`;
+}
+
+/** Tag names of the `<tag>` lines of an exclusion-rules text. */
+export function tagRuleNames(rules: string): string[] {
+  const out: string[] = [];
+  for (const line of rules.split(/\r?\n/)) {
+    const m = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/.exec(line);
+    if (m) out.push(m[1]!.toLowerCase());
+  }
+  return [...new Set(out)];
+}
+
+function addKeepTags(form: HTMLFormElement, names: string[]): void {
+  const field = form.elements.namedItem('paraKeepTags') as HTMLInputElement | null;
+  if (!field || !names.length) return;
+  const have = new Set(field.value.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, '').toLowerCase()).filter(Boolean));
+  const add = names.filter((n) => !have.has(n));
+  if (!add.length) return;
+  field.value = [field.value.trim(), ...add].filter(Boolean).join(' ');
 }
 
 const q = <T extends HTMLElement>(form: HTMLElement, name: string) => form.querySelector<T>(`[name="lv:${name}"]`)!;
@@ -165,7 +180,6 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
     q<HTMLInputElement>(form, 'modelLanguage').value = s.values.modelLanguage;
     q<HTMLInputElement>(form, 'myLanguage').value = s.values.myLanguage;
     q<HTMLInputElement>(form, 'batchChars').value = s.values.batchChars > 0 ? String(s.values.batchChars) : '';
-    q<HTMLInputElement>(form, 'excludeTags').value = s.values.excludeTags;
     q<HTMLTextAreaElement>(form, 'excludeRules').value = s.values.excludeRules;
     for (const k of ['autoTranslate', 'translateMyMessages', 'showDraftButton', 'protectHtml', 'protectCode'] as const) q<HTMLInputElement>(form, k).checked = s.values[k];
     const asDefault = form.querySelector<HTMLInputElement>('[name="lv:asDefault"]');
@@ -218,7 +232,6 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
       showDraftButton: checked('showDraftButton'),
       protectHtml: checked('protectHtml'),
       protectCode: checked('protectCode'),
-      excludeTags: q<HTMLInputElement>(form, 'excludeTags').value,
       excludeRules: q<HTMLTextAreaElement>(form, 'excludeRules').value,
       bundleId: q<HTMLSelectElement>(form, 'bundleId').value,
       asDefault: form.querySelector<HTMLInputElement>('[name="lv:asDefault"]')?.checked === true,
@@ -247,13 +260,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
         const t = (e.target as HTMLElement | null)?.closest?.('button') as HTMLButtonElement | null;
         if (!t || !t.closest('[data-lv-sections]')) return;
         const id = q<HTMLSelectElement>(form, 'bundleId').value;
-        if (t.hasAttribute('data-lv-suggest')) {
-          const input = q<HTMLInputElement>(form, 'excludeTags');
-          const have = new Set(input.value.split(/[\s,]+/).filter(Boolean));
-          for (const tag of host.suggestedTags) have.add(tag);
-          input.value = [...have].join(', ');
-          dirty.set(form, true);
-        } else if (t.hasAttribute('data-lv-bundle-new')) host.editBundle(null);
+        if (t.hasAttribute('data-lv-bundle-new')) host.editBundle(null);
         else if (t.hasAttribute('data-lv-bundle-edit') && id) host.editBundle(id);
         else if (t.hasAttribute('data-lv-bundle-delete') && id) host.deleteBundle(id);
       });
@@ -281,6 +288,8 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
             }
             return;
           }
+          // `<태그>` lines of the exclusion rules are tag exclusions: the original's own 「번역에서 제외할 태그」 does them.
+          addKeepTags(form, tagRuleNames(q<HTMLTextAreaElement>(form, 'excludeRules').value));
           dirty.set(form, false);
           const asDefault = form.querySelector<HTMLInputElement>('[name="lv:asDefault"]');
           if (asDefault) asDefault.checked = false;

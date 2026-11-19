@@ -9432,7 +9432,32 @@ function groupSegments(segments, limit) {
     groups.push(cur);
   return groups;
 }
-var REPLY = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)<\/segment\s*>/gi;
+function stripThinking(text) {
+  let s = String(text ?? "");
+  s = s.replace(/<(think|thinking|thought|reasoning)>[\s\S]*?<\/\1>/gi, "");
+  const lastClose = s.search(/<\/(think|thinking|thought|reasoning)>(?![\s\S]*<\/(think|thinking|thought|reasoning)>)/i);
+  if (lastClose >= 0)
+    s = s.slice(s.indexOf(">", lastClose) + 1);
+  return s;
+}
+function extractSegments(output) {
+  const s = stripThinking(output);
+  const map = new Map;
+  const re = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)<\/segment\s*>/gi;
+  let m;
+  while (m = re.exec(s))
+    map.set(Number(m[1]), m[2].replace(/^\n+|\n+$/g, ""));
+  if (!map.size) {
+    const loose = /<segment\s+id\s*=\s*["']?(\d+)["']?\s*>([\s\S]*?)(?=<segment\b|$)/gi;
+    while (m = loose.exec(s))
+      map.set(Number(m[1]), m[2].replace(/<\/?translate>/gi, "").replace(/^\n+|\s+$/g, ""));
+  }
+  return { map, rest: s.trim() };
+}
+function withPrefill(content, prefill) {
+  const pre = String(prefill || "").trim();
+  return pre && !content.startsWith(pre) ? `${pre}${content}` : content;
+}
 function withBatchLimit(generate, limit) {
   return async (req, signal) => {
     const max = limit();
@@ -9441,6 +9466,10 @@ function withBatchLimit(generate, limit) {
     const userIndex = req.messages.map((m) => m.role).lastIndexOf("user");
     const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex].content) : null;
     if (!parsed)
+      return generate(req, signal);
+    const last = req.messages[req.messages.length - 1];
+    const prefill = last.role === "assistant" ? last.content : "";
+    if (/<\/?segment/i.test(prefill))
       return generate(req, signal);
     const groups = groupSegments(parsed.segments, max);
     if (groups.length < 2)
@@ -9457,14 +9486,11 @@ ${body}
       const reply = await generate({ ...req, messages }, signal);
       if (reply.aborted)
         return reply;
-      const text = reply.content ?? "";
-      const found = new Map;
-      for (const m of text.matchAll(REPLY))
-        found.set(Number(m[1]), m[2].replace(/^\n+|\n+$/g, ""));
-      if (!found.size && group.length === 1 && text.trim() && !/<segment/i.test(text))
-        found.set(1, text.trim());
+      const { map, rest } = extractSegments(withPrefill(reply.content ?? "", prefill));
+      if (!map.size && group.length === 1 && rest && !/<segment/i.test(rest))
+        map.set(1, rest);
       group.forEach((s, i) => {
-        const got = found.get(i + 1);
+        const got = map.get(i + 1);
         if (got !== undefined)
           parts.push(`<segment id="${s.id}">
 ${got}
@@ -9472,6 +9498,120 @@ ${got}
       });
     }
     return { content: parts.join(`
+`) };
+  };
+}
+
+// src/host-emu/exclude.ts
+var MARK = (n) => `⟦${n}⟧`;
+function excludedRanges(joined, rules) {
+  const all = [];
+  for (const rule of rules) {
+    const re = new RegExp(rule.source, rule.flags.includes("g") ? rule.flags : `${rule.flags}g`);
+    for (const m of joined.matchAll(re))
+      if (m[0].length)
+        all.push([m.index, m.index + m[0].length]);
+  }
+  all.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const r of all) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1])
+      last[1] = Math.max(last[1], r[1]);
+    else
+      merged.push([r[0], r[1]]);
+  }
+  return merged;
+}
+function withExclusions(generate, rulesText) {
+  return async (req, signal) => {
+    const raw = rulesText();
+    if (!raw.trim())
+      return generate(req, signal);
+    let rules;
+    try {
+      rules = parseExcludeRules(raw);
+    } catch {
+      return generate(req, signal);
+    }
+    const userIndex = req.messages.map((m) => m.role).lastIndexOf("user");
+    const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex].content) : null;
+    if (!parsed || !rules.length)
+      return generate(req, signal);
+    const SEP = `
+
+`;
+    const joined = parsed.segments.map((s) => s.text).join(SEP);
+    const ranges = excludedRanges(joined, rules);
+    if (!ranges.length)
+      return generate(req, signal);
+    const items = [];
+    let at = 0;
+    for (const seg of parsed.segments) {
+      const from = at;
+      const to = at + seg.text.length;
+      at = to + SEP.length;
+      const pieces = [];
+      let masked = "";
+      let cursor = from;
+      for (const [a, b] of ranges) {
+        const lo = Math.max(a, from);
+        const hi = Math.min(b, to);
+        if (lo >= hi)
+          continue;
+        masked += joined.slice(cursor, lo) + MARK(pieces.push(joined.slice(lo, hi)));
+        cursor = hi;
+      }
+      masked += joined.slice(cursor, to);
+      const left = masked.replace(/⟦\d+⟧/g, "");
+      items.push({ id: seg.id, source: seg.text, masked, pieces, full: pieces.length > 0 && !/[\p{L}\p{N}]/u.test(left) });
+    }
+    if (items.every((i) => !i.pieces.length))
+      return generate(req, signal);
+    const send = items.filter((i) => !i.full);
+    const done = new Map;
+    for (const i of items)
+      if (i.full)
+        done.set(i.id, i.source);
+    if (send.length) {
+      const body = send.map((s, j) => `<segment id="${j + 1}">
+${s.masked}
+</segment>`).join(`
+`);
+      const anyMasked = send.some((s) => s.pieces.length);
+      const messages = req.messages.map((m, i) => {
+        if (i === userIndex)
+          return { ...m, content: `${parsed.before}<translate>
+${body}
+</translate>${parsed.after}` };
+        if (anyMasked && m.role === "system")
+          return { ...m, content: `${m.content}
+
+${MARKER_INSTRUCTION}` };
+        return m;
+      });
+      const reply = await generate({ ...req, messages }, signal);
+      if (reply.aborted)
+        return reply;
+      const last = req.messages[req.messages.length - 1];
+      const { map, rest } = extractSegments(withPrefill(reply.content ?? "", last.role === "assistant" ? last.content : ""));
+      if (!map.size && send.length === 1 && rest && !/<segment/i.test(rest))
+        map.set(1, rest);
+      send.forEach((s, j) => {
+        const got = map.get(j + 1);
+        if (got === undefined)
+          return;
+        if (s.pieces.length) {
+          if (checkMarkers(s.masked, got))
+            return;
+          done.set(s.id, restore(got, s.pieces));
+        } else
+          done.set(s.id, got);
+      });
+    }
+    return { content: items.filter((i) => done.has(i.id)).map((i) => `<segment id="${i.id}">
+${done.get(i.id)}
+</segment>`).join(`
 `) };
   };
 }
@@ -9530,13 +9670,11 @@ function build(cls, hasChat) {
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
         ${switchRow(cls, "protectHtml", "HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역")}
         ${switchRow(cls, "protectCode", "코드 블록(```) 은 번역하지 않음")}
-        ${field("제외할 HTML 태그 (쉼표·공백으로 구분)", input("excludeTags", 'placeholder="choices, status, ui"'))}
-        <div class="tpg-inline-actions"><button type="button" class="${cls.button}" data-lv-suggest>추천 태그 넣기</button></div>
-        <p class="${cls.help}">이 태그의 요소(여는 태그부터 닫는 태그까지, 안쪽 내용 포함)는 번역에 보내지 않고 그대로 되돌립니다. &lt;style&gt;·&lt;script&gt; 는 항상 제외됩니다. strong·em 은 안의 글자를 그대로 번역합니다.</p>
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다.</p>
         ${field("제외 규칙 (한 줄에 하나)", `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;
 /HP: \\d+\\/\\d+/
 [상태창] ... [/상태창]"></textarea>`)}
-        <p class="${cls.help}">&lt;태그&gt; 는 그 요소 전체, /정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 원문 그대로 둡니다. {{매크로}} 는 항상 그대로 둡니다.</p>
+        <p class="${cls.help}">/정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 번역에 보내지 않고 번역 화면에 원문 그대로 둡니다(여러 문단에 걸쳐도 됩니다). {{매크로}} 는 항상 그대로 둡니다.</p>
       </section>
       <section class="tpg-group" data-lv-section="bundle">
         <h5 class="${cls.title}">번역 지침 묶음</h5>
@@ -9553,6 +9691,25 @@ function build(cls, hasChat) {
         </details>
         ${hasChat ? switchRow(cls, "asDefault", "새 채팅의 기본값으로도 저장", "위 설정을 앞으로 만드는 채팅의 기본값으로도 저장합니다.") : ""}
       </section>`;
+}
+function tagRuleNames(rules) {
+  const out = [];
+  for (const line of rules.split(/\r?\n/)) {
+    const m = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/.exec(line);
+    if (m)
+      out.push(m[1].toLowerCase());
+  }
+  return [...new Set(out)];
+}
+function addKeepTags(form, names) {
+  const field = form.elements.namedItem("paraKeepTags");
+  if (!field || !names.length)
+    return;
+  const have = new Set(field.value.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
+  const add = names.filter((n) => !have.has(n));
+  if (!add.length)
+    return;
+  field.value = [field.value.trim(), ...add].filter(Boolean).join(" ");
 }
 var q = (form, name) => form.querySelector(`[name="lv:${name}"]`);
 function mountLvForm(root, host) {
@@ -9585,7 +9742,6 @@ function mountLvForm(root, host) {
     q(form, "modelLanguage").value = s.values.modelLanguage;
     q(form, "myLanguage").value = s.values.myLanguage;
     q(form, "batchChars").value = s.values.batchChars > 0 ? String(s.values.batchChars) : "";
-    q(form, "excludeTags").value = s.values.excludeTags;
     q(form, "excludeRules").value = s.values.excludeRules;
     for (const k of ["autoTranslate", "translateMyMessages", "showDraftButton", "protectHtml", "protectCode"])
       q(form, k).checked = s.values[k];
@@ -9636,7 +9792,6 @@ function mountLvForm(root, host) {
       showDraftButton: checked("showDraftButton"),
       protectHtml: checked("protectHtml"),
       protectCode: checked("protectCode"),
-      excludeTags: q(form, "excludeTags").value,
       excludeRules: q(form, "excludeRules").value,
       bundleId: q(form, "bundleId").value,
       asDefault: form.querySelector('[name="lv:asDefault"]')?.checked === true
@@ -9672,14 +9827,7 @@ function mountLvForm(root, host) {
         if (!t || !t.closest("[data-lv-sections]"))
           return;
         const id = q(form, "bundleId").value;
-        if (t.hasAttribute("data-lv-suggest")) {
-          const input = q(form, "excludeTags");
-          const have = new Set(input.value.split(/[\s,]+/).filter(Boolean));
-          for (const tag of host.suggestedTags)
-            have.add(tag);
-          input.value = [...have].join(", ");
-          dirty.set(form, true);
-        } else if (t.hasAttribute("data-lv-bundle-new"))
+        if (t.hasAttribute("data-lv-bundle-new"))
           host.editBundle(null);
         else if (t.hasAttribute("data-lv-bundle-edit") && id)
           host.editBundle(id);
@@ -9711,6 +9859,7 @@ function mountLvForm(root, host) {
             }
             return;
           }
+          addKeepTags(form, tagRuleNames(q(form, "excludeRules").value));
           dirty.set(form, false);
           const asDefault = form.querySelector('[name="lv:asDefault"]');
           if (asDefault)
@@ -9832,7 +9981,6 @@ function el(tag, props = {}, children = []) {
 }
 var button = (label, onClick, cls = "", title) => el("button", { type: "button", class: `stt-btn ${cls}`.trim(), title: title ?? label, "aria-label": title ?? label, onClick }, [label]);
 var ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>';
-var SUGGESTED_TAGS = ["choices", "options", "status", "stats"];
 function setup(ctx) {
   let store = null;
   let connections = [];
@@ -9899,7 +10047,7 @@ function setup(ctx) {
     },
     updateContent: (c, m, content) => call("updateContent", [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call("patchExtra", [c, m, patch, swipe]),
-    generateRaw: withBatchLimit((req, signal) => call("generateRaw", [req], signal), () => store ? current().batchChars : 0),
+    generateRaw: withExclusions(withBatchLimit((req, signal) => call("generateRaw", [req], signal), () => store ? current().batchChars : 0), () => store ? current().excludeRules : ""),
     generateActive: (c) => call("generateActive", [c]),
     connections: () => call("connections", []),
     character: (id) => call("character", [id]),
@@ -9968,7 +10116,8 @@ function setup(ctx) {
     const row = await bridge.getChat(forChat);
     const connectionId = String(row.metadata?.translationConnectionId ?? "");
     settingsHost.setPrompts(String(row.metadata?.translationPrompt ?? ""), String(row.metadata?.translationOutputPrompt ?? ""));
-    const held = protect(text, settings);
+    const keep = await emuStorage.get().then((f) => String(f?.config?.paragraph?.keepTags ?? "")).catch(() => "");
+    const held = protect(text, { ...settings, excludeTags: [settings.excludeTags, ...lenientTags(keep.replace(/;/g, ","))].filter(Boolean).join(", ") });
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
     const pairs = bundle ? parseGlossary(bundle.glossary) : [];
@@ -10124,7 +10273,7 @@ ${bundle.freeContext.trim()}` : "",
   }
   function lvState() {
     if (!store) {
-      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeTags: "", excludeRules: "", bundleId: "" }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
+      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "" }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
     }
     const s = current();
     let bundleId = s.bundleId;
@@ -10141,7 +10290,7 @@ ${bundle.freeContext.trim()}` : "",
       ready: true,
       chatKey: chatId ?? "",
       hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeTags: s.excludeTags, excludeRules: s.excludeRules, bundleId },
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId },
       connections: options,
       connectionNote: note,
       linkNote: link === "none" ? "" : link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.",
@@ -10150,7 +10299,6 @@ ${bundle.freeContext.trim()}` : "",
   }
   const lvForm = mountLvForm(settingsHost.element, {
     state: lvState,
-    suggestedTags: SUGGESTED_TAGS,
     editBundle: (id) => editBundle(id ? store?.userBundles.find((b) => b.id === id) ?? null : null),
     deleteBundle: async (id) => {
       const selected = store?.userBundles.find((b) => b.id === id);
@@ -10166,11 +10314,10 @@ ${bundle.freeContext.trim()}` : "",
         toBackend({ type: "delete_bundle", id: selected.id });
     },
     async save(v) {
-      let tags;
       try {
-        tags = parseTags(v.excludeTags).join(", ");
+        parseExcludeRules(v.excludeRules);
       } catch (e) {
-        throw new Error(e instanceof ExcludeRuleError ? e.message : "제외할 태그 이름을 확인해 주세요.");
+        throw new Error(e instanceof ExcludeRuleError ? e.message : "제외 규칙을 확인해 주세요.");
       }
       const settings = {
         ...current(),
@@ -10182,7 +10329,6 @@ ${bundle.freeContext.trim()}` : "",
         showDraftButton: v.showDraftButton,
         protectHtml: v.protectHtml,
         protectCode: v.protectCode,
-        excludeTags: tags,
         excludeRules: v.excludeRules,
         bundleId: v.bundleId,
         connectionId: v.connectionId

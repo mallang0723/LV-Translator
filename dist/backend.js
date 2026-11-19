@@ -2386,6 +2386,30 @@ function planScopeMigration(file, store, at) {
       }
     }
   }
+  const names = new Set;
+  const addAll = (text) => {
+    for (const t of lenientTags(text))
+      names.add(t);
+  };
+  const scopes = [store.defaults, ...Object.values(store.chats)];
+  for (const sc of scopes) {
+    addAll(sc.excludeTags);
+    for (const line of sc.excludeRules.split(/\r?\n/)) {
+      const m = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/.exec(line);
+      if (m)
+        names.add(m[1].toLowerCase());
+    }
+  }
+  if (names.size) {
+    const para = isObject2(config.paragraph) ? config.paragraph : {};
+    const have = typeof para.keepTags === "string" ? para.keepTags : "";
+    const haveNames = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
+    const add = [...names].filter((n) => !haveNames.has(n));
+    if (add.length) {
+      config.paragraph = { ...para, keepTags: [have.trim(), ...add].filter(Boolean).join(" ") };
+      changed = true;
+    }
+  }
   return { ...file, ...changed ? { config } : {}, [MIGRATIONS_KEY]: { ...marks, [SCOPE_MARK]: at } };
 }
 
