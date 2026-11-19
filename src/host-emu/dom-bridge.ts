@@ -128,6 +128,8 @@ export interface NativePrompts {
   prompts(): { outgoing: string; incoming: string };
   /** Initial values (the chat's own prompts); fields the original already wrote are left alone. */
   setPrompts(outgoing: string, incoming: string): void;
+  /** A different chat is on screen: the fields go back to empty (the original writes the new chat's preset itself). */
+  reset(): void;
 }
 
 export function nativePrompts(host: HTMLElement): NativePrompts {
@@ -138,6 +140,14 @@ export function nativePrompts(host: HTMLElement): NativePrompts {
       for (const [which, value] of [['outgoing', outgoing], ['incoming', incoming]] as const) {
         const f = field(which);
         if (f && !f.hasAttribute('data-ptx-touched')) f.value = value;
+      }
+    },
+    reset() {
+      for (const which of ['outgoing', 'incoming']) {
+        const f = field(which);
+        if (!f) continue;
+        f.value = '';
+        f.removeAttribute('data-ptx-touched');
       }
     },
   };

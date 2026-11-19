@@ -1111,25 +1111,6 @@ var BUILTIN_PRESET_ORDER = new Map([
   "builtin-bilingual-dialogue-korean-v2"
 ].map((id, index) => [id, index]));
 // src/bundles.ts
-function effectiveGuides(store, settings) {
-  const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
-  if (!bundle)
-    return { glossary: settings.glossary, freeContext: settings.freeContext, incomingVoicePrompt: settings.incomingVoicePrompt };
-  const roomTerms = new Set(parseGlossary(settings.glossary).map((p) => p.left));
-  const glossary = [
-    ...parseGlossary(bundle.glossary).filter((p) => !roomTerms.has(p.left)),
-    ...parseGlossary(settings.glossary)
-  ].map((p) => `${p.left} = ${p.right}`).join(`
-`);
-  const join = (base, room) => [base.trim(), room.trim()].filter(Boolean).join(`
-
-`);
-  return {
-    glossary,
-    freeContext: join(bundle.freeContext, settings.freeContext),
-    incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
-  };
-}
 function newBundleId(cryptoApi = globalThis.crypto) {
   if (typeof cryptoApi?.randomUUID === "function")
     return `bundle-${cryptoApi.randomUUID()}`;
@@ -1993,7 +1974,8 @@ function createEmuBridge(d) {
     m.metadata = { ...m.metadata ?? {}, ...changed };
   }
   const converting = new Set;
-  async function convertLegacy(chatId, rows) {
+  const SCREEN_READ_MAX = 60;
+  async function convertLegacy(chatId, rows, persist) {
     if (!d.legacy)
       return;
     let ctx;
@@ -2018,7 +2000,7 @@ function createEmuBridge(d) {
       }
       const key = `${m.id}:${swipe}`;
       m.metadata = { ...m.metadata ?? {}, [TT_KEY]: { ...tt, [swipe]: converted } };
-      if (converting.has(key))
+      if (!persist || converting.has(key))
         continue;
       converting.add(key);
       host.chat.updateMessage(chatId, m.id, d.metadataPatch ? { metadata_patch: { [TT_KEY]: { ...tt, [swipe]: converted } } } : { metadata: m.metadata }).catch(() => converting.delete(key));
@@ -2076,12 +2058,12 @@ function createEmuBridge(d) {
     async listMessages(chatId, n) {
       const character = await characterOf(chatId);
       const rows = await tail(chatId, n || MAX_TAIL);
-      await convertLegacy(chatId, rows);
+      await convertLegacy(chatId, rows, n > 0 && n <= SCREEN_READ_MAX);
       return rows.map((m) => messageRow(chatId, m, character));
     },
     async getMessage(chatId, messageId) {
       const row = await findMessage(chatId, messageId);
-      await convertLegacy(chatId, [row]);
+      await convertLegacy(chatId, [row], true);
       return messageRow(chatId, row, await characterOf(chatId));
     },
     async patchExtra(chatId, messageId, patch, swipeIndex) {
@@ -2097,12 +2079,7 @@ function createEmuBridge(d) {
     generateRaw,
     async translate(req, requestId) {
       const lang = req.targetLanguage.trim();
-      let system = String(req.systemPrompt ?? "").replaceAll("{{targetLanguage}}", lang);
-      const extra = req.chatId ? await d.extraSystem?.(req.chatId) : "";
-      if (extra)
-        system = [system, extra].filter(Boolean).join(`
-
-`);
+      const system = String(req.systemPrompt ?? "").replaceAll("{{targetLanguage}}", lang);
       const connectionId = req.connectionId || (req.chatId ? (await d.chatSettings(req.chatId)).connectionId : "");
       const messages = [];
       if (system.trim())
@@ -2353,22 +2330,6 @@ async function emu(uid, msg) {
       onLegacySkipped: (id) => {
         if (!legacySkipped.has(id))
           legacySkipped.add(id);
-      },
-      async extraSystem(chatId) {
-        const store = await loadStore(uid);
-        const guides = effectiveGuides(store, settingsFor(store, chatId));
-        const pairs = parseGlossary(guides.glossary);
-        const parts = [];
-        if (pairs.length)
-          parts.push(`## Glossary (apply in both directions)
-${pairs.map((p) => `${p.left} = ${p.right}`).join(`
-`)}`);
-        if (guides.freeContext.trim())
-          parts.push(`## Additional guidance
-${guides.freeContext.trim()}`);
-        return parts.join(`
-
-`);
       }
     });
     if (msg.op === "generateActive") {

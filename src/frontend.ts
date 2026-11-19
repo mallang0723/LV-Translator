@@ -15,6 +15,7 @@ import {
   effectiveConnectionId,
 } from './shared';
 import { checkMarkers, ExcludeRuleError, MARKER_INSTRUCTION, parseTags, protect, restore } from './translate/protect';
+import { parseGlossary } from './translate/glossary';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
 import type { HostBridge } from './host-emu/api';
@@ -163,10 +164,13 @@ export function setup(ctx: SpindleFrontendContext) {
       }, { once: true });
     });
   };
+  const CONTEXT_READ_TAIL = 40;
+  let outgoingInFlight = 0;
   const hub = new GenerationHub();
   const bridge: HostBridge = {
     getChat: (c) => call('getChat', [c]),
-    listMessages: (c, n) => call('listMessages', [c, n]),
+    // The original's "이전 대화 참고" asks for the chat without a limit; while my message is being translated only the end is read.
+    listMessages: (c, n) => call('listMessages', [c, n || (outgoingInFlight > 0 ? CONTEXT_READ_TAIL : 0)]),
     getMessage: (c, m) => call('getMessage', [c, m]),
     updateContent: (c, m, content) => call('updateContent', [c, m, content]),
     patchExtra: (c, m, patch, swipe) => call('patchExtra', [c, m, patch, swipe]),
@@ -232,12 +236,26 @@ export function setup(ctx: SpindleFrontendContext) {
     const held = protect(text, settings);
     // The prompt lives in the original's field (a hidden one here; in Marinara it is the 유저 입력 번역 프롬프트 field).
     let systemPrompt = settingsHost.prompts().outgoing.trim();
-    if (held.pieces.length) systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim(), MARKER_INSTRUCTION].join('\n\n');
-    const res = await fetchOriginal('/api/translate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: held.text, provider: 'ai', targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat }),
-    });
+    // LV additions on top of the original's prompt: the shared bundle's glossary / guidance (the bundle's own fields only) and the protection marker rule.
+    const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
+    const pairs = bundle ? parseGlossary(bundle.glossary) : [];
+    const extras = [
+      pairs.length ? `## Glossary (apply in both directions)\n${pairs.map((p) => `${p.left} = ${p.right}`).join('\n')}` : '',
+      bundle?.freeContext.trim() ? `## Additional guidance\n${bundle.freeContext.trim()}` : '',
+      held.pieces.length ? MARKER_INSTRUCTION : '',
+    ].filter(Boolean);
+    if (extras.length) systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim(), ...extras].join('\n\n');
+    let res: Response;
+    outgoingInFlight++;
+    try {
+      res = await fetchOriginal('/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: held.text, provider: 'ai', targetLanguage: settings.modelLanguage, connectionId, systemPrompt, chatId: forChat }),
+      });
+    } finally {
+      outgoingInFlight--;
+    }
     const data = (await res.json().catch(() => null)) as { translatedText?: string; error?: string; message?: string } | null;
     if (!res.ok) throw new Error(friendlyError(data?.error || data?.message || `번역 요청 실패 (${res.status})`));
     const translated = String(data?.translatedText ?? '').trim();
@@ -248,6 +266,8 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function resetChat(next: string | null): void {
+    // Before the original sees the new chat id (it reads it from here): the old chat's prompt must not stay in its fields.
+    if (next !== chatId) settingsHost.reset();
     chatId = next;
     renderDraftButton();
     renderPanel();
@@ -569,7 +589,6 @@ export function setup(ctx: SpindleFrontendContext) {
     switch (msg?.type) {
       case 'state': {
         store = msg.store;
-        settingsHost.setPrompts(current().outgoingPrompt, current().incomingPrompt);
         connections = msg.connections;
         link = msg.link ?? 'none';
         renderPanel();

@@ -59,8 +59,6 @@ export interface EmuDeps {
   /** Whether the host supports `metadata_patch` (chat-metadata-patch-v1). */
   metadataPatch: boolean;
   signalFor?(requestId: string): AbortSignal | undefined;
-  /** LV-only guidance (the shared guide bundle) added to the system prompt of "translate my message". '' = none. */
-  extraSystem?(chatId: string): Promise<string>;
   /** The memory extension's side of the record (src/adapter/pub.ts): whether `pub` is wanted, its language, the original's kept tags. */
   projection?(chatId: string): Promise<{ publish: boolean; language: string; kept: ReadonlySet<string> }>;
   /** A 0.4.0 record is turned into the original's once, when its message is read (src/adapter/pub.ts convertLegacyRecord). */
@@ -145,7 +143,10 @@ export function createEmuBridge(d: EmuDeps) {
   const converting = new Set<string>();
 
   /** N8: a message the original has no record for, but 0.4.0 translated paragraph by paragraph, shows that translation. */
-  async function convertLegacy(chatId: string, rows: Msg[]): Promise<void> {
+  /** Reads this small are the messages on screen: only those are saved. A bigger read (the original's "모두 번역") is converted in memory only. */
+  const SCREEN_READ_MAX = 60;
+
+  async function convertLegacy(chatId: string, rows: Msg[], persist: boolean): Promise<void> {
     if (!d.legacy) return;
     let ctx: Awaited<ReturnType<NonNullable<EmuDeps['legacy']>>> | undefined;
     for (const m of rows) {
@@ -165,7 +166,7 @@ export function createEmuBridge(d: EmuDeps) {
       }
       const key = `${m.id}:${swipe}`;
       m.metadata = { ...(m.metadata ?? {}), [TT_KEY]: { ...tt, [swipe]: converted } };
-      if (converting.has(key)) continue;
+      if (!persist || converting.has(key)) continue;
       converting.add(key);
       // Saved once, next to (never over) the 0.4.0 record, so the original's later saves start from it.
       void host.chat
@@ -229,12 +230,12 @@ export function createEmuBridge(d: EmuDeps) {
     async listMessages(chatId: string, n: number): Promise<MessageRow[]> {
       const character = await characterOf(chatId);
       const rows = await tail(chatId, n || MAX_TAIL);
-      await convertLegacy(chatId, rows);
+      await convertLegacy(chatId, rows, n > 0 && n <= SCREEN_READ_MAX);
       return rows.map((m) => messageRow(chatId, m, character));
     },
     async getMessage(chatId: string, messageId: string): Promise<MessageRow> {
       const row = await findMessage(chatId, messageId);
-      await convertLegacy(chatId, [row]);
+      await convertLegacy(chatId, [row], true);
       return messageRow(chatId, row, await characterOf(chatId));
     },
     async patchExtra(chatId: string, messageId: string, patch: Record<string, unknown>, swipeIndex?: number): Promise<void> {
@@ -253,9 +254,7 @@ export function createEmuBridge(d: EmuDeps) {
       requestId?: string,
     ): Promise<{ translatedText: string }> {
       const lang = req.targetLanguage.trim();
-      let system = String(req.systemPrompt ?? '').replaceAll('{{targetLanguage}}', lang);
-      const extra = req.chatId ? await d.extraSystem?.(req.chatId) : '';
-      if (extra) system = [system, extra].filter(Boolean).join('\n\n');
+      const system = String(req.systemPrompt ?? '').replaceAll('{{targetLanguage}}', lang);
       const connectionId = req.connectionId || (req.chatId ? (await d.chatSettings(req.chatId)).connectionId : '');
       const messages: Array<{ role: string; content: string }> = [];
       if (system.trim()) messages.push({ role: 'system', content: system });
