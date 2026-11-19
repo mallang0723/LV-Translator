@@ -8604,17 +8604,101 @@ function forwardLongMessageToggle(e) {
   if (real && real !== copy)
     real.click();
 }
+var mirrored = new WeakMap;
+var watched = new WeakSet;
+var MIRROR = "data-lv-mirror";
+function syncMirror(island, onChange) {
+  const shadow = island.shadowRoot;
+  if (!shadow)
+    return;
+  if (!watched.has(shadow)) {
+    watched.add(shadow);
+    new MutationObserver(onChange).observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true });
+  }
+  const html = shadow.innerHTML;
+  let mirror = island.querySelector(`:scope > [${MIRROR}]`);
+  if (mirror && mirrored.get(mirror) === html)
+    return;
+  if (!mirror) {
+    mirror = document.createElement("div");
+    mirror.setAttribute(MIRROR, "");
+    island.append(mirror);
+  }
+  mirror.innerHTML = html;
+  mirrored.set(mirror, html);
+}
+var VIEW_CSS = `
+.ptx-u > .ptx-o { display: none; }
+.ptx-u.is-open > .ptx-t::after { content: "\\A"; white-space: pre; }
+.ptx-u.is-open > .ptx-o { display: inline-block; box-sizing: border-box; width: 100%; vertical-align: top; padding-left: .7em; border-left: 2px solid color-mix(in srgb, currentColor 25%, transparent); opacity: .62; font-size: .92em; }
+.ptx-u.is-flat, .ptx-u.is-flat > .ptx-t { display: contents; cursor: inherit; }
+.ptx-u.is-flat > .ptx-o { display: none !important; }
+.ptx-u[data-k] { cursor: pointer; }
+.ptx-u.is-missing { text-decoration: underline dashed color-mix(in srgb, currentColor 30%, transparent); text-underline-offset: .25em; }`;
+var INLINE_MD = /\*\*([^*\n]+?)\*\*|\*([^*\s][^*\n]*?)\*/g;
+function renderInlineMarkdown(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode;
+    const parent = n.parentElement;
+    if (!parent?.closest(".ptx-t") || parent.closest("code, pre, script, style, textarea") || !n.nodeValue?.includes("*"))
+      continue;
+    nodes.push(n);
+  }
+  for (const node of nodes) {
+    const text = node.nodeValue ?? "";
+    INLINE_MD.lastIndex = 0;
+    if (!INLINE_MD.test(text))
+      continue;
+    INLINE_MD.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of text.matchAll(INLINE_MD)) {
+      if (m.index > last)
+        frag.append(text.slice(last, m.index));
+      const el = document.createElement(m[1] !== undefined ? "strong" : "em");
+      el.textContent = m[1] ?? m[2] ?? "";
+      frag.append(el);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length)
+      frag.append(text.slice(last));
+    node.replaceWith(frag);
+  }
+}
 function restoreIslands(view) {
   const host = view._ptxFor;
   if (!host?.isConnected)
     return;
-  const from = host.querySelectorAll("[data-lumiverse-html-island]");
   const to = view.querySelectorAll("[data-lumiverse-html-island]");
-  if (!to.length || from.length !== to.length)
+  if (!to.length)
     return;
+  const from = host.querySelectorAll("[data-lumiverse-html-island]");
   to.forEach((target, i) => {
-    const source = from[i].shadowRoot;
-    if (!source || target.shadowRoot)
+    if (target.shadowRoot)
+      return;
+    const mirror = target.querySelector(`:scope > [${MIRROR}]`);
+    if (mirror) {
+      const shadow = target.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = VIEW_CSS;
+      shadow.append(style, ...Array.from(mirror.childNodes));
+      mirror.remove();
+      renderInlineMarkdown(shadow);
+      shadow.addEventListener("click", (e) => {
+        const t = e.target;
+        const u = t?.closest?.(".ptx-u[data-k]:not(.is-flat)");
+        if (!u || t?.closest?.("a, img, summary, button, input, textarea"))
+          return;
+        if (String(window.getSelection?.() ?? "").trim())
+          return;
+        u.classList.toggle("is-open");
+      });
+      return;
+    }
+    const source = from.length === to.length ? from[i].shadowRoot : null;
+    if (!source)
       return;
     const shadow = target.attachShadow({ mode: "open" });
     for (const node of Array.from(source.childNodes))
@@ -8694,6 +8778,10 @@ function startDomBridge(root = document) {
       return;
     for (const m of Array.from(root.querySelectorAll("[data-message-id]")))
       tag(m);
+    for (const island of Array.from(root.querySelectorAll(".mari-message-content [data-lumiverse-html-island]"))) {
+      if (!island.closest(".ptx-view"))
+        syncMirror(island, queue);
+    }
     for (const v of Array.from(root.querySelectorAll(".ptx-view"))) {
       restoreIslands(v);
       syncContinueButton(v);
@@ -9235,6 +9323,8 @@ var HIDDEN = `
    "더보기" button exists, and a display:none content measures 0: the button is removed and the translation (a clone) stays folded with no way to open
    it. So the hidden content keeps its layout (same width) and only has no height and no paint. */
 .mari-message-content[data-ptx-hidden] { display: block !important; height: 0 !important; min-height: 0 !important; overflow: hidden !important; visibility: hidden !important; margin: 0 !important; padding: 0 !important; border: 0 !important; }
+/* The hidden light-DOM copy of an HTML island's content (dom-bridge.ts): only the original reads it. */
+[data-lv-mirror] { display: none !important; }
 .tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }
 /* The original colours a few TEXTS with the primary colour itself (the save status line "저장했습니다."). On the page background that must be the host's
    "primary as text" tint, not the button fill, or a light primary on a light page cannot be read. */
@@ -9504,6 +9594,7 @@ ${got}
 
 // src/host-emu/exclude.ts
 var MARK = (n) => `⟦${n}⟧`;
+var TRIVIAL = /^[\s\-*•·–—]*(?:none|n\/a|nil|없음|해당 없음)?[\s.]*$/i;
 function excludedRanges(joined, rules) {
   const all = [];
   for (const rule of rules) {
@@ -9526,17 +9617,15 @@ function excludedRanges(joined, rules) {
 function withExclusions(generate, rulesText) {
   return async (req, signal) => {
     const raw = rulesText();
-    if (!raw.trim())
-      return generate(req, signal);
-    let rules;
+    let rules = [];
     try {
-      rules = parseExcludeRules(raw);
+      rules = raw.trim() ? parseExcludeRules(raw) : [];
     } catch {
-      return generate(req, signal);
+      rules = [];
     }
     const userIndex = req.messages.map((m) => m.role).lastIndexOf("user");
     const parsed = userIndex >= 0 ? parseBatch(req.messages[userIndex].content) : null;
-    if (!parsed || !rules.length)
+    if (!parsed)
       return generate(req, signal);
     const lastMsg = req.messages[req.messages.length - 1];
     if (lastMsg?.role === "assistant" && /<\/?segment/i.test(lastMsg.content))
@@ -9545,9 +9634,7 @@ function withExclusions(generate, rulesText) {
 
 `;
     const joined = parsed.segments.map((s) => s.text).join(SEP);
-    const ranges = excludedRanges(joined, rules);
-    if (!ranges.length)
-      return generate(req, signal);
+    const ranges = rules.length ? excludedRanges(joined, rules) : [];
     const items = [];
     let at = 0;
     for (const seg of parsed.segments) {
@@ -9567,9 +9654,10 @@ function withExclusions(generate, rulesText) {
       }
       masked += joined.slice(cursor, to);
       const left = masked.replace(/⟦\d+⟧/g, "");
-      items.push({ id: seg.id, source: seg.text, masked, pieces, full: pieces.length > 0 && !/[\p{L}\p{N}]/u.test(left) });
+      const trivial = TRIVIAL.test(seg.text.replace(/<\/?x\d+>|⟪\d+⟫/g, ""));
+      items.push({ id: seg.id, source: seg.text, masked, pieces, trivial, full: trivial || pieces.length > 0 && !/[\p{L}\p{N}]/u.test(left) });
     }
-    if (items.every((i) => !i.pieces.length))
+    if (items.every((i) => !i.pieces.length && !i.trivial))
       return generate(req, signal);
     const send = items.filter((i) => !i.full);
     const done = new Map;

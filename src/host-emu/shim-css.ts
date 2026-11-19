@@ -89,6 +89,8 @@ const HIDDEN = `
    "더보기" button exists, and a display:none content measures 0: the button is removed and the translation (a clone) stays folded with no way to open
    it. So the hidden content keeps its layout (same width) and only has no height and no paint. */
 .mari-message-content[data-ptx-hidden] { display: block !important; height: 0 !important; min-height: 0 !important; overflow: hidden !important; visibility: hidden !important; margin: 0 !important; padding: 0 !important; border: 0 !important; }
+/* The hidden light-DOM copy of an HTML island's content (dom-bridge.ts): only the original reads it. */
+[data-lv-mirror] { display: none !important; }
 .tpg-form [data-tpg-switch]:has(input[name="translateAfterPostProcessing"]) { display: none !important; }
 /* The original colours a few TEXTS with the primary colour itself (the save status line "저장했습니다."). On the page background that must be the host's
    "primary as text" tint, not the button fill, or a light primary on a light page cannot be read. */

@@ -53,21 +53,114 @@ function forwardLongMessageToggle(e: MouseEvent): void {
 }
 
 /**
- * Lumiverse draws HTML in a message (status windows, cards, `<details>` blocks) in an "HTML island": an empty `<div data-lumiverse-html-island>`
- * whose content lives in an open SHADOW ROOT (MessageContent.tsx IsolatedHtml). The original shows a translation as `cloneNode(true)` of the
- * message content, and a clone does not carry shadow roots: every island came out empty, so those blocks were gone from the translated view.
- * They are not translatable text, so they must show as they were, in place: each empty island of a translated view gets a copy of the
- * shadow content of the island it was cloned from (the n-th island of the hidden real content). Native `<details>` keeps working.
+ * Lumiverse draws HTML in a message (status windows, cards, `<details>` blocks, action hints) in an "HTML island": an empty
+ * `<div data-lumiverse-html-island>` whose content lives in an open SHADOW ROOT (MessageContent.tsx IsolatedHtml). The original works on the
+ * message's light DOM only (`cloneNode(true)`, `querySelectorAll`): it cannot see into a shadow root, so a translation was never made for the
+ * text in an island, one made elsewhere (from the message source, split on blank lines) used keys that the island's own blocks (a header and
+ * a `<prose>` dialogue, `</pass>` and `<fail>`, a `<summary>` and its body) never match, and the clone showed the island empty.
+ *
+ * So each island on screen gets a hidden light-DOM MIRROR of its shadow content (`[data-lv-mirror]`, kept current while the island changes).
+ * The original then sees those blocks like any other: it translates them, keys them the same way the view does (one derivation, so the compare
+ * window and the reading view agree), and puts the translation into the clone of the mirror (inline wrappers such as the colour `<span>` are
+ * kept by the original). Where a translated view is drawn, the mirror clone becomes the island's shadow content (`restoreIslands`).
+ * An island without a mirror (it appeared a moment ago) is copied from the real one, as before.
+ * The message text is never touched: nothing here is ever written back to the message.
  */
+const mirrored = new WeakMap<Element, string>();
+const watched = new WeakSet<ShadowRoot>();
+const MIRROR = 'data-lv-mirror';
+
+function syncMirror(island: HTMLElement, onChange: () => void): void {
+  const shadow = island.shadowRoot;
+  if (!shadow) return;
+  if (!watched.has(shadow)) {
+    watched.add(shadow);
+    new MutationObserver(onChange).observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true });
+  }
+  const html = shadow.innerHTML;
+  let mirror = island.querySelector<HTMLElement>(`:scope > [${MIRROR}]`);
+  if (mirror && mirrored.get(mirror) === html) return;
+  if (!mirror) {
+    mirror = document.createElement('div');
+    mirror.setAttribute(MIRROR, '');
+    island.append(mirror);
+  }
+  mirror.innerHTML = html;
+  mirrored.set(mirror, html);
+}
+
+/** The original's rules for a translated paragraph (`.ptx-u`), which live in the page's stylesheet and so do not reach into a shadow root. */
+const VIEW_CSS = `
+.ptx-u > .ptx-o { display: none; }
+.ptx-u.is-open > .ptx-t::after { content: "\\A"; white-space: pre; }
+.ptx-u.is-open > .ptx-o { display: inline-block; box-sizing: border-box; width: 100%; vertical-align: top; padding-left: .7em; border-left: 2px solid color-mix(in srgb, currentColor 25%, transparent); opacity: .62; font-size: .92em; }
+.ptx-u.is-flat, .ptx-u.is-flat > .ptx-t { display: contents; cursor: inherit; }
+.ptx-u.is-flat > .ptx-o { display: none !important; }
+.ptx-u[data-k] { cursor: pointer; }
+.ptx-u.is-missing { text-decoration: underline dashed color-mix(in srgb, currentColor 30%, transparent); text-underline-offset: .25em; }`;
+
+/**
+ * A model often answers with the markdown it saw (`**name|**`) where the host draws such a block from HTML, and nothing renders it there.
+ * In the translated text of an island, `**strong**` and `*em*` become <strong>/<em> elements, built from text nodes only (no HTML is parsed).
+ */
+const INLINE_MD = /\*\*([^*\n]+?)\*\*|\*([^*\s][^*\n]*?)\*/g;
+export function renderInlineMarkdown(root: ParentNode): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode as Text;
+    const parent = n.parentElement;
+    if (!parent?.closest('.ptx-t') || parent.closest('code, pre, script, style, textarea') || !n.nodeValue?.includes('*')) continue;
+    nodes.push(n);
+  }
+  for (const node of nodes) {
+    const text = node.nodeValue ?? '';
+    INLINE_MD.lastIndex = 0;
+    if (!INLINE_MD.test(text)) continue;
+    INLINE_MD.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of text.matchAll(INLINE_MD)) {
+      if (m.index! > last) frag.append(text.slice(last, m.index));
+      const el = document.createElement(m[1] !== undefined ? 'strong' : 'em');
+      el.textContent = m[1] ?? m[2] ?? '';
+      frag.append(el);
+      last = m.index! + m[0].length;
+    }
+    if (last < text.length) frag.append(text.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
 function restoreIslands(view: HTMLElement & { _ptxFor?: HTMLElement }): void {
   const host = view._ptxFor;
   if (!host?.isConnected) return;
-  const from = host.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]');
   const to = view.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]');
-  if (!to.length || from.length !== to.length) return;
+  if (!to.length) return;
+  const from = host.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]');
   to.forEach((target, i) => {
-    const source = from[i]!.shadowRoot;
-    if (!source || target.shadowRoot) return;
+    if (target.shadowRoot) return;
+    const mirror = target.querySelector<HTMLElement>(`:scope > [${MIRROR}]`);
+    if (mirror) {
+      // The translated mirror clone becomes what the island shows.
+      const shadow = target.attachShadow({ mode: 'open' });
+      const style = document.createElement('style');
+      style.textContent = VIEW_CSS;
+      shadow.append(style, ...Array.from(mirror.childNodes));
+      mirror.remove();
+      renderInlineMarkdown(shadow);
+      // Tap a translated paragraph to see the original (the page-level handler cannot see through the shadow root).
+      shadow.addEventListener('click', (e) => {
+        const t = e.target as Element | null;
+        const u = t?.closest?.('.ptx-u[data-k]:not(.is-flat)');
+        if (!u || t?.closest?.('a, img, summary, button, input, textarea')) return;
+        if (String(window.getSelection?.() ?? '').trim()) return;
+        u.classList.toggle('is-open');
+      });
+      return;
+    }
+    const source = from.length === to.length ? from[i]!.shadowRoot : null;
+    if (!source) return;
     const shadow = target.attachShadow({ mode: 'open' });
     for (const node of Array.from(source.childNodes)) shadow.append(node.cloneNode(true));
   });
@@ -153,6 +246,9 @@ export function startDomBridge(root: ParentNode = document): DomBridge {
   function scan(): void {
     if (destroyed) return;
     for (const m of Array.from(root.querySelectorAll('[data-message-id]'))) tag(m);
+    for (const island of Array.from(root.querySelectorAll<HTMLElement>('.mari-message-content [data-lumiverse-html-island]'))) {
+      if (!island.closest('.ptx-view')) syncMirror(island, queue);
+    }
     for (const v of Array.from(root.querySelectorAll<HTMLElement>('.ptx-view'))) {
       restoreIslands(v);
       syncContinueButton(v);

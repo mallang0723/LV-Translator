@@ -83,3 +83,17 @@ test('a prefill that is a segment tag: the request goes as it is (no rebuilt rep
   await withExclusions(async (r: any) => { calls++; expect(r.messages[1].content).toContain('HP 10'); return { content: 'x' }; }, () => '/HP \\d+/')(req);
   expect(calls).toBe(1);
 });
+
+describe('empty bottom-block lines are not sent (0.5.4)', () => {
+  test('"- 없음", "- None" and bare dashes are answered with their own text, the rest is translated; with no rules too', async () => {
+    const m = model();
+    const out = await withExclusions(m.generate, () => '')(request(['Prose one here.', '- 없음', '- None.', '-', 'Prose two here.']));
+    expect(m.sent[0]).toEqual(['Prose one here.', 'Prose two here.']);
+    expect(read(out.content)).toEqual({ '1': 'KO Prose one here.', '2': '- 없음', '3': '- None.', '4': '-', '5': 'KO Prose two here.' });
+  });
+  test('a list line with real text is still sent', async () => {
+    const m = model();
+    await withExclusions(m.generate, () => '')(request(['- 없음 외에 다른 것', '- Nothing but the lamp']));
+    expect(m.sent[0]).toHaveLength(2);
+  });
+});
