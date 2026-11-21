@@ -33,12 +33,46 @@ export interface EmuHandle {
   cleanup(): void;
 }
 
+const MESSAGE_BY_ID = /^\[data-message-id="((?:[^"\\]|\\.)*)"\]$/;
+
+/**
+ * Lumiverse puts `data-message-id` on TWO nested elements of a message: the list's row wrapper (MessageList.tsx, the virtual row) and the message
+ * card inside it (BubbleMessageDefault / MinimalMessageDefault). The original asks `document.querySelector('[data-message-id="<id>"]')` for "the
+ * message element" (extension.js `messageUnits`, the one place it does) and then takes the content hosts whose nearest `[data-message-id]` IS that
+ * element. `querySelector` answers with the first match in document order, the OUTER row, whose hosts all belong to the inner card, so the original
+ * found no host and split the message from its source text (`fallbackRoot`) instead of reading the cells on screen: a translation keyed by source
+ * paragraphs, which the view (keyed by its cells) does not match. This `document` answers that one query with the element that owns the content.
+ * Every other call, property and event is the real document's. Marinara has one element per message, so nothing else in the original is affected.
+ */
+export function shadowDocument(real: Document = document): Document {
+  const own = (el: Element): boolean => Array.from(el.getElementsByClassName('mari-message-content')).some((h) => h.closest('[data-message-id]') === el);
+  return new Proxy(real, {
+    get(target, prop) {
+      if (prop === 'querySelector') {
+        return (selector: string) => {
+          if (typeof selector === 'string' && MESSAGE_BY_ID.test(selector)) {
+            const all = Array.from(target.querySelectorAll(selector));
+            return all.find(own) ?? all[0] ?? null;
+          }
+          return target.querySelector(selector);
+        };
+      }
+      const v = Reflect.get(target, prop, target);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+    set(target, prop, value) {
+      return Reflect.set(target, prop, value, target);
+    },
+  });
+}
+
 /** window: everything passes through, except `fetch` (the original wraps and replaces it; that must not touch the host's). */
-function shadowWindow(apiFetch: typeof fetch) {
+function shadowWindow(apiFetch: typeof fetch, doc: Document) {
   let fetchImpl: typeof fetch = apiFetch;
   const proxy: Window = new Proxy(window, {
     get(target, prop) {
       if (prop === 'fetch') return fetchImpl;
+      if (prop === 'document') return doc;
       const v = Reflect.get(target, prop, target);
       return typeof v === 'function' && !/^[A-Z]/.test(String(prop)) ? v.bind(target) : v;
     },
@@ -80,7 +114,8 @@ function shadowStorage(activeChatId: () => string | null): Storage {
 export function runOriginal(opts: EmuOptions): EmuHandle {
   const log = opts.log ?? console;
   const api = createApiFetch(opts.bridge, window.fetch.bind(window));
-  const win = shadowWindow(api);
+  const doc = shadowDocument();
+  const win = shadowWindow(api, doc);
   const cleanups: Array<() => unknown> = [watchOnPrimary()];
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const marinara = {
@@ -104,9 +139,9 @@ export function runOriginal(opts: EmuOptions): EmuHandle {
     },
   };
   // The original is a script body whose free names are exactly these.
-  const run = new Function('marinara', 'window', 'localStorage', 'history', 'CSS', opts.source);
+  const run = new Function('marinara', 'window', 'document', 'localStorage', 'history', 'CSS', opts.source);
   // `CSS` is passed on purpose: a host bundle may declare its own top-level `CSS` constant that would hide the platform's.
-  run(marinara, win.proxy, shadowStorage(opts.activeChatId), window.history, window.CSS);
+  run(marinara, win.proxy, doc, shadowStorage(opts.activeChatId), window.history, window.CSS);
   return {
     installedFetch: () => win.current(),
     cleanup() {

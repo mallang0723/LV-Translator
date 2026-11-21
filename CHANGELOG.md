@@ -1,5 +1,27 @@
 # 변경 기록
 
+## 0.5.9 — 2026-11-21
+
+원작 `extension.js`는 그대로다(`verify:original` 9개 동일). 바뀐 것은 `src/host-emu/runtime.ts`와 시험·문서뿐이다.
+
+- **실호스트에서 화면에 있는 메시지도 원문(소스) 분할로 번역되던 문제(A5·A7·Auto-parse 칸 어긋남의 원인):** 루미버스는 `data-message-id`를 목록 행 래퍼와 그 안의 메시지 카드 **둘에** 단다. 원작 `messageUnits`(extension.js 2424)는 `document.querySelector('[data-message-id="…"]')`의 첫 결과(바깥 래퍼)에서 호스트를 찾는데 호스트의 가장 가까운 `[data-message-id]`는 안쪽 카드라 호스트 0개 → `fallbackRoot`(빈 줄 분할, 태그 제거)로 떨어졌다. 번역은 원문 문단 키, 읽기 화면은 그린 칸 키라 머리말+첫 `<prose>` 문단(한 칸)과 `</pass>`+`<fail>`(두 칸)이 안 맞아 빈칸이 났고, 0.5.6의 생성 끝 대기·0.5.7의 보충(heal)·「이어서 번역」·대조 창이 모두 같은 길을 타서 못 메웠다. 브라우저 QA의 가짜 호스트는 메시지당 요소가 하나라 못 잡았다. **수정(어댑터만):** 원작에 주는 `document`를 `shadowDocument`로 바꿔 이 한 질의만 호스트를 가진 요소로 답한다(`src/host-emu/runtime.ts`, `new Function`의 `document` 인자). 원작 기능·화면은 그대로.
+- **정정:** 0.5.7의 「Auto-parse 영향 없음」은 틀렸다(화면 위 메시지도 원문 분할로 번역되고 있었기 때문). 0.5.9부터 화면 위 메시지는 그린 칸으로 번역한다. 화면 밖 번역(원작 `fallbackRoot`, think 글이 요청에 들어감)은 그대로이며 화면에 오르면 heal이 그린 칸 기준으로 메운다.
+- **실호스트 재측정(7880, DEM V4 정규식 183개 적용, NanoGPT 연결, 헤드리스 크로미움; 6e02e89 → 0.5.9):** 번역 버튼을 화면 위 메시지에 눌렀을 때 A(머리말+prose+fate+상태창+행동 힌트) 21칸 중 빈칸 15 → 0, B(앞머리 `<think>` 3줄, Auto-parse 켬) 5칸 중 1 → 0, Auto-parse 끔 B 6칸 0 → 0(끔 쪽 A는 21칸 15 → 0). 리터럴 `**` 0, 대사 색 span 유지. 화면 밖에서 「번역 안 된 메시지 모두 번역」을 한 뒤 화면에 오른 A는 3초 시점 21칸 중 빈칸 15, 15초 시점 0(heal이 한 번 메움, 저장 키 10 → 24). 0.5.8에서 이 화면 밖 경로는 측정하지 않았다(미측정). heal 끔·생성 끝 대기·대조 창은 실호스트에서 재지 않았고 코드 읽기(같은 `messageUnits` 경로)로만 판단했다.
+- **실호스트 생성 끝 경로 측정(7880, 0.5.9 임시 설치, Auto-parse 켬·자동 번역 켬, 생성·번역 연결 모두 NanoGPT Nanotest, 임시 채팅 URL로만 열음, 헤드리스 크로미움; 리뷰어 SYHO-246 조건 2):** 실제 생성 → 생성 끝 → `whenMessageSettled` → 자동 번역(버튼 누름 없음) 뒤 칸/빈칸. **모든 회차 빈칸 0.** 프리셋은 하나씩 켰고 끝나면 프리셋·정규식·임시 채팅·캐릭터를 지웠다. A형은 머리말 두 줄이 `<prose>`에 붙은 답(+fate pass/fail·상태창), B형은 앞머리 `<think>` 블록(생성 모델이 `<think>`는 자체 추론으로 삼켜 본문에 안 남겨, 추론 Auto-parse의 접두/접미를 `<thought>`로 바꾸고 모델에게 그 태그로 쓰게 함 — 같은 Auto-parse 경로). 형태 유도는 프리셋 자체 지시가 이겨 DEM에서는 프리셋 없는 `Default` 프롬프트로 생성하고 DEM 정규식(표시)만 켠 조합을 썼다("steer"), "native"는 프리셋 자신의 프롬프트.
+
+  | 프리셋 | 형 | 회차 | 칸 / 빈칸 |
+  |:--|:--|:--|:--|
+  | DEM V4 (정규식 183) | A steer | 3 (3번째는 연속) | 16/0, 15/0, 15/0 |
+  | | B steer (Auto-parse 켬, 추론 상자로 빠짐) | 3 | 4/0, 4/0, 3/0 |
+  | | B steer (Auto-parse 끔, think가 본문 칸) | 2 | 13/0, 13/0 |
+  | | native (DEM 자체 답: scene_plan·tracker·status) | 2 | 69/0, 72/0 |
+  | Sola V5 Flame (정규식 493) | A steer | 3 (3번째는 연속) | 7/0, 9/0, 8/0 |
+  | | B steer (Auto-parse 켬) | 3 | 6/0, 5/0, 8/0 |
+  | | native (Sola 자체 답: scene_header·monitor·sola_hud 등) | 4 (+연속 1) | 195/0, 10/0, 9/0, 11/0 |
+
+  연속 생성은 앞 답의 생성 끝을 본 지 약 1~2초 뒤 다음 생성을 시작해 앞 답의 번역이 끝나기 전에 겹치게 했고, 앞 답도 빈칸 0이었다. 첫 번역이 화면에 보이기까지 짧은 답 4~14초, DEM native 34~52초. 운영 보고의 「11칸 중 5칸 빈칸, 생각 줄이 본문 칸」 모양은 **재현되지 않았다**(Auto-parse 끔에서 think가 본문 칸으로 나와도 빈칸 0, 칸 번역됨). 한계: 생성 모델이 NanoGPT 하나, 형태는 모델이 지시를 얼마나 따르느냐에 좌우, 6e02e89로 되돌려 같은 생성 경로를 비교하지는 않았다(회귀 증명은 합성 fixture QA 6건).
+- **시험:** 실호스트 7880에서 떠 온 fixture(`tests/fixtures/realhost/`)로 `scripts/qa-original.mjs` 0.5.9 구역(행 래퍼+카드가 둘 다 `data-message-id`를 가진 DOM). 6e02e89에서는 실패(`runtime.ts`만 6e02e89로 되돌린 조건), 수정 후 통과. fixture의 이야기 글은 합성 문장이고 DEM 프리셋의 CSS·아이콘은 뺐다.
+
 ## 0.5.8 — 2026-11-19
 
 - **생성 끝 대기 중 같은 채팅의 다음 생성이 시작되면 다음 답의 자동 번역이 빠지던 문제(검수 SYHO-241 조건 1):** 붙잡아 둔 생성 끝을 같은 채팅의 `GENERATION_STARTED`가 오면 먼저 재생(`driver.ended`)한 뒤 `driver.started`를 하고, 확장을 끌 때 붙잡은 끝과 대기 타이머도 정리한다. 원작 `extension.js` 무변경(어댑터 `src/frontend.ts`·`src/host-emu/dom-bridge.ts`만). 회귀 시험: `scripts/qa-original.mjs` 0.5.8 구역(8887c4b에서 A 2칸·B 0칸, 요청 1회로 실패).

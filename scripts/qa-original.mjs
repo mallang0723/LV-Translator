@@ -244,7 +244,7 @@ await page2.evaluate(() => {
       const user = i.messages.find((m) => m.role === 'user')?.content ?? '';
       const ids = [...user.matchAll(/<segment id="(\d+)">/g)].map((m) => m[1]);
       // keeps every ⟦n⟧ protection marker it was given (the 제외 규칙 mask)
-      if (ids.length) return { content: [...user.matchAll(/<segment id="(\d+)">\n?([\s\S]*?)\n?<\/segment>/g)].map((m) => `<segment id="${m[1]}">번역 ${m[1]}${/Farseer\|/.test(m[2]) ? ' **번역|** "번역"' : /<x\d+>/.test(m[2]) ? ' ' + m[2].replace(/(<\/?x\d+>)|(⟪\d+⟫)|([^<⟪]+)/g, (a, t, at, tx) => (tx ? (/\S/.test(tx) ? tx.replace(/[A-Za-z][^"“”|]*/g, '번역') : tx) : a)) : ''}${(m[2].match(/⟦\d+⟧/g) || []).map((k) => ' ' + k).join('')}</segment>`).join('\n') };
+      if (ids.length) return { content: [...user.matchAll(/<segment id="(\d+)">\n?([\s\S]*?)\n?<\/segment>/g)].map((m) => `<segment id="${m[1]}">번역 ${m[1]}${/(?:Farseer|Scout|Scribe)\|/.test(m[2]) ? ' **번역|** "번역"' : /<x\d+>/.test(m[2]) ? ' ' + m[2].replace(/(<\/?x\d+>)|(⟪\d+⟫)|([^<⟪]+)/g, (a, t, at, tx) => (tx ? (/\S/.test(tx) ? tx.replace(/[A-Za-z][^"“”|]*/g, '번역') : tx) : a)) : ''}${(m[2].match(/⟦\d+⟧/g) || []).map((k) => ' ' + k).join('')}</segment>`).join('\n') };
       if (/^\[Original English\]/.test(user)) return { content: 'Alpha one revised.' }; // 영어 원문도 같이 고치기
       if (/^Translate the following text to /.test(user)) return { content: 'EN: ' + user.split('\n\n').slice(1).join('\n\n') };
       return { content: '{"characters":[],"terms":[]}' };
@@ -960,6 +960,53 @@ await page2.evaluate(() => { for (const id of ['m16', 'm17', 'm18', 'm19']) { do
   check('0.5.6 on screen at the end of the generation: all 4 cells translated, none missing, no second pass', view.missing === 0 && view.translated === 4, JSON.stringify(view));
   await page2.evaluate((id) => { document.querySelector(`[data-message-id="${id}"]`)?.remove(); const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); }, id);
 }
+// ---- 0.5.9: Lumiverse puts data-message-id on TWO nested elements (the list's row wrapper AND the message card). Real-host captures (tests/fixtures/realhost) ----
+// `document.querySelector('[data-message-id="<id>"]')` answered with the outer row, whose content hosts all belong to the inner card, so the original found
+// no host and translated from the SOURCE text (units that merge a header with the first <prose> paragraph, pass with fail): the view then showed those cells empty.
+{
+  const fx = JSON.parse(readFileSync(join(root, 'tests/fixtures/realhost/v058-screen-ap-on.json'), 'utf8'));
+  for (const key of ['A', 'B']) {
+    const f = fx[key]; const id = 'rh-' + key;
+    await page2.evaluate(() => { window.__cleanup(); window.__auto = false; });
+    const qn = await page2.evaluate(([id, f]) => {
+      window.__messages.push({ id, role: 'assistant', content: f.raw, swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+      // the real host's nesting: row wrapper [data-message-id] > message card [data-message-id] > content
+      const outer = document.createElement('div'); outer.setAttribute('data-message-id', id); outer.setAttribute('data-virtual-index', '0');
+      const row = document.createElement('div');
+      row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', id);
+      row.innerHTML = '<div><div data-component="MessageContent"></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+      const tmp = document.createElement('div'); tmp.innerHTML = f.hostHTML;
+      const content = tmp.firstElementChild;
+      for (const a of ['data-ptx-hidden', 'id']) content.removeAttribute(a);
+      content.classList.remove('mari-message-content');
+      let n = 0;
+      for (const isl of content.querySelectorAll('[data-lumiverse-html-island]')) { isl.replaceChildren(); isl.attachShadow({ mode: 'open' }).innerHTML = f.hostIslands[n++] ?? ''; }
+      content.setAttribute('data-component', 'MessageContent');
+      row.querySelector('[data-component="MessageContent"]').replaceWith(content);
+      outer.append(row);
+      document.querySelector('#chat').append(outer);
+      window.__cleanup = window.__LVSetup(window.__ctx);
+      return window.__quiet.length;
+    }, [id, f]);
+    await page2.waitForTimeout(1500);
+    await page2.evaluate((id) => document.querySelector(`[data-message-id="${id}"] .mari-message-actions button:has(svg.lucide-languages)`).click(), id);
+    await page2.waitForSelector(`[data-message-id="${id}"] .ptx-view .ptx-u[data-k]`, { timeout: 8000 }).catch(() => {});
+    await page2.waitForTimeout(2500);
+    const got = await page2.evaluate(([id, qn]) => {
+      const view = document.querySelector(`[data-message-id="${id}"] .ptx-view`);
+      const roots = view ? [view, ...[...view.querySelectorAll('[data-lumiverse-html-island]')].map((e) => e.shadowRoot).filter(Boolean)] : [];
+      const cells = roots.flatMap((r) => [...r.querySelectorAll('.ptx-u')]);
+      const sent = window.__quiet.slice(qn).map((c) => c.messages.find((m) => m.role === 'user').content).filter((u) => /<segment id=/.test(u)).flatMap((u) => [...u.matchAll(/<segment id="\d+">\n([\s\S]*?)\n<\/segment>/g)].map((m) => m[1]));
+      return { view: !!view, cells: cells.length, missing: cells.filter((c) => c.classList.contains('is-missing')).length, translated: cells.filter((c) => c.dataset.k).length, sent: sent.length, unused: Object.keys(window.__messages.find((x) => x.id === id)?.metadata?.st_translator_tt?.['0']?.map ?? {}).filter((k) => !cells.some((c) => c.dataset.k === k)).length };
+    }, [id, qn]);
+    check(`0.5.9 real-host ${key} (row wrapper + card both carry data-message-id): a view is drawn`, got.view, JSON.stringify(got));
+    check(`0.5.9 real-host ${key}: translated from the cells on screen (every stored translation key is a key of a cell; none made from the message source)`, got.sent > 0 && got.unused === 0, JSON.stringify(got));
+    check(`0.5.9 real-host ${key}: no cell is left without its translation (missing 0)`, got.cells > 0 && got.missing === 0 && got.translated === got.cells, JSON.stringify(got));
+    await page2.screenshot({ path: join(shots, `12-realhost-${key}.png`), fullPage: true });
+    await page2.evaluate((id) => { document.querySelector(`[data-message-id="${id}"]`)?.remove(); const i = window.__messages.findIndex((x) => x.id === id); if (i >= 0) window.__messages.splice(i, 1); }, id);
+  }
+}
+
 // ---- 0.5.7 (A): the off-screen "heal" has a switch (our setting 화면에 나타날 때 빠진 칸 자동 보충 번역, default on) ----
 // ---- 0.5.7 (B): Lumiverse's reasoning Auto-parse: the body the original reads is think-stripped and trimmed, the reasoning sits in a box outside the body ----
 const setHeal = async (on) => {

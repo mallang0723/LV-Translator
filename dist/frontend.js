@@ -9197,12 +9197,36 @@ function watchOnPrimary() {
 // src/host-emu/runtime.ts
 var ACTIVE_CHAT_KEY = "marinara-active-chat-id";
 var EXTENSION_ID = "translation-presets-glossary";
-function shadowWindow(apiFetch) {
+var MESSAGE_BY_ID = /^\[data-message-id="((?:[^"\\]|\\.)*)"\]$/;
+function shadowDocument(real = document) {
+  const own = (el) => Array.from(el.getElementsByClassName("mari-message-content")).some((h) => h.closest("[data-message-id]") === el);
+  return new Proxy(real, {
+    get(target, prop) {
+      if (prop === "querySelector") {
+        return (selector) => {
+          if (typeof selector === "string" && MESSAGE_BY_ID.test(selector)) {
+            const all = Array.from(target.querySelectorAll(selector));
+            return all.find(own) ?? all[0] ?? null;
+          }
+          return target.querySelector(selector);
+        };
+      }
+      const v = Reflect.get(target, prop, target);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+    set(target, prop, value) {
+      return Reflect.set(target, prop, value, target);
+    }
+  });
+}
+function shadowWindow(apiFetch, doc) {
   let fetchImpl = apiFetch;
   const proxy = new Proxy(window, {
     get(target, prop) {
       if (prop === "fetch")
         return fetchImpl;
+      if (prop === "document")
+        return doc;
       const v = Reflect.get(target, prop, target);
       return typeof v === "function" && !/^[A-Z]/.test(String(prop)) ? v.bind(target) : v;
     },
@@ -9244,7 +9268,8 @@ function shadowStorage(activeChatId) {
 function runOriginal(opts) {
   const log = opts.log ?? console;
   const api = createApiFetch(opts.bridge, window.fetch.bind(window));
-  const win = shadowWindow(api);
+  const doc = shadowDocument();
+  const win = shadowWindow(api, doc);
   const cleanups = [watchOnPrimary()];
   const timers = new Set;
   const marinara = {
@@ -9267,8 +9292,8 @@ function runOriginal(opts) {
       cleanups.push(fn);
     }
   };
-  const run = new Function("marinara", "window", "localStorage", "history", "CSS", opts.source);
-  run(marinara, win.proxy, shadowStorage(opts.activeChatId), window.history, window.CSS);
+  const run = new Function("marinara", "window", "document", "localStorage", "history", "CSS", opts.source);
+  run(marinara, win.proxy, doc, shadowStorage(opts.activeChatId), window.history, window.CSS);
   return {
     installedFetch: () => win.current(),
     cleanup() {
