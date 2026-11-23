@@ -862,6 +862,42 @@ for (const [id, record] of [['m41', true], ['m42', false]]) {
   await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m43"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm43'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
 }
 
+// ---- 0.5.10: 「긴 메시지 접기」: the "더 보기" button of a translated message opens and folds the translation ----
+// Lumiverse's real button (in the hidden content) changes only classes, the height limit and the label; the original rebuilds its translated view only on added/removed nodes,
+// so the folded copy stayed folded. The press is passed on to the real button and the original is woken to rebuild the copy from it.
+{
+  await page2.evaluate(() => {
+    window.__cleanup();
+    window.__setStorage({ config: { paragraph: { keepTags: '', viewMode: 'tr' } } });
+    window.__messages.push({ id: 'm44', role: 'assistant', content: 'The lamp was still burning.\n\nCome in, she said.', metadata: {}, extra: {}, createdAt: 1, created_at: 1, activeSwipeIndex: 0 });
+    const row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm44');
+    row.innerHTML = '<div><div data-component="MessageContent"><div class="vp folded" style="max-height:60px;overflow:hidden"><div class="body"><p>The lamp was still burning.</p><p>Come in, she said.</p></div></div><button type="button" data-long-message-toggle="true" aria-expanded="false"><span>Read more</span></button></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    // what Lumiverse's React does on the click: classes, style and label change; nothing is added or removed
+    row.querySelector('[data-long-message-toggle]').addEventListener('click', (ev) => {
+      const b = ev.currentTarget, vp = row.querySelector('.vp'); const open = b.getAttribute('aria-expanded') !== 'true';
+      b.setAttribute('aria-expanded', String(open)); b.firstElementChild.firstChild.nodeValue = open ? 'Show less' : 'Read more';
+      vp.classList.toggle('folded', !open); vp.style.maxHeight = open ? '' : '60px';
+    });
+    document.querySelector('#chat').append(row);
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  });
+  await page2.waitForTimeout(1500);
+  await page2.locator('[data-message-id="m44"] .mari-message-actions button:has(svg.lucide-languages)').click();
+  await page2.waitForSelector('[data-message-id="m44"] .ptx-view .ptx-u', { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(800);
+  const state = () => page2.evaluate(() => { const v = document.querySelector('[data-message-id="m44"] .ptx-view'); return { max: v?.querySelector('.vp')?.style.maxHeight ?? null, label: v?.querySelector('[data-long-message-toggle]')?.textContent?.trim() ?? null }; });
+  const folded = await state();
+  await page2.locator('[data-message-id="m44"] .ptx-view [data-long-message-toggle]').click();
+  await page2.waitForTimeout(1500);
+  const opened = await state();
+  await page2.locator('[data-message-id="m44"] .ptx-view [data-long-message-toggle]').click();
+  await page2.waitForTimeout(1500);
+  const back = await state();
+  check('0.5.10 long-message fold: the translated copy opens on "더 보기" and folds again (round trip)', folded.max === '60px' && folded.label === 'Read more' && opened.max === '' && opened.label === 'Show less' && back.max === '60px' && back.label === 'Read more', JSON.stringify({ folded, opened, back }));
+  await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m44"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm44'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
+}
+
 // ---- 0.5.4 (A5, A7, cyoa): blocks inside HTML islands are translated, keyed like the view, and shown in place ----
 await page2.evaluate(() => {
   window.__cleanup();

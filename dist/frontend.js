@@ -8662,8 +8662,20 @@ function forwardLongMessageToggle(e) {
   const real = host?.querySelector("[data-long-message-toggle]");
   e.preventDefault();
   e.stopPropagation();
-  if (real && real !== copy)
+  if (real && real !== copy) {
     real.click();
+    const message = copy.closest("[data-message-id]");
+    for (const ms of [80, 300, 800]) {
+      setTimeout(() => {
+        if (!message?.isConnected)
+          return;
+        message.append(document.createComment("lv-nudge"));
+        const c = message.lastChild;
+        if (c && c.nodeType === 8)
+          c.remove();
+      }, ms);
+    }
+  }
 }
 var NO_UNITS_TOAST = "이 메시지에는 번역할 문단이 없습니다.";
 var NO_UNITS_AFTER_MS = 3000;

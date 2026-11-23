@@ -49,7 +49,21 @@ function forwardLongMessageToggle(e: MouseEvent): void {
   const real = host?.querySelector<HTMLElement>('[data-long-message-toggle]');
   e.preventDefault();
   e.stopPropagation();
-  if (real && real !== copy) real.click();
+  if (real && real !== copy) {
+    real.click();
+    // The original rebuilds a translated view only when something is added or removed inside the message (its MutationObserver watches childList
+    // only). The real button's click changes the hidden content's classes, height limit and label (attributes and text), which it never sees, so
+    // the copy stayed folded. An element added and removed at once inside the message wakes it; the redraw comes after React has redrawn.
+    const message = copy!.closest('[data-message-id]');
+    for (const ms of [80, 300, 800]) {
+      setTimeout(() => {
+        if (!message?.isConnected) return;
+        message.append(document.createComment('lv-nudge'));
+        const c = message.lastChild;
+        if (c && c.nodeType === 8) c.remove();
+      }, ms);
+    }
+  }
 }
 
 /**
