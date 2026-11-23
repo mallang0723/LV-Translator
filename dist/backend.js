@@ -1763,10 +1763,16 @@ function planGlossary(meta, text, now) {
   return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };
 }
 
+// src/adapter/think-tags.ts
+var THINK_TAGS = ["think", "thinking", "reasoning"];
+function withThinkTags(raw) {
+  return [...THINK_TAGS, String(raw ?? "").trim()].filter(Boolean).join(" ");
+}
+
 // src/adapter/pub.ts
 var isRecord = (v) => !!v && typeof v === "object" && typeof v.map === "object" && v.map !== null;
 function keptTagNames(raw) {
-  return new Set(String(raw ?? "").split(/[\s,;]+/).map((part) => {
+  return new Set(withThinkTags(raw).split(/[\s,;]+/).map((part) => {
     const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);
     return m ? (m[1] || m[2] || "").toLowerCase() : "";
   }).filter(Boolean));

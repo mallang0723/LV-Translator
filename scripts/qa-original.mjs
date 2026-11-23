@@ -784,6 +784,84 @@ for (const mode of ['tr', 'both']) {
 }
 await page2.evaluate(() => { document.querySelector('[data-message-id="m14"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm14'), 1); window.__cleanup(); window.__lvStore = null; window.__setStorage(null); window.__cleanup = window.__LVSetup(window.__ctx); });
 
+// ---- 0.5.10: a thinking block that only MENTIONS a listed tag must not break the excluded ranges (think / thinking / reasoning are always excluded) ----
+// Without it the original's keptRanges starts a range at the `<tracker>` named inside <think> and ends it never (or at a far close tag): the whole message is "unresolved" and gets 0 cells.
+await page2.evaluate(() => {
+  window.__cleanup();
+  window.__setStorage({ config: { paragraph: { keepTags: 'tracker', viewMode: 'tr' } } });
+  window.__lvStore = LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English' } });
+  const t = Math.floor(Date.now() / 1000);
+  const lines = ['Plan: write the `<tracker>` block first, then the <prose> block.', 'Time: 09:00 AM', 'The scout sets down her pack and studies the field.', 'She says wait here and keep the lamp low.'];
+  window.__messages.push({ id: 'm40', role: 'assistant', content: '<think>\nPlan: write the `<tracker>` block first, then the <prose> block.\n</think>\n<tracker>\nTime: 09:00 AM\n</tracker>\n\nThe scout sets down her pack and studies the field.\n\nShe says wait here and keep the lamp low.', metadata: {}, extra: {}, createdAt: t, created_at: t, activeSwipeIndex: 0 });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm40');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="b40"><p>' + lines[0] + '</p><tracker><p>' + lines[1] + '</p></tracker><p>' + lines[2] + '</p><p>' + lines[3] + '</p></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(1800);
+check('0.5.10 think: the settings field shows only the user\'s own list (no think/thinking/reasoning added)', (await page2.locator('#tab input[name="paraKeepTags"]').inputValue()) === 'tracker');
+const q40 = await page2.evaluate(() => window.__quiet.length);
+await page2.locator('[data-message-id="m40"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m40"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(1000);
+const sent40 = await sentSince(q40);
+const cells40 = await page2.evaluate(() => [...document.querySelectorAll('[data-message-id="m40"] .ptx-view .b40 > p, [data-message-id="m40"] .ptx-view .b40 > tracker > p')].map((p) => p.textContent.replace(/\s+/g, ' ').trim()));
+check('0.5.10 think: the message gets cells (the translate button works) and the prose is sent', (await page2.locator('[data-message-id="m40"] .ptx-view').count()) === 1 && sent40.includes('The scout sets down') && sent40.includes('keep the lamp low'), JSON.stringify({ sent40: sent40.slice(0, 200), cells40 }));
+check('0.5.10 think: the thinking text and the tracker block are not sent to the model, and stay as the original text in the view', !sent40.includes('Plan: write') && !sent40.includes('Time: 09:00') && cells40.length === 4 && cells40[0].startsWith('Plan: write') && cells40[1].startsWith('Time: 09:00'), JSON.stringify({ sent40: sent40.slice(0, 200), cells40 }));
+await page2.locator('#tab .tpg-form').evaluate((f) => f.requestSubmit());
+await page2.waitForFunction(() => /저장했습니다/.test(document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
+check('0.5.10 think: saving the settings keeps the user\'s list as it was (the always-excluded names are not written)', (await page2.evaluate(() => window.__getStorage()?.config?.paragraph?.keepTags)) === 'tracker', await page2.evaluate(() => JSON.stringify(window.__getStorage()?.config?.paragraph)));
+await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m40"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm40'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
+await page2.waitForTimeout(800);
+
+// ---- 0.5.10: the translate button of a message with nothing to translate is never silent ----
+// The original toasts "이 메시지에는 번역할 문단이 없습니다." only when the message has no record; with a record (even empty) it takes the toggle path and draws nothing.
+for (const [id, record] of [['m41', true], ['m42', false]]) {
+  await page2.evaluate(([mid, rec]) => {
+    window.__cleanup();
+    window.__setStorage({ config: { paragraph: { keepTags: 'tracker', viewMode: 'tr' } } });
+    const t = Math.floor(Date.now() / 1000);
+    window.__messages.push({ id: mid, role: 'assistant', content: '<tracker>\nTime: 09:00 AM\nPlace: Old Road\n</tracker>', metadata: rec ? { st_translator_tt: { 0: { v: 1, map: {}, edited: {}, view: '', at: 1 } } } : {}, extra: {}, createdAt: t, created_at: t, activeSwipeIndex: 0 });
+    const row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', mid);
+    row.innerHTML = '<div><div data-component="MessageContent"><div class="bx"><tracker><p>Time: 09:00 AM</p><p>Place: Old Road</p></tracker></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    document.querySelector('#chat').append(row);
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  }, [id, record]);
+  await page2.waitForTimeout(1500);
+  await page2.evaluate(() => document.querySelectorAll('.ptx-toast').forEach((t) => t.remove()));
+  await page2.locator(`[data-message-id="${id}"] .mari-message-actions button:has(svg.lucide-languages)`).click();
+  await page2.waitForFunction(() => document.querySelector('.ptx-toast'), null, { timeout: 5500 }).catch(() => {});
+  await page2.waitForTimeout(800);
+  const toasts = await page2.evaluate(() => [...document.querySelectorAll('.ptx-toast')].map((t) => t.textContent.trim()));
+  check(`0.5.10 no-cells toast [${record ? 'with a record' : 'no record'}]: pressing translate on a message with nothing to translate says so, once`, toasts.length === 1 && toasts[0] === '이 메시지에는 번역할 문단이 없습니다.', JSON.stringify({ toasts, dbg: await page2.evaluate((mid) => document.querySelector(`[data-message-id="${mid}"]`)?.innerHTML.slice(0, 500), id) }));
+  await page2.evaluate((mid) => { window.__cleanup(); document.querySelectorAll('.ptx-toast').forEach((t) => t.remove()); document.querySelector(`[data-message-id="${mid}"]`)?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === mid), 1); }, id);
+}
+// a press that only hides the translation, or one that translates, makes no extra toast
+{
+  await page2.evaluate(() => {
+    window.__cleanup();
+    window.__setStorage({ config: { paragraph: { keepTags: '', viewMode: 'tr' } } });
+    window.__messages.push({ id: 'm43', role: 'assistant', content: 'The lamp was still burning.\n\nCome in, she said.', metadata: {}, extra: {}, createdAt: 1, created_at: 1, activeSwipeIndex: 0 });
+    const row = document.createElement('div');
+    row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm43');
+    row.innerHTML = '<div><div data-component="MessageContent"><div class="bx"><p>The lamp was still burning.</p><p>Come in, she said.</p></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+    document.querySelector('#chat').append(row);
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  });
+  await page2.waitForTimeout(1500);
+  const btn = page2.locator('[data-message-id="m43"] .mari-message-actions button:has(svg.lucide-languages)');
+  await btn.click();
+  await page2.waitForSelector('[data-message-id="m43"] .ptx-view .ptx-u', { timeout: 8000 }).catch(() => {});
+  await page2.waitForTimeout(500);
+  await btn.click();
+  await page2.waitForTimeout(4000);
+  const extra = await page2.evaluate(() => [...document.querySelectorAll('.ptx-toast')].map((t) => t.textContent.trim()).filter((t) => /번역할 문단이 없습니다/.test(t)));
+  check('0.5.10 no-cells toast: translating and then hiding the translation of a normal message never shows it', extra.length === 0 && (await page2.locator('[data-message-id="m43"] .ptx-view').count()) === 0, JSON.stringify(extra));
+  await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m43"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm43'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
+}
+
 // ---- 0.5.4 (A5, A7, cyoa): blocks inside HTML islands are translated, keyed like the view, and shown in place ----
 await page2.evaluate(() => {
   window.__cleanup();
@@ -1154,7 +1232,7 @@ for (const heal of [true, false]) {
   const calls = await segCalls(n0);
   const u = await bodyUnits(id);
   const stored = await page2.evaluate((id) => window.__messages.find((x) => x.id === id).content, id);
-  if (heal) check('0.5.7 (B2) off-screen + Auto-parse, heal ON: the body is fully translated after one heal call, and the think text is not sent again', !!u && u.missing === 0 && calls.length === 1 && !calls.join('').includes('secret plan'), JSON.stringify({ u, calls: calls.length }));
+  if (heal) check('0.5.7 (B2) off-screen + Auto-parse, heal ON: the body is fully translated and the think text is not sent (0.5.10: the thinking block is excluded from the off-screen split, so no cell merges with its tail and no heal call is needed)', !!u && u.missing === 0 && calls.length === 0 && !calls.join('').includes('secret plan'), JSON.stringify({ u, calls: calls.length }));
   else check('0.5.7 (B2) off-screen + Auto-parse, heal OFF: no heal call (the cell that merged with the think tail stays missing; documented limit)', !!u && calls.length === 0, JSON.stringify({ u, calls: calls.length }));
   check(`0.5.7 (B2) heal ${heal ? 'ON' : 'OFF'}: the stored text (think included) is unchanged`, stored === content);
   console.log(`INFO heal=${heal}: the off-screen request included the think text: ${sentOff.includes('secret plan')}`);

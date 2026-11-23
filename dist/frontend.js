@@ -8572,6 +8572,66 @@ The user's persona is named "\${name}". When she/her/he/him/they or similar refe
     });
 })(marinara);`;
 
+// src/adapter/think-tags.ts
+var THINK_TAGS = ["think", "thinking", "reasoning"];
+var nameOf = (part) => {
+  const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);
+  return m ? (m[1] || m[2] || "").toLowerCase() : "";
+};
+var isThink = (part) => THINK_TAGS.includes(nameOf(part));
+var LIMIT = 500;
+function withThinkTags(raw) {
+  return [...THINK_TAGS, String(raw ?? "").trim()].filter(Boolean).join(" ");
+}
+function hideThinkTags(shown) {
+  return String(shown ?? "").split(/([\s,;]+)/).filter((part, i) => i % 2 === 1 || !isThink(part)).join("").replace(/^[\s,;]+/, "").replace(/[ \t]{2,}/g, " ");
+}
+function saveKeepTags(shown, before) {
+  const prior = String(before ?? "");
+  const own = prior.split(/[\s,;]+/).filter((p) => p && isThink(p));
+  const base = hideThinkTags(shown);
+  if (prior.length > LIMIT - THINK_TAGS.join(" ").length - 1 && prior.startsWith(base))
+    return prior;
+  return [base.trim(), ...own].filter(Boolean).join(" ");
+}
+function thinkAwareStorage(inner) {
+  let saved = "";
+  const seen = (r) => {
+    const c = r?.config && typeof r.config === "object" ? r.config : {};
+    const raw = c.paragraph?.keepTags;
+    saved = typeof raw === "string" ? raw : "";
+    return { ...r ?? {}, config: { ...c, paragraph: { ...c.paragraph ?? {}, keepTags: withThinkTags(saved) } } };
+  };
+  return {
+    ...inner,
+    get: async () => seen(await inner.get()),
+    patch: async (p) => {
+      const c = p.config;
+      const out = c && typeof c === "object" && c.paragraph && typeof c.paragraph === "object" && typeof c.paragraph.keepTags === "string" ? { ...p, config: { ...c, paragraph: { ...c.paragraph, keepTags: saveKeepTags(c.paragraph.keepTags, saved) } } } : p;
+      return seen(await inner.patch(out));
+    }
+  };
+}
+function hideThinkInField(field) {
+  if (field.hasAttribute("data-lv-think-hidden"))
+    return;
+  field.setAttribute("data-lv-think-hidden", "");
+  const own = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+  if (!own?.get || !own.set)
+    return;
+  const { get, set } = own;
+  Object.defineProperty(field, "value", {
+    configurable: true,
+    get() {
+      return get.call(this);
+    },
+    set(v) {
+      set.call(this, hideThinkTags(v));
+    }
+  });
+  set.call(field, hideThinkTags(get.call(field)));
+}
+
 // src/host-emu/dom-bridge.ts
 var BUBBLE_ROW = '[data-component="BubbleActions"]';
 function findActionRow(messageEl) {
@@ -8604,6 +8664,48 @@ function forwardLongMessageToggle(e) {
   e.stopPropagation();
   if (real && real !== copy)
     real.click();
+}
+var NO_UNITS_TOAST = "이 메시지에는 번역할 문단이 없습니다.";
+var NO_UNITS_AFTER_MS = 3000;
+var INFO_ICON = '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>';
+function showOriginalToast(text) {
+  let wrap = document.querySelector(".ptx-toasts");
+  if (!wrap) {
+    wrap = document.createElement("div");
+    wrap.className = "ptx-toasts";
+    wrap.setAttribute("aria-live", "polite");
+    document.body.append(wrap);
+  }
+  const toast = document.createElement("div");
+  toast.className = "ptx-toast is-info";
+  toast.innerHTML = `<svg class="ptx-ico" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${INFO_ICON}</svg><span></span>`;
+  toast.querySelector("span").textContent = text;
+  wrap.append(toast);
+  setTimeout(() => toast.classList.add("is-out"), 4000);
+  setTimeout(() => toast.remove(), 4500);
+}
+var shows = (message) => !!message.querySelector(".ptx-view .ptx-u, .ptx-view .ptx-pill, .ptx-view [data-lumiverse-html-island]");
+function noticeSilentTranslate(e, timers) {
+  const button = e.target?.closest?.("button");
+  if (!button || !button.querySelector("svg.lucide-languages") || button.closest(".ptx-view"))
+    return;
+  const message = button.closest("[data-message-id]");
+  const id = message?.getAttribute("data-message-id");
+  if (!message || !id)
+    return;
+  clearTimeout(timers.get(id));
+  const hadCells = shows(message);
+  const toastsBefore = new Set(Array.from(document.querySelectorAll(".ptx-toast")));
+  const timer = setTimeout(() => {
+    timers.delete(id);
+    const again = document.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+    if (!again || !again.isConnected || hadCells || shows(again))
+      return;
+    if (Array.from(document.querySelectorAll(".ptx-toast")).some((t) => !toastsBefore.has(t)))
+      return;
+    showOriginalToast(NO_UNITS_TOAST);
+  }, NO_UNITS_AFTER_MS);
+  timers.set(id, timer);
 }
 var mirrored = new WeakMap;
 var MIRROR = "data-lv-mirror";
@@ -8891,14 +8993,21 @@ function startDomBridge(root = document, options = {}) {
   const observer = new MutationObserver(queue);
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
   scan();
+  const noticeTimers = new Map;
+  const onTranslatePress = (e) => noticeSilentTranslate(e, noticeTimers);
   document.addEventListener("click", forwardLongMessageToggle, true);
   document.addEventListener("click", onContinueClick, true);
+  document.addEventListener("click", onTranslatePress, true);
   return {
     scan,
     destroy() {
       destroyed = true;
       document.removeEventListener("click", forwardLongMessageToggle, true);
       document.removeEventListener("click", onContinueClick, true);
+      document.removeEventListener("click", onTranslatePress, true);
+      for (const t of noticeTimers.values())
+        clearTimeout(t);
+      noticeTimers.clear();
       for (const b of Array.from(document.querySelectorAll('[data-lv-act="continue"]')))
         b.remove();
       if (timer)
@@ -9471,7 +9580,7 @@ function startOriginal(opts) {
     }
   });
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
-  const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: opts.storage, activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
+  const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: thinkAwareStorage(opts.storage), activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
     emu,
     stop() {
@@ -9895,7 +10004,7 @@ function build(cls, hasChat) {
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
         ${switchRow(cls, "protectHtml", "HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역")}
         ${switchRow(cls, "protectCode", "코드 블록(```) 은 번역하지 않음")}
-        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다.</p>
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
         ${field("제외 규칙 (한 줄에 하나)", `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;
 /HP: \\d+\\/\\d+/
 [상태창] ... [/상태창]"></textarea>`)}
@@ -10024,6 +10133,9 @@ function mountLvForm(root, host) {
     };
   }
   function inject(form) {
+    const keepField = form.elements.namedItem("paraKeepTags");
+    if (keepField)
+      hideThinkInField(keepField);
     if (form.querySelector("[data-lv-sections]"))
       return;
     const bar = form.querySelector(".tpg-savebar");

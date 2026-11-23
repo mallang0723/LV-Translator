@@ -13,6 +13,7 @@ import { pairParagraphs } from '../display/paragraph-view';
 import type { Pub } from './contract';
 import { langCode, PUB_PARAS_MAX } from './contract';
 import { blockKey, hashText, normalizeForKey } from './keys';
+import { withThinkTags } from './think-tags';
 
 export { blockKey, hashText, normalizeForKey };
 
@@ -29,8 +30,9 @@ const isRecord = (v: unknown): v is TtRecord => !!v && typeof v === 'object' && 
 
 /** Tag names the original keeps (its 문단 번역 "번역에서 제외할 태그"), as `keptTagNames` reads them. */
 export function keptTagNames(raw: unknown): Set<string> {
+  // The thinking tags are always kept (think-tags.ts): the original is given the list with them, so the keys here follow the same list.
   return new Set(
-    String(raw ?? '')
+    withThinkTags(raw)
       .split(/[\s,;]+/)
       .map((part) => {
         const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);

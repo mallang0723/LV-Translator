@@ -4,6 +4,7 @@
 // save button: this file hooks the form's `submit` from outside, saves our values first, and then lets the original's own
 // submit handler run unchanged (its button text, its status line, its own save). An error of ours is shown in the
 // original's status line. The original's code is never edited (scripts/verify-original.mjs); the form is only added to.
+import { hideThinkInField } from '../adapter/think-tags';
 
 export interface LvState {
   ready: boolean;
@@ -105,7 +106,7 @@ function build(cls: Classes, hasChat: boolean): string {
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
         ${switchRow(cls, 'protectHtml', 'HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역')}
         ${switchRow(cls, 'protectCode', '코드 블록(```) 은 번역하지 않음')}
-        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다.</p>
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
         ${field('제외 규칙 (한 줄에 하나)', `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]"></textarea>`)}
         <p class="${cls.help}">/정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 번역에 보내지 않고 번역 화면에 원문 그대로 둡니다(여러 문단에 걸쳐도 됩니다). {{매크로}} 는 항상 그대로 둡니다.</p>
       </section>
@@ -243,6 +244,8 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
   }
 
   function inject(form: HTMLFormElement) {
+    const keepField = form.elements.namedItem('paraKeepTags') as HTMLInputElement | null;
+    if (keepField) hideThinkInField(keepField);
     if (form.querySelector('[data-lv-sections]')) return;
     const bar = form.querySelector('.tpg-savebar');
     if (!bar) return; // the original has not finished drawing the form

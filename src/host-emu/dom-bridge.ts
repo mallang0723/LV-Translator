@@ -53,6 +53,57 @@ function forwardLongMessageToggle(e: MouseEvent): void {
 }
 
 /**
+ * The original answers the translate button in one of three ways: it translates, it toggles the original/translation, or - when the message has nothing to
+ * translate - it shows a toast, but only for a message with no translation record (extension.js translateMessage: `!getRecord(id)`). A message that already
+ * has a record (even an empty one) and no translatable cell takes the toggle path instead, which draws nothing: the button does nothing at all. This
+ * watches a press of the host's translate button and, when a few seconds later the message shows no translated cell (not even the "번역 중…" pill), nothing was
+ * hidden by this press (it showed no cell before either), and no toast came up, shows the original's own toast text so the press is never silent.
+ */
+const NO_UNITS_TOAST = '이 메시지에는 번역할 문단이 없습니다.';
+const NO_UNITS_AFTER_MS = 3000;
+const INFO_ICON = '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>';
+
+function showOriginalToast(text: string): void {
+  let wrap = document.querySelector<HTMLElement>('.ptx-toasts');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.className = 'ptx-toasts';
+    wrap.setAttribute('aria-live', 'polite');
+    document.body.append(wrap);
+  }
+  const toast = document.createElement('div');
+  toast.className = 'ptx-toast is-info';
+  toast.innerHTML = `<svg class="ptx-ico" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${INFO_ICON}</svg><span></span>`;
+  toast.querySelector('span')!.textContent = text;
+  wrap.append(toast);
+  setTimeout(() => toast.classList.add('is-out'), 4000);
+  setTimeout(() => toast.remove(), 4500);
+}
+
+/** A view that shows something: translated cells (also inside an HTML island's shadow root) or the "번역 중…" pill. An empty view (a record with no cell) shows nothing. */
+const shows = (message: Element) => !!message.querySelector('.ptx-view .ptx-u, .ptx-view .ptx-pill, .ptx-view [data-lumiverse-html-island]');
+
+function noticeSilentTranslate(e: MouseEvent, timers: Map<string, ReturnType<typeof setTimeout>>): void {
+  const button = (e.target as Element | null)?.closest?.('button');
+  if (!button || !button.querySelector('svg.lucide-languages') || button.closest('.ptx-view')) return;
+  const message = button.closest<HTMLElement>('[data-message-id]');
+  const id = message?.getAttribute('data-message-id');
+  if (!message || !id) return;
+  // A newer press on the same message decides instead of this one (translate then hide again within the wait is not a silent press).
+  clearTimeout(timers.get(id));
+  const hadCells = shows(message);
+  const toastsBefore = new Set(Array.from(document.querySelectorAll('.ptx-toast')));
+  const timer = setTimeout(() => {
+    timers.delete(id);
+    const again = document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`);
+    if (!again || !again.isConnected || hadCells || shows(again)) return;
+    if (Array.from(document.querySelectorAll('.ptx-toast')).some((t) => !toastsBefore.has(t))) return;
+    showOriginalToast(NO_UNITS_TOAST);
+  }, NO_UNITS_AFTER_MS);
+  timers.set(id, timer);
+}
+
+/**
  * Lumiverse draws HTML in a message (status windows, cards, `<details>` blocks, action hints) in an "HTML island": an empty
  * `<div data-lumiverse-html-island>` whose content lives in an open SHADOW ROOT (MessageContent.tsx IsolatedHtml). The original works on the
  * message's light DOM only (`cloneNode(true)`, `querySelectorAll`): it cannot see into a shadow root, so a translation was never made for the
@@ -376,14 +427,20 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
   const observer = new MutationObserver(queue);
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
   scan();
+  const noticeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const onTranslatePress = (e: MouseEvent) => noticeSilentTranslate(e, noticeTimers);
   document.addEventListener('click', forwardLongMessageToggle, true);
   document.addEventListener('click', onContinueClick, true);
+  document.addEventListener('click', onTranslatePress, true);
   return {
     scan,
     destroy() {
       destroyed = true;
       document.removeEventListener('click', forwardLongMessageToggle, true);
       document.removeEventListener('click', onContinueClick, true);
+      document.removeEventListener('click', onTranslatePress, true);
+      for (const t of noticeTimers.values()) clearTimeout(t);
+      noticeTimers.clear();
       for (const b of Array.from(document.querySelectorAll('[data-lv-act="continue"]'))) b.remove();
       if (timer) clearTimeout(timer);
       for (const t of autoTimers.values()) clearTimeout(t);
