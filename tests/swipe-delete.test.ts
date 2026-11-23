@@ -88,6 +88,48 @@ describe('a deleted swipe: translation records follow the swipes', () => {
     });
   });
 
+  test('the same slot deleted again after a new swipe took its place is a new delete, not a duplicate', async () => {
+    await withHost({ caps }, async (h) => {
+      const m = threeSwipes(h); // A B C
+      remove(h, m, 2);
+      await settle();
+      expect(tr(m)).toEqual({ 0: 'T0', 1: 'T1' });
+      for (const [i, text] of ['Fourth swipe text.', 'Fifth swipe text.'].entries()) {
+        // generate and translate a new last swipe, then delete it again
+        m.swipes.push(text);
+        m.swipe_id = 2;
+        m.content = text;
+        (m.metadata!.st_translator_tt as Record<string, unknown>)['2'] = rec(text, `N${i}`);
+        const gone = remove(h, m, 2);
+        await settle();
+        expect(tr(m)).toEqual({ 0: 'T0', 1: 'T1' });
+        h.event('MESSAGE_SWIPED', gone); // and its duplicate is still ignored
+        await settle();
+        expect(tr(m)).toEqual({ 0: 'T0', 1: 'T1' });
+      }
+      expect(h.updates.length).toBe(3);
+    });
+  });
+
+  test('a middle slot deleted twice (same number, same swipes left) is applied both times', async () => {
+    await withHost({ caps }, async (h) => {
+      // records the content cannot vouch for: only the event decides
+      const m = makeMessage('a1', 'x', 'assistant', 0);
+      m.swipes = ['S0', 'S1', 'S2'];
+      m.metadata = { st_translator_tt: { 0: { v: 1, map: { q0: 'T0' } }, 1: { v: 1, map: { q1: 'T1' } }, 2: { v: 1, map: { q2: 'T2' } } } };
+      h.messages.push(m);
+      remove(h, m, 1); // S0 S2, records T0 T2
+      await settle();
+      expect(tr(m)).toEqual({ 0: 'T0', 1: 'T2' });
+      // a swipe is added in the middle of the numbering by a host that inserts, with its own record, then removed again
+      m.swipes.splice(1, 0, 'S1b');
+      (m.metadata!.st_translator_tt as Record<string, any>) = { 0: { v: 1, map: { q0: 'T0' } }, 1: { v: 1, map: { qb: 'Tb' } }, 2: { v: 1, map: { q2: 'T2' } } };
+      remove(h, m, 1);
+      await settle();
+      expect(tr(m)).toEqual({ 0: 'T0', 1: 'T2' });
+    });
+  });
+
   test('a message without a record is not written, and a host without metadata_patch gets the whole bag', async () => {
     await withHost({ caps }, async (h) => {
       const m = makeMessage('a1', 'x', 'assistant', 0);

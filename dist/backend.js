@@ -1934,6 +1934,8 @@ function deleteMark(deleted, swipes) {
   return `${deleted}:${swipes.length}:${hashText(swipes.map((s) => String(s ?? "")).join("\x00"))}`;
 }
 var DELETE_MARKS = 6;
+var ttHash = (tt) => hashText(JSON.stringify(tt));
+var appliedMark = (mark, result) => `${mark}|${ttHash(result)}`;
 function repairedKeys(ttKey, next, meta, view, proj, mark, now = Date.now()) {
   const out = { [ttKey]: next };
   const st = isObject2(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : {};
@@ -1959,9 +1961,9 @@ function repairedKeys(ttKey, next, meta, view, proj, mark, now = Date.now()) {
     out[METADATA_KEY] = merged;
   return out;
 }
-var deleteSeen = (meta, mark) => {
+var deleteSeen = (meta, mark, tt) => {
   const st = meta?.[METADATA_KEY];
-  return isObject2(st) && Array.isArray(st.del) && st.del.includes(mark);
+  return isObject2(st) && Array.isArray(st.del) && st.del.includes(appliedMark(mark, tt));
 };
 
 // src/connection.ts
@@ -2739,7 +2741,7 @@ async function realignAfterDelete(uid, chatId, raw, deleted) {
   const msg = eventMsg(current);
   const meta = msg.metadata;
   const tt = isObject4(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
-  if (!tt || deleteSeen(meta, mark))
+  if (!tt || deleteSeen(meta, mark, tt))
     return;
   if (!Array.isArray(msg.swipes) || deleteMark(deleted, msg.swipes) !== mark)
     return;
@@ -2748,7 +2750,7 @@ async function realignAfterDelete(uid, chatId, raw, deleted) {
   const shifted = shiftAfterDelete(tt, deleted) ?? tt;
   const next = reconcileTt(shifted, swipes, proj.kept) ?? shifted;
   const swipeId = Number.isInteger(msg.swipe_id) ? msg.swipe_id : 0;
-  const changed = repairedKeys(TT_KEY, next, meta, { content: String(msg.content ?? ""), swipeId }, proj, mark);
+  const changed = repairedKeys(TT_KEY, next, meta, { content: String(msg.content ?? ""), swipeId }, proj, appliedMark(mark, next));
   const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: changed } : { metadata: { ...meta ?? {}, ...changed } };
   await spindle.chat.updateMessage(chatId, raw.id, patch);
 }

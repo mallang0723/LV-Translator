@@ -4,7 +4,7 @@
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import { hostCaps } from './adapter/host';
-import { deleteMark, deleteSeen, reconcileTt, repairedKeys, shiftAfterDelete } from './adapter/swipe-repair';
+import { appliedMark, deleteMark, deleteSeen, reconcileTt, repairedKeys, shiftAfterDelete } from './adapter/swipe-repair';
 import { classifyPeer, glossaryText, handshake, PEER_ID, type PeerState, planGlossary, PROVIDES } from './adapter/contract';
 import { buildPubFromTt, keptTagNames } from './adapter/pub';
 import { deleteBundle, saveBundle } from './bundles';
@@ -257,14 +257,14 @@ async function realignAfterDelete(uid: Uid, chatId: string, raw: Record<string, 
   const msg = eventMsg(current);
   const meta = msg.metadata;
   const tt = isObject(meta?.[TT_KEY]) ? (meta![TT_KEY] as Record<string, unknown>) : null;
-  if (!tt || deleteSeen(meta, mark)) return;
+  if (!tt || deleteSeen(meta, mark, tt)) return;
   if (!Array.isArray(msg.swipes) || deleteMark(deleted as number, msg.swipes) !== mark) return; // moved on since: a later event, or the repair on read, covers it
   const proj = await projectionFor(uid, chatId);
   const swipes = raw.swipes as string[];
   const shifted = shiftAfterDelete(tt, deleted as number) ?? tt;
   const next = reconcileTt(shifted, swipes, proj.kept) ?? shifted;
   const swipeId = Number.isInteger(msg.swipe_id) ? (msg.swipe_id as number) : 0;
-  const changed = repairedKeys(TT_KEY, next, meta, { content: String(msg.content ?? ''), swipeId }, proj, mark);
+  const changed = repairedKeys(TT_KEY, next, meta, { content: String(msg.content ?? ''), swipeId }, proj, appliedMark(mark, next));
   const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: changed } : { metadata: { ...(meta ?? {}), ...changed } };
   await (spindle.chat.updateMessage as unknown as (id: string, mid: string, patch: Record<string, unknown>) => Promise<void>)(chatId, raw.id, patch);
 }

@@ -79,6 +79,9 @@ export function deleteMark(deleted: number, swipes: readonly string[]): string {
   return `${deleted}:${swipes.length}:${hashText(swipes.map((s) => String(s ?? '')).join('\u0000'))}`;
 }
 const DELETE_MARKS = 6;
+const ttHash = (tt: Tt): string => hashText(JSON.stringify(tt));
+/** The marker as stored: the delete, plus the hash of the record set it left. Only a message still holding exactly that set has had the delete applied. */
+export const appliedMark = (mark: string, result: Tt): string => `${mark}|${ttHash(result)}`;
 
 export interface PubWish {
   publish: boolean;
@@ -123,7 +126,11 @@ export function repairedKeys(
   return out;
 }
 
-export const deleteSeen = (meta: Record<string, unknown> | undefined, mark: string): boolean => {
+/**
+ * Whether this delete was already applied: its marker is stored AND the record set now stored is the one it produced. The same slot
+ * deleted again later (delete, regenerate, delete) has the same delete number and swipes, but the records have moved on since.
+ */
+export const deleteSeen = (meta: Record<string, unknown> | undefined, mark: string, tt: Tt): boolean => {
   const st = meta?.[METADATA_KEY];
-  return isObject(st) && Array.isArray(st.del) && (st.del as unknown[]).includes(mark);
+  return isObject(st) && Array.isArray(st.del) && (st.del as unknown[]).includes(appliedMark(mark, tt));
 };
