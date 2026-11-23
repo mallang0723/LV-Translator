@@ -4,6 +4,7 @@
 declare const spindle: import('lumiverse-spindle-types').SpindleAPI;
 
 import { hostCaps } from './adapter/host';
+import { deleteMark, deleteSeen, reconcileTt, repairedKeys, shiftAfterDelete } from './adapter/swipe-repair';
 import { classifyPeer, glossaryText, handshake, PEER_ID, type PeerState, planGlossary, PROVIDES } from './adapter/contract';
 import { buildPubFromTt, keptTagNames } from './adapter/pub';
 import { deleteBundle, saveBundle } from './bundles';
@@ -92,7 +93,7 @@ async function readTtConfig(uid: Uid, fresh = false): Promise<TtConfig> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.5.9';
+const SELF_VERSION = '0.5.10';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -238,6 +239,36 @@ async function refreshPub(uid: Uid, chatId: string, raw: { id?: string; content?
   await (spindle.chat.updateMessage as unknown as (id: string, mid: string, patch: Record<string, unknown>) => Promise<void>)(chatId, raw.id, patch);
 }
 
+/**
+ * A swipe was deleted: its translation record goes and the higher ones move down (src/adapter/swipe-repair.ts), in one metadata write.
+ * An event delivered twice (or late) must not shift again: the deletes already applied are kept in our own metadata key.
+ */
+async function realignAfterDelete(uid: Uid, chatId: string, raw: Record<string, any>, deleted: unknown): Promise<void> {
+  if (!raw.id || !Number.isInteger(deleted) || !Array.isArray(raw.swipes) || raw.swipes.some((s: unknown) => typeof s !== 'string')) return;
+  const mark = deleteMark(deleted as number, raw.swipes);
+  // The event's copy of the message is a snapshot: a duplicate carries the same old one. What is stored now decides.
+  let current: Record<string, any> | undefined;
+  for (const n of [20, 200, 2000]) {
+    const rows = (await (spindle.chat.getMessages as unknown as (id: string, o: { tail: number }) => Promise<unknown>)(chatId, { tail: n })) as unknown as Array<Record<string, any>>;
+    current = rows.find((m) => m.id === raw.id);
+    if (current || rows.length < n) break;
+  }
+  if (!current) return;
+  const msg = eventMsg(current);
+  const meta = msg.metadata;
+  const tt = isObject(meta?.[TT_KEY]) ? (meta![TT_KEY] as Record<string, unknown>) : null;
+  if (!tt || deleteSeen(meta, mark)) return;
+  if (!Array.isArray(msg.swipes) || deleteMark(deleted as number, msg.swipes) !== mark) return; // moved on since: a later event, or the repair on read, covers it
+  const proj = await projectionFor(uid, chatId);
+  const swipes = raw.swipes as string[];
+  const shifted = shiftAfterDelete(tt, deleted as number) ?? tt;
+  const next = reconcileTt(shifted, swipes, proj.kept) ?? shifted;
+  const swipeId = Number.isInteger(msg.swipe_id) ? (msg.swipe_id as number) : 0;
+  const changed = repairedKeys(TT_KEY, next, meta, { content: String(msg.content ?? ''), swipeId }, proj, mark);
+  const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: changed } : { metadata: { ...(meta ?? {}), ...changed } };
+  await (spindle.chat.updateMessage as unknown as (id: string, mid: string, patch: Record<string, unknown>) => Promise<void>)(chatId, raw.id, patch);
+}
+
 /** Wide reads of old messages (src/host-emu/backend-ops.ts WideReads), shared by the stand-in's calls and kept current from the events below. */
 const wideReads = new WideReads();
 
@@ -264,6 +295,11 @@ for (const event of ['MESSAGE_EDITED', 'MESSAGE_SWIPED', 'SWIPE_EDITED', 'MESSAG
     const message = { ...payload.message, id: payload.message.id ?? payload.messageId };
     void forwardMessage(userId, payload.chatId, message as Record<string, any>).catch((e) => spindle.log.warn(`[translator] message event not forwarded: ${errorText(e)}`));
     if (event === 'MESSAGE_SENT') return;
+    if (event === 'MESSAGE_SWIPED' && (payload as { action?: string }).action === 'deleted') {
+      // Lumiverse renumbered the swipes: the translation records follow (and `pub`, in the same write). refreshPub would read the old numbers.
+      void realignAfterDelete(userId, payload.chatId, message, (payload as { swipeId?: number }).swipeId).catch((e) => spindle.log.warn(`[translator] swipe delete not followed: ${errorText(e)}`));
+      return;
+    }
     void refreshPub(userId, payload.chatId, message).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
   }) as never);
 }

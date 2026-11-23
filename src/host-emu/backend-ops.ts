@@ -3,6 +3,7 @@
 // swipe under its own metadata key, separate from the 0.4.0 `st_translator` records.
 
 import type { ChatRow, MessageRow } from './api';
+import { reconcileTt, repairedKeys } from '../adapter/swipe-repair';
 import { buildPubFromTt, convertLegacyRecord, translationText } from '../adapter/pub';
 import { type ChatSettings, METADATA_KEY, type MessageTranslations } from '../shared';
 import { recordFor } from '../message-ui';
@@ -291,6 +292,37 @@ export function createEmuBridge(d: EmuDeps) {
     m.metadata = { ...(m.metadata ?? {}), ...changed };
   }
 
+  const realigning = new Set<string>();
+  const REALIGN_WRITES = 30;
+
+  /**
+   * A message whose records sit on the wrong swipes (a swipe was deleted before 0.5.10, or its event was missed) is set right when
+   * it is read: by content only, and only what is certain (src/adapter/swipe-repair.ts reconcileTt). Written once, on screen reads.
+   */
+  async function realign(chatId: string, rows: Msg[]): Promise<void> {
+    let written = 0;
+    let kept: ReadonlySet<string> | undefined;
+    for (const m of rows) {
+      const tt = isObj(m.metadata?.[TT_KEY]) ? (m.metadata![TT_KEY] as Record<string, unknown>) : null;
+      const swipes = m.swipes;
+      if (!tt || !Array.isArray(swipes) || swipes.some((s) => typeof s !== 'string')) continue;
+      const slots = Object.keys(tt).filter((k) => /^\d+$/.test(k));
+      if (!slots.length || (swipes.length < 2 && slots.every((k) => Number(k) < swipes.length))) continue;
+      kept ??= (await d.keptTags?.()) ?? new Set();
+      const next = reconcileTt(tt, swipes, kept);
+      if (!next) continue;
+      const proj = await d.projection?.(chatId);
+      const visible = Number.isInteger(m.swipe_id) ? (m.swipe_id as number) : 0;
+      const changed = repairedKeys(TT_KEY, next, m.metadata, { content: String(m.content ?? ''), swipeId: visible }, proj);
+      m.metadata = { ...(m.metadata ?? {}), ...changed };
+      const key = `${m.id}:${JSON.stringify(Object.keys(next))}`;
+      if (realigning.has(key) || written >= REALIGN_WRITES) continue;
+      written++;
+      realigning.add(key);
+      void host.chat.updateMessage(chatId, m.id, d.metadataPatch ? { metadata_patch: changed } : { metadata: m.metadata }).catch(() => realigning.delete(key));
+    }
+  }
+
   const converting = new Set<string>();
 
   /** N8: a message the original has no record for, but 0.4.0 translated paragraph by paragraph, shows that translation. */
@@ -386,6 +418,7 @@ export function createEmuBridge(d: EmuDeps) {
       const sp = await speakers(chatId);
       const rows = await tail(chatId, want);
       await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
+      await realign(chatId, rows);
       const kept = await d.keptTags?.();
       for (const m of rows) wide.see(chatId, m.id, String(m.content ?? ''));
       return rows.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
@@ -405,6 +438,7 @@ export function createEmuBridge(d: EmuDeps) {
         if (found.length >= want.size || rows.length < n) break;
       }
       await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
+      await realign(chatId, found);
       const [sp, kept] = [await speakers(chatId), await d.keptTags?.()];
       for (const m of found) wide.see(chatId, m.id, String(m.content ?? ''));
       return found.map((m) => messageRow(chatId, m, speakerOf(m, sp), kept));
@@ -412,6 +446,7 @@ export function createEmuBridge(d: EmuDeps) {
     async getMessage(chatId: string, messageId: string): Promise<MessageRow> {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
+      await realign(chatId, [row]);
       wide.see(chatId, row.id, String(row.content ?? ''));
       return messageRow(chatId, row, speakerOf(row, await speakers(chatId)), await d.keptTags?.());
     },

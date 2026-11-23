@@ -6,21 +6,6 @@ function hostCaps(api) {
   return { leanMessages: on("chat-lean-messages-v1"), metadataPatch: on("chat-metadata-patch-v1"), conditionalMetadata: on("chat-conditional-metadata-v1") };
 }
 
-// src/translate/glossary.ts
-function parseGlossary(raw) {
-  const pairs = [];
-  for (const line of raw.split(/\r?\n/u)) {
-    const separator = line.indexOf("=");
-    if (separator < 1)
-      continue;
-    const left = line.slice(0, separator).trim();
-    const right = line.slice(separator + 1).trim();
-    if (left && right)
-      pairs.push({ left, right });
-  }
-  return pairs;
-}
-
 // src/adapter/keys.ts
 function hashText(str) {
   let h = 2166136261;
@@ -36,55 +21,6 @@ function normalizeForKey(s) {
 }
 function blockKey(block) {
   return hashText(normalizeForKey(block));
-}
-
-// src/adapter/contract.ts
-var PEER_ID = "anon_memory_lv";
-var SELF_ID = "st_translator";
-var CONTRACT_NAME = "lv-tx";
-var CONTRACT_VERSION = 1;
-var PUB_PARAS_MAX = 400;
-var PROVIDES = ["pub-translation@1", "glossary@1"];
-function handshake(version, provides = PROVIDES) {
-  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
-}
-function classifyPeer(value) {
-  if (!value || typeof value !== "object")
-    return "none";
-  const v = value;
-  if (v.name !== CONTRACT_NAME || typeof v.v !== "number")
-    return "incompatible";
-  return v.v === CONTRACT_VERSION ? "ok" : "incompatible";
-}
-function langCode(language) {
-  const l = String(language ?? "").trim();
-  if (/^(ko|kor|korean)$/i.test(l) || /\uD55C\uAD6D|\uC870\uC120/.test(l))
-    return "ko";
-  if (/^(en|eng|english)$/i.test(l) || /\uC601\uC5B4/.test(l))
-    return "en";
-  if (/^(ja|jpn|japanese)$/i.test(l) || /\uC77C\uBCF8|\u65E5\u672C/.test(l))
-    return "ja";
-  if (/^(zh|chinese)$/i.test(l) || /\uC911\uAD6D|\u4E2D\u6587/.test(l))
-    return "zh";
-  return l.toLowerCase();
-}
-function glossaryText(raw) {
-  return parseGlossary(raw).map((p) => `${p.left} = ${p.right}`).join(`
-`);
-}
-var isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-function planGlossary(meta, text, now) {
-  const own = isObject(meta[SELF_ID]) ? meta[SELF_ID] : {};
-  const published = isObject(own.glossary) ? own.glossary : null;
-  const hash = hashText(text);
-  if (!published && !text)
-    return null;
-  if (!text && published && typeof published.text === "string" && published.text.trim())
-    return null;
-  if (published?.hash === hash)
-    return null;
-  const entry = { text, hash, at: now };
-  return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };
 }
 
 // src/illustrations.ts
@@ -1112,6 +1048,21 @@ var BUILTIN_PRESET_ORDER = new Map([
   "builtin-bilingual-dialogue-korean",
   "builtin-bilingual-dialogue-korean-v2"
 ].map((id, index) => [id, index]));
+// src/translate/glossary.ts
+function parseGlossary(raw) {
+  const pairs = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const separator = line.indexOf("=");
+    if (separator < 1)
+      continue;
+    const left = line.slice(0, separator).trim();
+    const right = line.slice(separator + 1).trim();
+    if (left && right)
+      pairs.push({ left, right });
+  }
+  return pairs;
+}
+
 // src/bundles.ts
 function effectiveGuides(store, settings) {
   const bundle = store.userBundles.find((b) => b.id === settings.bundleId);
@@ -1763,6 +1714,55 @@ ${rest}`;
   return { kind: "whole", pairs: [{ source: content.trim(), translation: recordToText(record, content).trim() || null }] };
 }
 
+// src/adapter/contract.ts
+var PEER_ID = "anon_memory_lv";
+var SELF_ID = "st_translator";
+var CONTRACT_NAME = "lv-tx";
+var CONTRACT_VERSION = 1;
+var PUB_PARAS_MAX = 400;
+var PROVIDES = ["pub-translation@1", "glossary@1"];
+function handshake(version, provides = PROVIDES) {
+  return { name: CONTRACT_NAME, v: CONTRACT_VERSION, ext: SELF_ID, version, provides: [...provides] };
+}
+function classifyPeer(value) {
+  if (!value || typeof value !== "object")
+    return "none";
+  const v = value;
+  if (v.name !== CONTRACT_NAME || typeof v.v !== "number")
+    return "incompatible";
+  return v.v === CONTRACT_VERSION ? "ok" : "incompatible";
+}
+function langCode(language) {
+  const l = String(language ?? "").trim();
+  if (/^(ko|kor|korean)$/i.test(l) || /\uD55C\uAD6D|\uC870\uC120/.test(l))
+    return "ko";
+  if (/^(en|eng|english)$/i.test(l) || /\uC601\uC5B4/.test(l))
+    return "en";
+  if (/^(ja|jpn|japanese)$/i.test(l) || /\uC77C\uBCF8|\u65E5\u672C/.test(l))
+    return "ja";
+  if (/^(zh|chinese)$/i.test(l) || /\uC911\uAD6D|\u4E2D\u6587/.test(l))
+    return "zh";
+  return l.toLowerCase();
+}
+function glossaryText(raw) {
+  return parseGlossary(raw).map((p) => `${p.left} = ${p.right}`).join(`
+`);
+}
+var isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function planGlossary(meta, text, now) {
+  const own = isObject(meta[SELF_ID]) ? meta[SELF_ID] : {};
+  const published = isObject(own.glossary) ? own.glossary : null;
+  const hash = hashText(text);
+  if (!published && !text)
+    return null;
+  if (!text && published && typeof published.text === "string" && published.text.trim())
+    return null;
+  if (published?.hash === hash)
+    return null;
+  const entry = { text, hash, at: now };
+  return { expected_metadata: meta, metadata: { ...meta, [SELF_ID]: { ...own, v: 1, glossary: entry } } };
+}
+
 // src/adapter/pub.ts
 var isRecord = (v) => !!v && typeof v === "object" && typeof v.map === "object" && v.map !== null;
 function keptTagNames(raw) {
@@ -1860,6 +1860,103 @@ function convertLegacyRecord(content, legacy, settings, kept, now) {
     return null;
   return { v: 1, map, edited: marks, view: "", at: legacy.updatedAt || now };
 }
+
+// src/adapter/swipe-repair.ts
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var slotOf = (key) => /^(0|[1-9]\d*)$/.test(key) ? Number(key) : null;
+function shiftAfterDelete(tt, deleted) {
+  if (!Number.isInteger(deleted) || deleted < 0)
+    return null;
+  let moved = false;
+  const out = {};
+  for (const [key, value] of Object.entries(tt)) {
+    const slot = slotOf(key);
+    if (slot === null || slot < deleted)
+      out[key] = value;
+    else
+      moved = true;
+  }
+  for (const [key, value] of Object.entries(tt)) {
+    const slot = slotOf(key);
+    if (slot !== null && slot > deleted)
+      out[String(slot - 1)] = value;
+  }
+  return moved ? out : null;
+}
+var mapKeys = (record) => isObject2(record) && isObject2(record.map) ? Object.keys(record.map) : [];
+function reconcileTt(tt, swipes, kept = new Set) {
+  const units = swipes.map((text) => new Set(contentUnits(String(text ?? ""), kept).map(blockKey)));
+  const overlap = (record, slot) => slot < units.length ? mapKeys(record).filter((k) => units[slot].has(k)).length : 0;
+  const stale = (slot) => {
+    const keys = mapKeys(tt[String(slot)]).length;
+    return keys > 0 && overlap(tt[String(slot)], slot) === 0;
+  };
+  const intents = new Map;
+  for (const key of Object.keys(tt)) {
+    const from = slotOf(key);
+    if (from === null || !stale(from))
+      continue;
+    const keys = mapKeys(tt[key]);
+    const to = units.map((_, j) => j).filter((j) => j !== from && overlap(tt[key], j) === keys.length);
+    if (to.length !== 1)
+      continue;
+    const occupant = tt[String(to[0])];
+    if (occupant !== undefined && !stale(to[0]))
+      continue;
+    intents.set(from, to[0]);
+  }
+  const claims = [...intents.values()];
+  for (const [from, to] of [...intents])
+    if (claims.filter((c) => c === to).length > 1)
+      intents.delete(from);
+  if (!intents.size)
+    return null;
+  const targets = new Set(intents.values());
+  const out = {};
+  for (const [key, value] of Object.entries(tt)) {
+    const slot = slotOf(key);
+    if (slot === null)
+      out[key] = value;
+    else if (!intents.has(slot) && !targets.has(slot))
+      out[key] = value;
+  }
+  for (const [from, to] of intents)
+    out[String(to)] = tt[String(from)];
+  return out;
+}
+function deleteMark(deleted, swipes) {
+  return `${deleted}:${swipes.length}:${hashText(swipes.map((s) => String(s ?? "")).join("\x00"))}`;
+}
+var DELETE_MARKS = 6;
+function repairedKeys(ttKey, next, meta, view, proj, mark, now = Date.now()) {
+  const out = { [ttKey]: next };
+  const st = isObject2(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : {};
+  const merged = { v: 1, entries: {}, ...st };
+  let dirty = false;
+  if (proj) {
+    const want = proj.publish ? buildPubFromTt(view.content, next[String(view.swipeId)], proj.language, proj.kept, now) : null;
+    const have = isObject2(st.pub) ? st.pub : null;
+    if (want && have?.h !== want.h) {
+      merged.pub = want;
+      dirty = true;
+    } else if (!want && have) {
+      delete merged.pub;
+      dirty = true;
+    }
+  }
+  if (mark) {
+    const marks = Array.isArray(st.del) ? st.del.filter((m) => typeof m === "string") : [];
+    merged.del = [...marks.filter((m) => m !== mark), mark].slice(-DELETE_MARKS);
+    dirty = true;
+  }
+  if (dirty)
+    out[METADATA_KEY] = merged;
+  return out;
+}
+var deleteSeen = (meta, mark) => {
+  const st = meta?.[METADATA_KEY];
+  return isObject2(st) && Array.isArray(st.del) && st.del.includes(mark);
+};
 
 // src/connection.ts
 var NO_CONNECTION_MESSAGE = "\uC0AC\uC6A9\uD560 \uC218 \uC788\uB294 AI \uC5F0\uACB0\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. Lumiverse \uC124\uC815\uC758 \uC5F0\uACB0(Connections)\uC5D0\uC11C \uC5F0\uACB0\uC744 \uD558\uB098 \uB9CC\uB4E4\uACE0 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.";
@@ -2127,6 +2224,35 @@ function createEmuBridge(d) {
     await host.chat.updateMessage(chatId, m.id, patch);
     m.metadata = { ...m.metadata ?? {}, ...changed };
   }
+  const realigning = new Set;
+  const REALIGN_WRITES = 30;
+  async function realign(chatId, rows) {
+    let written = 0;
+    let kept;
+    for (const m of rows) {
+      const tt = isObj(m.metadata?.[TT_KEY]) ? m.metadata[TT_KEY] : null;
+      const swipes = m.swipes;
+      if (!tt || !Array.isArray(swipes) || swipes.some((s) => typeof s !== "string"))
+        continue;
+      const slots = Object.keys(tt).filter((k) => /^\d+$/.test(k));
+      if (!slots.length || swipes.length < 2 && slots.every((k) => Number(k) < swipes.length))
+        continue;
+      kept ??= await d.keptTags?.() ?? new Set;
+      const next = reconcileTt(tt, swipes, kept);
+      if (!next)
+        continue;
+      const proj = await d.projection?.(chatId);
+      const visible = Number.isInteger(m.swipe_id) ? m.swipe_id : 0;
+      const changed = repairedKeys(TT_KEY, next, m.metadata, { content: String(m.content ?? ""), swipeId: visible }, proj);
+      m.metadata = { ...m.metadata ?? {}, ...changed };
+      const key = `${m.id}:${JSON.stringify(Object.keys(next))}`;
+      if (realigning.has(key) || written >= REALIGN_WRITES)
+        continue;
+      written++;
+      realigning.add(key);
+      host.chat.updateMessage(chatId, m.id, d.metadataPatch ? { metadata_patch: changed } : { metadata: m.metadata }).catch(() => realigning.delete(key));
+    }
+  }
   const converting = new Set;
   const SCREEN_READ_MAX = 60;
   async function convertLegacy(chatId, rows, persist) {
@@ -2215,6 +2341,7 @@ function createEmuBridge(d) {
       const sp = await speakers(chatId);
       const rows = await tail(chatId, want);
       await convertLegacy(chatId, rows, want <= SCREEN_READ_MAX);
+      await realign(chatId, rows);
       const kept = await d.keptTags?.();
       for (const m of rows)
         wide.see(chatId, m.id, String(m.content ?? ""));
@@ -2236,6 +2363,7 @@ function createEmuBridge(d) {
           break;
       }
       await convertLegacy(chatId, found, found.length <= SCREEN_READ_MAX);
+      await realign(chatId, found);
       const [sp, kept] = [await speakers(chatId), await d.keptTags?.()];
       for (const m of found)
         wide.see(chatId, m.id, String(m.content ?? ""));
@@ -2244,6 +2372,7 @@ function createEmuBridge(d) {
     async getMessage(chatId, messageId) {
       const row = await findMessage(chatId, messageId);
       await convertLegacy(chatId, [row], true);
+      await realign(chatId, [row]);
       wide.see(chatId, row.id, String(row.content ?? ""));
       return messageRow(chatId, row, speakerOf(row, await speakers(chatId)), await d.keptTags?.());
     },
@@ -2310,31 +2439,31 @@ ${req.text}` });
 // src/adapter/migrate.ts
 var MIGRATIONS_KEY = "lvMigrations";
 var GLOSSARY_MARK = "glossary052";
-var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var isObject3 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 var filled = (v) => typeof v === "string" && v.trim() !== "";
 function planGlossaryMigration(file, store, at) {
-  const marks = isObject2(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
+  const marks = isObject3(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
   if (marks[GLOSSARY_MARK])
     return null;
-  const config = isObject2(file.config) ? structuredClone(file.config) : {};
+  const config = isObject3(file.config) ? structuredClone(file.config) : {};
   let changed = false;
   const oldDefault = glossaryText(effectiveGuides(store, settingsFor(store, null)).glossary);
   if (oldDefault && !filled(config.defaults?.glossary)) {
-    config.defaults = { ...isObject2(config.defaults) ? config.defaults : {}, glossary: oldDefault };
+    config.defaults = { ...isObject3(config.defaults) ? config.defaults : {}, glossary: oldDefault };
     changed = true;
   }
   for (const chatId of Object.keys(store.chats)) {
     const text = glossaryText(effectiveGuides(store, settingsFor(store, chatId)).glossary);
     if (!text)
       continue;
-    const scope = isObject2(config.chats) && isObject2(config.chats[chatId]) ? config.chats[chatId] : null;
+    const scope = isObject3(config.chats) && isObject3(config.chats[chatId]) ? config.chats[chatId] : null;
     if (scope) {
       if (filled(scope.glossary))
         continue;
       config.chats = { ...config.chats, [chatId]: { ...scope, glossary: text } };
       changed = true;
     } else if (!filled(config.defaults?.glossary)) {
-      config.chats = { ...isObject2(config.chats) ? config.chats : {}, [chatId]: { ...isObject2(config.defaults) ? config.defaults : {}, glossary: text } };
+      config.chats = { ...isObject3(config.chats) ? config.chats : {}, [chatId]: { ...isObject3(config.defaults) ? config.defaults : {}, glossary: text } };
       changed = true;
     }
   }
@@ -2354,18 +2483,18 @@ var GROUPS = [
 ];
 var pick = (from, keys) => Object.fromEntries(keys.filter((k) => (k in from)).map((k) => [k, from[k]]));
 function planScopeMigration(file, store, at) {
-  const marks = isObject2(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
+  const marks = isObject3(file[MIGRATIONS_KEY]) ? file[MIGRATIONS_KEY] : {};
   const doScope = !marks[SCOPE_MARK];
   const doTags = !marks[TAGS_MARK];
   if (!doScope && !doTags)
     return null;
-  const config = isObject2(file.config) ? structuredClone(file.config) : {};
+  const config = isObject3(file.config) ? structuredClone(file.config) : {};
   let changed = false;
   const oldDefault = settingsFor(store, null);
   for (const g of doScope ? GROUPS : []) {
     if (!g.filled(oldDefault))
       continue;
-    const have = isObject2(config.defaults) ? config.defaults : {};
+    const have = isObject3(config.defaults) ? config.defaults : {};
     if (!g.empty(have))
       continue;
     config.defaults = { ...have, ...pick(oldDefault, g.keys) };
@@ -2376,17 +2505,17 @@ function planScopeMigration(file, store, at) {
     for (const g of GROUPS) {
       if (!g.filled(old))
         continue;
-      const scope = isObject2(config.chats) && isObject2(config.chats[chatId]) ? config.chats[chatId] : null;
+      const scope = isObject3(config.chats) && isObject3(config.chats[chatId]) ? config.chats[chatId] : null;
       if (scope) {
         if (!g.empty(scope))
           continue;
         config.chats = { ...config.chats, [chatId]: { ...scope, ...pick(old, g.keys) } };
         changed = true;
       } else {
-        const base = isObject2(config.defaults) ? config.defaults : {};
+        const base = isObject3(config.defaults) ? config.defaults : {};
         if (!g.empty(base) && JSON.stringify(pick(base, g.keys)) === JSON.stringify(pick(old, g.keys)))
           continue;
-        config.chats = { ...isObject2(config.chats) ? config.chats : {}, [chatId]: { ...base, ...pick(old, g.keys) } };
+        config.chats = { ...isObject3(config.chats) ? config.chats : {}, [chatId]: { ...base, ...pick(old, g.keys) } };
         changed = true;
       }
     }
@@ -2406,7 +2535,7 @@ function planScopeMigration(file, store, at) {
     }
   }
   if (doTags && names.size) {
-    const para = isObject2(config.paragraph) ? config.paragraph : {};
+    const para = isObject3(config.paragraph) ? config.paragraph : {};
     const have = typeof para.keepTags === "string" ? para.keepTags : "";
     const haveNames = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
     const add = [...names].filter((n) => !haveNames.has(n));
@@ -2467,7 +2596,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.9";
+var SELF_VERSION = "0.5.10";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -2558,7 +2687,7 @@ spindle.on("GENERATION_ENDED", (payload) => {
   if (payload?.chatId)
     generationActive.delete(payload.chatId);
 });
-var isObject3 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var isObject4 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 async function projectionFor(uid, chatId) {
   const store = await loadStore(uid);
   const cfg = (await readTtConfig(uid)).config;
@@ -2567,15 +2696,15 @@ async function projectionFor(uid, chatId) {
 async function refreshPub(uid, chatId, raw) {
   if (!raw.id || typeof raw.content !== "string")
     return;
-  const meta = raw.metadata ?? (isObject3(raw.extra?.spindle_metadata) ? raw.extra.spindle_metadata : undefined);
-  const st = isObject3(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : null;
-  const tt = isObject3(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
+  const meta = raw.metadata ?? (isObject4(raw.extra?.spindle_metadata) ? raw.extra.spindle_metadata : undefined);
+  const st = isObject4(meta?.[METADATA_KEY]) ? meta[METADATA_KEY] : null;
+  const tt = isObject4(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
   if (!st?.pub && !tt)
     return;
   const proj = await projectionFor(uid, chatId);
   const swipe = Number.isInteger(raw.swipe_id) ? raw.swipe_id : 0;
   const want = proj.publish ? buildPubFromTt(raw.content, tt?.[String(swipe)], proj.language, proj.kept, Date.now()) : null;
-  const have = isObject3(st?.pub) ? st.pub : null;
+  const have = isObject4(st?.pub) ? st.pub : null;
   if (!want && !have)
     return;
   if (want && have?.h === want.h)
@@ -2586,6 +2715,35 @@ async function refreshPub(uid, chatId, raw) {
   else
     delete merged.pub;
   const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: { [METADATA_KEY]: merged } } : { metadata: { ...meta ?? {}, [METADATA_KEY]: merged } };
+  await spindle.chat.updateMessage(chatId, raw.id, patch);
+}
+async function realignAfterDelete(uid, chatId, raw, deleted) {
+  if (!raw.id || !Number.isInteger(deleted) || !Array.isArray(raw.swipes) || raw.swipes.some((s) => typeof s !== "string"))
+    return;
+  const mark = deleteMark(deleted, raw.swipes);
+  let current;
+  for (const n of [20, 200, 2000]) {
+    const rows = await spindle.chat.getMessages(chatId, { tail: n });
+    current = rows.find((m) => m.id === raw.id);
+    if (current || rows.length < n)
+      break;
+  }
+  if (!current)
+    return;
+  const msg = eventMsg(current);
+  const meta = msg.metadata;
+  const tt = isObject4(meta?.[TT_KEY]) ? meta[TT_KEY] : null;
+  if (!tt || deleteSeen(meta, mark))
+    return;
+  if (!Array.isArray(msg.swipes) || deleteMark(deleted, msg.swipes) !== mark)
+    return;
+  const proj = await projectionFor(uid, chatId);
+  const swipes = raw.swipes;
+  const shifted = shiftAfterDelete(tt, deleted) ?? tt;
+  const next = reconcileTt(shifted, swipes, proj.kept) ?? shifted;
+  const swipeId = Number.isInteger(msg.swipe_id) ? msg.swipe_id : 0;
+  const changed = repairedKeys(TT_KEY, next, meta, { content: String(msg.content ?? ""), swipeId }, proj, mark);
+  const patch = hostCaps(spindle).metadataPatch ? { metadata_patch: changed } : { metadata: { ...meta ?? {}, ...changed } };
   await spindle.chat.updateMessage(chatId, raw.id, patch);
 }
 var wideReads = new WideReads;
@@ -2608,6 +2766,10 @@ for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAG
     forwardMessage(userId, payload.chatId, message).catch((e) => spindle.log.warn(`[translator] message event not forwarded: ${errorText(e)}`));
     if (event === "MESSAGE_SENT")
       return;
+    if (event === "MESSAGE_SWIPED" && payload.action === "deleted") {
+      realignAfterDelete(userId, payload.chatId, message, payload.swipeId).catch((e) => spindle.log.warn(`[translator] swipe delete not followed: ${errorText(e)}`));
+      return;
+    }
     refreshPub(userId, payload.chatId, message).catch((e) => spindle.log.warn(`[translator] pub refresh failed: ${errorText(e)}`));
   });
 }
