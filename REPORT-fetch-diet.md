@@ -100,9 +100,9 @@
 실행한 기존 스크립트:
 
 ```sh
-PATH=~/.bun/bin:$PATH npm test
-PATH=~/.bun/bin:$PATH npm run typecheck
-PATH=~/.bun/bin:$PATH npm run build
+PATH=$HOME/.bun/bin:$PATH npm test
+PATH=$HOME/.bun/bin:$PATH npm run typecheck
+PATH=$HOME/.bun/bin:$PATH npm run build
 git diff --check
 ```
 

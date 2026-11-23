@@ -8721,6 +8721,7 @@ function noticeSilentTranslate(e, timers) {
 }
 var mirrored = new WeakMap;
 var MIRROR = "data-lv-mirror";
+var DECOR = "data-lv-decor";
 var DOCUMENT_WIDE = "style, link, meta, base, title, script, template";
 function mirrorHtml(shadow) {
   const box = document.createElement("div");
@@ -8984,6 +8985,12 @@ function startDomBridge(root = document, options = {}) {
       return;
     for (const m of Array.from(root.querySelectorAll("[data-message-id]")))
       tag(m);
+    for (const el of Array.from(root.querySelectorAll('.mari-message-content [aria-hidden="true"]:not([translate])'))) {
+      if (el.closest(".ptx-view"))
+        continue;
+      el.setAttribute("translate", "no");
+      el.setAttribute(DECOR, "");
+    }
     for (const island of Array.from(root.querySelectorAll(".mari-message-content [data-lumiverse-html-island]"))) {
       if (!island.closest(".ptx-view"))
         syncMirror(island, queue, shadowObservers);
@@ -9033,6 +9040,10 @@ function startDomBridge(root = document, options = {}) {
       shadowObservers.clear();
       for (const m of Array.from(document.querySelectorAll(`[${MIRROR}]`)))
         m.remove();
+      for (const d of Array.from(document.querySelectorAll(`[${DECOR}]`))) {
+        d.removeAttribute("translate");
+        d.removeAttribute(DECOR);
+      }
       for (const el of added) {
         if (el.hasAttribute("data-ptx-host-button"))
           el.remove();

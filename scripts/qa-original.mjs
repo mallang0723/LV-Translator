@@ -1030,6 +1030,26 @@ check('0.5.10 (Sola easel): the nested title (heading + sub + turn) is still the
 check('0.5.10 (Sola easel): the one-level title (Mind) and the body keep their translation', sola.mind.every((t) => t.includes('번역')) && sola.body.every((t) => t.includes('번역')), JSON.stringify([sola.mind, sola.body]));
 check('0.5.10 (flex/grid cards): the <summary> row of a flex card keeps its children (the translated unit is layout-transparent), the icon keeps its size', sola.cxSummaryFlat && sola.cxIconBox === 20, JSON.stringify([sola.cxSummaryFlat, sola.cxSummaryChildren, sola.cxIconBox]));
 check('0.5.10 (flex/grid cards): choice text inside a flex pane is translated in place and not squeezed (wide, not wrapped letter by letter)', sola.cxRowText.length === 2 && sola.cxRowText.every(([tx, w]) => tx.includes('번역') && w > 150), JSON.stringify(sola.cxRowText));
+// A plain (light DOM) message follows the same rule: aria-hidden decoration is not translated, the paragraphs are
+await page2.evaluate(() => {
+  window.__cleanup();
+  window.__messages.push({ id: 'm16L', role: 'assistant', content: 'Plain prose of a normal message.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm16L');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="b17"><p>Plain prose of a normal message.</p><div class="lf" aria-hidden="true"><b>A</b><b>B</b><b>C</b><b>D</b><b>E</b><b>F</b><b>G</b><b>H</b></div><p>A second paragraph of the same message.</p></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(1500);
+await page2.locator('[data-message-id="m16L"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m16L"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(1500);
+const lightDecor = await page2.evaluate(() => {
+  const v = document.querySelector('[data-message-id="m16L"] .ptx-view');
+  const shown = (sel) => [...(v?.querySelectorAll(sel) ?? [])].filter((x) => !x.closest('.ptx-o')).map((x) => (x.textContent ?? '').replace(/\s+/g, ' ').trim());
+  return { letters: shown('.lf b'), paras: shown('.ptx-u').filter((t) => t.length > 8 && !/^[A-H]+$/.test(t)) };
+});
+check('0.5.10 (plain message): aria-hidden decoration (letters A-H) is kept as written, the paragraphs are translated', lightDecor.letters.join('') === 'ABCDEFGH' && lightDecor.letters.length === 8 && lightDecor.paras.length >= 2 && lightDecor.paras.every((t) => t.includes('번역')), JSON.stringify(lightDecor));
 if (process.env.QA_STOP_AFTER_SOLA) { console.log(failures.length ? 'FAILING' : 'OK'); await browser.close(); process.exit(failures.length ? 1 : 0); }
 await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m16"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm16'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
 // ---- 0.5.6: a message translated while NOT on screen (generation end, "translate all", catch-up) is later shown with the same cells ----

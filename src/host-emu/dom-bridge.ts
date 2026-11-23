@@ -133,6 +133,7 @@ function noticeSilentTranslate(e: MouseEvent, timers: Map<string, ReturnType<typ
  */
 const mirrored = new WeakMap<Element, string>();
 const MIRROR = 'data-lv-mirror';
+const DECOR = 'data-lv-decor';
 /**
  * Elements that act on the WHOLE document once they sit in the light DOM (a shadow root scopes them; the mirror does not). The mirror
  * never carries them: a `<style>` in it would apply Lumiverse's island CSS (`p`, `img`, `*`...) and a card's own rules to the entire app,
@@ -422,6 +423,12 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
   function scan(): void {
     if (destroyed) return;
     for (const m of Array.from(root.querySelectorAll('[data-message-id]'))) tag(m);
+    // Same rule as in an island's mirror (mirrorHtml): decoration hidden from readers is not text to translate, in a plain message too.
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('.mari-message-content [aria-hidden="true"]:not([translate])'))) {
+      if (el.closest('.ptx-view')) continue;
+      el.setAttribute('translate', 'no');
+      el.setAttribute(DECOR, '');
+    }
     for (const island of Array.from(root.querySelectorAll<HTMLElement>('.mari-message-content [data-lumiverse-html-island]'))) {
       if (!island.closest('.ptx-view')) syncMirror(island, queue, shadowObservers);
     }
@@ -463,6 +470,10 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
       for (const o of shadowObservers.values()) o.disconnect();
       shadowObservers.clear();
       for (const m of Array.from(document.querySelectorAll(`[${MIRROR}]`))) m.remove();
+      for (const d of Array.from(document.querySelectorAll(`[${DECOR}]`))) {
+        d.removeAttribute('translate');
+        d.removeAttribute(DECOR);
+      }
       for (const el of added) {
         if (el.hasAttribute('data-ptx-host-button')) el.remove();
         else el.classList.remove('mari-message-content', 'mari-message-actions');
