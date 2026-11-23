@@ -871,6 +871,53 @@ check('0.5.4: showing the original, the islands are the original ones and the mi
   await page2.evaluate(() => { window.__cleanup = window.__LVSetup(window.__ctx); });
 }
 await page2.evaluate(() => { document.querySelector('#pageui')?.remove(); document.querySelector('[data-message-id="m15"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm15'), 1); });
+// ---- 0.5.10: Sola V5 cards (Board / Easel), structure only. aria-hidden decoration is not text to translate; nested inline spans in a <summary> keep their title ----
+const SOLA_CSS = process.env.QA_SOLA_CSS ? readFileSync(process.env.QA_SOLA_CSS, 'utf8') : ''; // local probe only: a preset's real CSS is not kept in this repository
+await page2.evaluate((solaCss) => {
+  window.__cleanup();
+  const bs = (s) => s.split('').map((c) => `<b>${c}</b>`).join('');
+  const board = `<style>.sb-files,.sb-ranks{display:grid;grid-template-columns:repeat(8,1fr)} .sb-files b{text-align:center}</style><details open class="sola-card-board"><summary class="sola-drawer-summary"><div class="sola-drawer-title"><span class="sb-tt"><span class="sola-board-heading">Sola’s Board <span class="sb-count" aria-label="pieces in play">12 / 32</span></span><span class="sola-board-sub">The world beyond the scene</span></span></div><span class="sola-drawer-chevron" aria-hidden="true"></span></summary><div class="sb-body"><p class="sb-cap">The world keeps moving, even when the scene looks elsewhere.</p><div class="sb-b" role="group"><div class="sb-ranks" aria-hidden="true">${bs('87654321')}</div><div class="sb-files" aria-hidden="true">${bs('ABCDEFGH')}</div></div></div></details>`;
+  const easel = `<style>${solaCss}</style><details open class="sola-card-easel"><summary class="sola-drawer-summary"><span class="sola-drawer-title"><svg class="sola-ec-icon" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14"/></svg><span class="sola-ec-title"><span class="sola-ec-label-heading">Sola’s Easel</span><span class="sola-ec-label-sub">The Director’s Chart<span class="sola-ec-turn">12</span></span></span></span><span class="sola-ec-badge">DIRECTOR SPOILERS</span><span class="sola-drawer-chevron" aria-hidden="true"></span></summary><div class="sola-easel-body"><p>Private review outside story canon.</p></div></details><details open class="sola-card-mind"><summary class="sola-drawer-summary"><span class="sola-drawer-title"><span class="sola-ec-title">Sola’s Mind</span></span><span class="sola-drawer-chevron" aria-hidden="true"></span></summary><div><p>Quiet thoughts of the story.</p></div></details>`;
+  const cxg = `<style>details.cxg>summary{display:flex;align-items:center;gap:13px;padding:9px 18px}.cxg-rows{display:grid;gap:6px}.cxg-pane{display:flex;flex-direction:column;gap:2px;padding:9px 14px}.cxg-lean::before{content:"The bold road"}.cxg-ico{width:20px;height:20px}</style><div class="cxg-wrap"><details class="cxg" open><summary><svg class="cxg-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg><span class="cxg-titles"><span class="cxg-title">Crossroads</span><span class="cxg-sub">Choose a road</span></span><span class="cxg-chev" aria-hidden="true"></span></summary><div class="cxg-body"><div class="cxg-rows"><span class="cxg-row"><span class="cxg-pane"><span class="cxg-lean"></span><span class="cxg-t">Follow the left road toward the old mill</span></span></span><span class="cxg-row"><span class="cxg-pane"><span class="cxg-lean"></span><span class="cxg-t">Wait quietly by the stone bridge</span></span></span></div></div></details></div>`;
+  window.__messages.push({ id: 'm16', role: 'assistant', content: 'Opening prose of the scene.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm16');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="b16"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  const isl = (html) => { const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', ''); d.attachShadow({ mode: 'open' }).innerHTML = html; return d; };
+  const p = document.createElement('p'); p.textContent = 'Opening prose of the scene.';
+  row.querySelector('.b16').append(p, isl(board), isl(easel), isl(cxg));
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+}, SOLA_CSS);
+await page2.waitForTimeout(1500);
+await page2.locator('[data-message-id="m16"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m16"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(1500);
+const sola = await page2.evaluate(() => {
+  const views = [...document.querySelectorAll('[data-message-id="m16"] .ptx-view [data-lumiverse-html-island]')].map((e) => e.shadowRoot);
+  const [b, e, cx] = views;
+  const shown = (r, sel) => [...(r?.querySelectorAll(sel) ?? [])].filter((x) => !x.closest('.ptx-o')); // the hidden original copy of a unit (.ptx-o) is not what is drawn
+  const txt = (r, sel) => shown(r, sel).map((x) => (x.textContent ?? '').replace(/\s+/g, ' ').trim());
+  const vis = (r, sel) => shown(r, sel).map((x) => { const q = x.getBoundingClientRect(); const cs = getComputedStyle(x); return q.width > 0 && q.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) > 0; });
+  const box = (r, sel) => shown(r, sel).map((x) => { const q = x.getBoundingClientRect(); const cs = getComputedStyle(x); return [Math.round(q.width), Math.round(q.height), cs.color, cs.fontSize]; });
+  return {
+    files: txt(b, '.sb-files b'), ranks: txt(b, '.sb-ranks b'), cap: txt(b, '.sb-cap'), boardTitle: txt(b, '.sb-tt'),
+    heading: txt(e, '.sola-ec-label-heading'), sub: txt(e, '.sola-ec-label-sub'), turn: txt(e, '.sola-ec-turn'), badge: txt(e, '.sola-ec-badge'), mind: txt(e, '.sola-card-mind .sola-ec-title'),
+    headingBox: box(e, '.sola-ec-label-heading'), headingVisible: vis(e, '.sola-ec-label-heading'), subVisible: vis(e, '.sola-ec-label-sub'), body: txt(e, '.sola-easel-body'),
+    cxSummaryFlat: !!cx?.querySelector('details.cxg > summary > .ptx-u.is-flat'), cxSummaryChildren: [...(cx?.querySelectorAll('details.cxg > summary > *') ?? [])].filter((x) => !x.closest('.ptx-o')).map((x) => x.className),
+    cxRowText: shown(cx, '.cxg-t').map((x) => [x.textContent, Math.round(x.getBoundingClientRect().width)]), cxIconBox: Math.round(cx?.querySelector('details.cxg > summary svg')?.getBoundingClientRect().width ?? -1),
+    summaryHtml: e?.querySelector('.sola-card-easel summary')?.innerHTML.slice(0, 700),
+  };
+});
+if (process.env.QA_DEBUG) console.log('DEBUG sola', JSON.stringify(sola));
+check('0.5.10 (Sola board): the file letters stay eight separate labels, as written (aria-hidden decoration is not translated)', sola.files.join('') === 'ABCDEFGH' && sola.files.length === 8 && sola.ranks.length === 8, JSON.stringify(sola.files));
+check('0.5.10 (Sola board): the caption and title are still translated', sola.cap.every((t) => t.includes('번역')) && sola.boardTitle.some((t) => t.includes('번역')), JSON.stringify([sola.cap, sola.boardTitle]));
+check('0.5.10 (Sola easel): the nested title (heading + sub + turn) is still there and visible, translated, with its inline structure', sola.heading.length === 1 && sola.heading[0].length > 0 && sola.sub.length === 1 && sola.headingVisible[0] === true && sola.subVisible[0] === true && sola.turn.length === 1, JSON.stringify(sola));
+check('0.5.10 (Sola easel): the one-level title (Mind) and the body keep their translation', sola.mind.every((t) => t.includes('번역')) && sola.body.every((t) => t.includes('번역')), JSON.stringify([sola.mind, sola.body]));
+check('0.5.10 (flex/grid cards): the <summary> row of a flex card keeps its children (the translated unit is layout-transparent), the icon keeps its size', sola.cxSummaryFlat && sola.cxIconBox === 20, JSON.stringify([sola.cxSummaryFlat, sola.cxSummaryChildren, sola.cxIconBox]));
+check('0.5.10 (flex/grid cards): choice text inside a flex pane is translated in place and not squeezed (wide, not wrapped letter by letter)', sola.cxRowText.length === 2 && sola.cxRowText.every(([tx, w]) => tx.includes('번역') && w > 150), JSON.stringify(sola.cxRowText));
+if (process.env.QA_STOP_AFTER_SOLA) { console.log(failures.length ? 'FAILING' : 'OK'); await browser.close(); process.exit(failures.length ? 1 : 0); }
+await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m16"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm16'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
 // ---- 0.5.6: a message translated while NOT on screen (generation end, "translate all", catch-up) is later shown with the same cells ----
 // The original splits an off-screen message from its SOURCE text (fallbackRoot: blank lines only, tags stripped) but the reading view keys the RENDERED
 // cells, so a block tag that touches text with no blank line made one source unit and two cells: the key matched nothing and the English showed.

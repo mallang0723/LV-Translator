@@ -8614,6 +8614,8 @@ function mirrorHtml(shadow) {
     box.append(node.cloneNode(true));
   for (const el of Array.from(box.querySelectorAll(DOCUMENT_WIDE)))
     el.remove();
+  for (const el of Array.from(box.querySelectorAll('[aria-hidden="true"]')))
+    el.setAttribute("translate", "no");
   return box.innerHTML;
 }
 function syncMirror(island, onChange, observers) {
@@ -8677,6 +8679,17 @@ function renderInlineMarkdown(root) {
     node.replaceWith(frag);
   }
 }
+function flattenInShadow(shadow) {
+  for (const unit of Array.from(shadow.querySelectorAll(".ptx-u[data-k]:not(.is-flat)"))) {
+    const parent = unit.parentElement;
+    if (!parent || !/flex|grid/.test(getComputedStyle(parent).display))
+      continue;
+    unit.classList.add("is-flat");
+    unit.classList.remove("is-open");
+    for (const attr of ["role", "tabindex", "aria-expanded"])
+      unit.removeAttribute(attr);
+  }
+}
 function restoreIslands(view) {
   const host = view._ptxFor;
   if (!host?.isConnected)
@@ -8698,6 +8711,7 @@ function restoreIslands(view) {
       shadow.append(...styles, style, ...Array.from(mirror.childNodes));
       mirror.remove();
       renderInlineMarkdown(shadow);
+      flattenInShadow(shadow);
       shadow.addEventListener("click", (e) => {
         const t = e.target;
         const u = t?.closest?.(".ptx-u[data-k]:not(.is-flat)");

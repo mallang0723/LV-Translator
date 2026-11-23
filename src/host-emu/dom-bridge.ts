@@ -80,6 +80,9 @@ function mirrorHtml(shadow: ShadowRoot): string {
   const box = document.createElement('div');
   for (const node of Array.from(shadow.childNodes)) box.append(node.cloneNode(true));
   for (const el of Array.from(box.querySelectorAll(DOCUMENT_WIDE))) el.remove();
+  // Decoration a card hides from readers (`aria-hidden="true"`: board file letters A-H, icons' labels) is not text to translate. The original
+  // skips `translate="no"` elements; without it a row of one-letter labels is one unit whose translation joins them ("ABCDEFGH").
+  for (const el of Array.from(box.querySelectorAll('[aria-hidden="true"]'))) el.setAttribute('translate', 'no');
   return box.innerHTML;
 }
 
@@ -146,6 +149,23 @@ export function renderInlineMarkdown(root: ParentNode): void {
   }
 }
 
+/**
+ * The original makes a translated paragraph layout-transparent (`is-flat`, no tap toggle) when its parent is a flex or grid container, so a
+ * card laid out by CSS (a `<summary>` row, a choice pane) keeps the children it was laid out for (markFlat in the original). It reads the
+ * parent's computed display in the LIGHT DOM mirror, where the island's CSS is not applied (see DOCUMENT_WIDE), so for an island it never
+ * sees a flex/grid parent and the unit's wrapper becomes the container's only child: icons grow, titles drop, labels wrap letter by letter.
+ * Once the translated clone is in the island's shadow root with the card's own CSS, the same rule is applied there.
+ */
+function flattenInShadow(shadow: ShadowRoot): void {
+  for (const unit of Array.from(shadow.querySelectorAll<HTMLElement>('.ptx-u[data-k]:not(.is-flat)'))) {
+    const parent = unit.parentElement;
+    if (!parent || !/flex|grid/.test(getComputedStyle(parent).display)) continue;
+    unit.classList.add('is-flat');
+    unit.classList.remove('is-open');
+    for (const attr of ['role', 'tabindex', 'aria-expanded']) unit.removeAttribute(attr);
+  }
+}
+
 function restoreIslands(view: HTMLElement & { _ptxFor?: HTMLElement }): void {
   const host = view._ptxFor;
   if (!host?.isConnected) return;
@@ -166,6 +186,7 @@ function restoreIslands(view: HTMLElement & { _ptxFor?: HTMLElement }): void {
       shadow.append(...styles, style, ...Array.from(mirror.childNodes));
       mirror.remove();
       renderInlineMarkdown(shadow);
+      flattenInShadow(shadow);
       // Tap a translated paragraph to see the original (the page-level handler cannot see through the shadow root).
       shadow.addEventListener('click', (e) => {
         const t = e.target as Element | null;
