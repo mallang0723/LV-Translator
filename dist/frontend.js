@@ -1314,6 +1314,10 @@ var DEFAULT_SETTINGS = {
   freeContext: "",
   incomingVoiceEnabled: false,
   incomingVoicePrompt: "",
+  voiceFrom: "",
+  voiceBackupSaved: false,
+  voiceBackupPrompt: "",
+  voiceBackupEnabled: false,
   contextEnabled: false,
   contextIncludeOriginal: true,
   contextIncludeTranslation: true,
@@ -1350,10 +1354,32 @@ function outgoingBundleBlocks(bundle) {
 ${pairs.map((p) => `${p.left} = ${p.right}`).join(`
 `)}` : "",
     bundle.freeContext.trim() ? `## Additional guidance
-${bundle.freeContext.trim()}` : "",
-    bundle.incomingVoicePrompt.trim() ? `## Speaker voice guidance (how each speaker talks; keep it when it applies)
-${bundle.incomingVoicePrompt.trim()}` : ""
+${bundle.freeContext.trim()}` : ""
   ].filter(Boolean);
+}
+function planRoomVoice(bundleId, bundles, room, voice) {
+  const known = bundles.find((b) => b.id === bundleId);
+  const target = known ? bundleId : "";
+  if (target === voice.from)
+    return { ...room, voice, restored: false, applied: false, replaced: false };
+  let { prompt, enabled } = room;
+  let restored = false;
+  if (voice.from && voice.backupSaved) {
+    prompt = voice.backupPrompt;
+    enabled = voice.backupEnabled;
+    restored = true;
+  }
+  let next = { from: target, backupSaved: false, backupPrompt: "", backupEnabled: false };
+  let applied = false;
+  let replaced = false;
+  if (known && known.incomingVoicePrompt.trim()) {
+    next = { from: target, backupSaved: true, backupPrompt: prompt, backupEnabled: enabled };
+    replaced = prompt.trim() !== "";
+    prompt = known.incomingVoicePrompt;
+    enabled = true;
+    applied = true;
+  }
+  return { prompt, enabled, voice: next, restored, applied, replaced };
 }
 
 // src/connection.ts
@@ -8594,6 +8620,7 @@ var nameOf = (part) => {
 };
 var isThink = (part) => THINK_TAGS.includes(nameOf(part));
 var LIMIT = 500;
+var USER_KEEP_TAGS_MAX = LIMIT - THINK_TAGS.join(" ").length - 1;
 function withThinkTags(raw) {
   return [...THINK_TAGS, String(raw ?? "").trim()].filter(Boolean).join(" ");
 }
@@ -8777,8 +8804,15 @@ function watchActionState(view, host, watchers) {
   watchers.set(view, stop);
   sync();
 }
+var HOLD_CLICK_MS = 1200;
 function makeRegexActionForwarder(watchers) {
-  return function forwardRegexAction(e) {
+  let lastPointer = "mouse";
+  let held = null;
+  const onPointer = (e) => {
+    lastPointer = e.pointerType || "mouse";
+  };
+  window.addEventListener("pointerdown", onPointer, true);
+  const forward = function forwardRegexAction(e) {
     if (e instanceof KeyboardEvent && e.key !== "Enter" && e.key !== " ")
       return;
     const path = e.composedPath();
@@ -8794,11 +8828,17 @@ function makeRegexActionForwarder(watchers) {
       return;
     e.preventDefault();
     e.stopPropagation();
+    if (e.type === "click" && held && held.el === copy && Date.now() < held.until) {
+      held = null;
+      return;
+    }
+    held = e.type === "contextmenu" && lastPointer !== "mouse" ? { el: copy, until: Date.now() + HOLD_CLICK_MS } : null;
     const init = { bubbles: true, composed: true, cancelable: true };
     const again = e instanceof KeyboardEvent ? new KeyboardEvent(e.type, { ...init, key: e.key, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, altKey: e.altKey }) : new MouseEvent(e.type, { ...init, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, altKey: e.altKey, button: e.button, clientX: e.clientX, clientY: e.clientY });
     real.dispatchEvent(again);
     watchActionState(view, host, watchers);
   };
+  return Object.assign(forward, { dispose: () => window.removeEventListener("pointerdown", onPointer, true) });
 }
 var EXAMPLES = { "원문 (예: Marinara)": "원문 (예: Lumiverse)", "번역 (예: 마리나라)": "번역 (예: 루미버스)" };
 function swapExamples(root, swapped) {
@@ -9165,6 +9205,7 @@ function startDomBridge(root = document, options = {}) {
         window.removeEventListener(type, forwardRegexAction, true);
       for (const stop of Array.from(actionWatchers.values()))
         stop();
+      forwardRegexAction.dispose();
       document.removeEventListener("click", onContinueClick, true);
       document.removeEventListener("click", onTranslatePress, true);
       for (const t of noticeTimers.values())
@@ -10187,7 +10228,8 @@ function build(cls, hasChat) {
           <button type="button" class="${cls.button}" data-lv-bundle-edit>묶음 편집</button>
           <button type="button" class="${cls.button}" data-lv-bundle-delete>삭제</button>
         </div>
-        <p class="${cls.help}">묶음의 단어집·추가 지침·대사 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침·말투는 위의 원작 설정에서 합니다). 「새 묶음 만들기」는 위 원작 설정에 지금 적힌 내용(저장 전이어도)을 가져옵니다. 선택은 아래 저장 버튼으로 적용합니다.</p>
+        <p class="${cls.help}">묶음의 단어집·추가 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침은 위의 원작 설정에서 합니다). 묶음의 대사 지침은 묶음을 고르고 저장할 때 이 방의 위 「대사 지침」에 적혀 켜지고(응답 번역에 쓰입니다), 그동안 방에 있던 대사 지침은 묶음을 바꾸거나 「없음」으로 하면 되돌아옵니다. 「새 묶음 만들기」는 위 원작 설정에 지금 적힌 내용(저장 전이어도)을 가져옵니다. 선택은 아래 저장 버튼으로 적용합니다.</p>
+        <p class="${cls.help}" data-lv-voice-note hidden></p>
         <details data-lv-bundle-preview hidden><summary class="${cls.help}"></summary>
           <label class="${cls.label}">단어집</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="glossary" placeholder="내용 없음"></textarea>
           <label class="${cls.label}">추가 지침</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="freeContext" placeholder="내용 없음"></textarea>
@@ -10197,51 +10239,106 @@ function build(cls, hasChat) {
       </section>`;
 }
 var TAG_LINE = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/;
-function splitTagRules(rules) {
-  const tags = [];
-  const rest = [];
-  for (const line of rules.split(/\r?\n/)) {
-    const m = TAG_LINE.exec(line);
-    if (m)
-      tags.push(m[1].toLowerCase());
-    else
-      rest.push(line);
-  }
-  return { rest: tags.length ? rest.join(`
-`).replace(/^\s*\n+|\n+\s*$/g, "") : rules, tags: [...new Set(tags)] };
-}
 function mergeKeepTags(have, names) {
   const known = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
   const add = names.filter((n) => !known.has(n));
   return add.length ? [have.trim(), ...add].filter(Boolean).join(" ") : have;
 }
 var MOVED_NOTICE = "태그는 위 「번역에서 제외할 태그」로 옮겼습니다.";
-function noticeAfterSave(form, text) {
+var KEEP_TAGS_MAX = USER_KEEP_TAGS_MAX;
+function planTagMove(rules, keepText, max = KEEP_TAGS_MAX) {
+  const lines = rules.split(/\r?\n/);
+  let keep = keepText;
+  const moved = [];
+  const stayed = [];
+  const out = [];
+  for (const line of lines) {
+    const m = TAG_LINE.exec(line);
+    if (!m) {
+      out.push(line);
+      continue;
+    }
+    const name = m[1].toLowerCase();
+    if (moved.includes(name))
+      continue;
+    const next = mergeKeepTags(keep, [name]);
+    if (next.length > max && next !== keep) {
+      if (!stayed.includes(name))
+        stayed.push(name);
+      out.push(line);
+      continue;
+    }
+    keep = next;
+    moved.push(name);
+  }
+  return { rest: moved.length ? out.join(`
+`).replace(/^\s*\n+|\n+\s*$/g, "") : rules, keep, moved, stayed };
+}
+var stayedNotice = (names) => `${names.map((t) => `<${t}>`).join(" ")}: 「번역에서 제외할 태그」가 길이 한도(${KEEP_TAGS_MAX}자)를 넘어 옮기지 못했습니다. 제외 규칙에 그대로 두었고 그대로 동작합니다.`;
+function savedResult(form) {
   const status = form.querySelector("[data-tpg-status]");
-  if (!status)
-    return;
-  const done = () => {
-    if (status.dataset.kind !== "success")
-      return false;
-    if (!status.textContent?.includes(text))
-      status.textContent = `${status.textContent ?? ""} ${text}`.trim();
-    return true;
-  };
-  if (done())
-    return;
-  const o = new MutationObserver(() => {
-    if (done() || status.dataset.kind === "error")
-      o.disconnect();
+  return new Promise((resolve) => {
+    if (!status)
+      return resolve("timeout");
+    let o = null;
+    const finish = (r) => {
+      o?.disconnect();
+      resolve(r);
+    };
+    const check = () => {
+      if (status.dataset.kind === "success")
+        finish("success");
+      else if (status.dataset.kind === "error")
+        finish("error");
+    };
+    o = new MutationObserver(check);
+    o.observe(status, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["data-kind"] });
+    setTimeout(() => finish("timeout"), 8000);
+    check();
   });
-  o.observe(status, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["data-kind"] });
-  setTimeout(() => o.disconnect(), 6000);
+}
+function appendStatus(form, text) {
+  const status = form.querySelector("[data-tpg-status]");
+  if (status && !status.textContent?.includes(text))
+    status.textContent = `${status.textContent ?? ""} ${text}`.trim();
 }
 function formGuides(form) {
   const text = (name) => form.elements.namedItem(name)?.value ?? "";
   return { glossary: text("glossary"), freeContext: text("freeContext"), incomingVoicePrompt: text("incomingVoicePrompt") };
 }
+var voiceFields = (form) => ({
+  text: form.elements.namedItem("incomingVoicePrompt"),
+  on: form.elements.namedItem("incomingVoiceEnabled")
+});
+function describeVoice(plan, bundleName, saved) {
+  const parts = [];
+  if (plan.restored)
+    parts.push(saved ? "이 방의 「대사 지침」을 묶음 적용 전 값으로 되돌렸습니다." : "저장하면 이 방의 「대사 지침」이 묶음 적용 전 값으로 되돌아옵니다.");
+  if (plan.applied) {
+    parts.push(saved ? `묶음 「${bundleName}」의 대사 지침을 이 방의 「대사 지침」에 적고 켰습니다(응답 번역에 쓰입니다).` : `저장하면 묶음 「${bundleName}」의 대사 지침이 이 방의 「대사 지침」에 적히고 켜집니다(응답 번역에 쓰입니다).`);
+    if (plan.replaced)
+      parts.push("이 방에 있던 대사 지침은 묶음을 바꾸거나 「없음」으로 하면 되돌아옵니다.");
+  }
+  return parts.join(" ");
+}
+function previewVoice(form) {
+  const note = form.querySelector("[data-lv-voice-note]");
+  if (!note)
+    return;
+  const f = voiceFields(form);
+  const st = hostRef?.state();
+  if (!f.text || !f.on || !st?.ready)
+    return;
+  const id = form.querySelector('[name="lv:bundleId"]').value;
+  const plan = planRoomVoice(id, st.bundles, { prompt: f.text.value, enabled: f.on.checked }, st.values.voice);
+  const text = describeVoice(plan, st.bundles.find((b) => b.id === id)?.name ?? "", false);
+  note.textContent = text;
+  note.hidden = !text;
+}
+var hostRef = null;
 var q = (form, name) => form.querySelector(`[name="lv:${name}"]`);
 function mountLvForm(root, host) {
+  hostRef = host;
   const bound = new WeakSet;
   const dirty = new WeakMap;
   const chatOf = new WeakMap;
@@ -10325,6 +10422,7 @@ function mountLvForm(root, host) {
       protectCode: checked("protectCode"),
       excludeRules: q(form, "excludeRules").value,
       bundleId: q(form, "bundleId").value,
+      voice: host.state().values.voice,
       asDefault: form.querySelector('[name="lv:asDefault"]')?.checked === true
     };
   }
@@ -10353,8 +10451,10 @@ function mountLvForm(root, host) {
         if (!t?.closest?.("[data-lv-sections]"))
           return;
         dirty.set(form, true);
-        if (t.name === "lv:bundleId")
+        if (t.name === "lv:bundleId") {
           syncBundle(form);
+          previewVoice(form);
+        }
       });
       form.addEventListener("click", (e) => {
         const t = e.target?.closest?.("button");
@@ -10377,7 +10477,12 @@ function mountLvForm(root, host) {
         event.preventDefault();
         event.stopImmediatePropagation();
         (async () => {
-          let moved = { rest: "", tags: [] };
+          let plan = { rest: "", keep: "", moved: [], stayed: [] };
+          let values;
+          let voicePlan = null;
+          let voiceBefore = null;
+          const keepField = form.elements.namedItem("paraKeepTags");
+          const keepBefore = keepField?.value ?? "";
           const button = form.querySelector(".tpg-save");
           if (button) {
             button.disabled = true;
@@ -10385,10 +10490,14 @@ function mountLvForm(root, host) {
           }
           setStatus(form, "설정을 저장하고 있습니다.");
           try {
-            const values = read(form);
-            moved = splitTagRules(values.excludeRules);
-            if (moved.tags.length)
-              values.excludeRules = moved.rest;
+            values = read(form);
+            plan = planTagMove(values.excludeRules, keepBefore);
+            const vf = voiceFields(form);
+            voiceBefore = { prompt: vf.text?.value ?? "", enabled: vf.on?.checked ?? false, voice: values.voice };
+            if (vf.text && vf.on) {
+              voicePlan = planRoomVoice(values.bundleId, s.bundles, { prompt: vf.text.value, enabled: vf.on.checked }, values.voice);
+              values = { ...values, voice: voicePlan.voice };
+            }
             await host.save(values);
           } catch (e) {
             setStatus(form, e instanceof Error && e.message ? e.message : "설정을 저장하지 못했습니다.", "error");
@@ -10399,17 +10508,23 @@ function mountLvForm(root, host) {
             return;
           }
           const note = form.querySelector("[data-lv-tag-moved]");
-          if (moved.tags.length) {
-            const keep = form.elements.namedItem("paraKeepTags");
-            if (keep)
-              keep.value = mergeKeepTags(keep.value, moved.tags);
-            q(form, "excludeRules").value = moved.rest;
-            if (note) {
-              note.textContent = `${MOVED_NOTICE} (${moved.tags.map((t) => `<${t}>`).join(" ")})`;
-              note.hidden = false;
+          const say = (text) => {
+            if (!note)
+              return;
+            note.textContent = text;
+            note.hidden = !text;
+          };
+          say("");
+          if (keepField && plan.moved.length)
+            keepField.value = plan.keep;
+          const voiceChanged = !!voicePlan && (voicePlan.applied || voicePlan.restored);
+          if (voicePlan && voiceChanged) {
+            const vf = voiceFields(form);
+            if (vf.text && vf.on) {
+              vf.text.value = voicePlan.prompt;
+              vf.on.checked = voicePlan.enabled;
+              vf.on.dispatchEvent(new Event("change", { bubbles: true }));
             }
-          } else if (note) {
-            note.hidden = true;
           }
           dirty.set(form, false);
           const asDefault = form.querySelector('[name="lv:asDefault"]');
@@ -10425,8 +10540,48 @@ function mountLvForm(root, host) {
           } finally {
             bypass.delete(form);
           }
-          if (moved.tags.length)
-            noticeAfterSave(form, MOVED_NOTICE);
+          if (!plan.moved.length && !plan.stayed.length && !voiceChanged)
+            return;
+          const result = await savedResult(form);
+          if (stopped || !form.isConnected)
+            return;
+          if (result !== "success") {
+            if (keepField && plan.moved.length)
+              keepField.value = keepBefore;
+            if (voiceChanged && voiceBefore) {
+              const vf = voiceFields(form);
+              if (vf.text && vf.on) {
+                vf.text.value = voiceBefore.prompt;
+                vf.on.checked = voiceBefore.enabled;
+                vf.on.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+              await host.save({ ...values, voice: voiceBefore.voice, asDefault: false }).catch(() => {});
+            }
+            dirty.set(form, true);
+            return;
+          }
+          if (voicePlan && voiceChanged) {
+            const vn = form.querySelector("[data-lv-voice-note]");
+            const msg = describeVoice(voicePlan, s.bundles.find((b) => b.id === values.bundleId)?.name ?? "", true);
+            if (vn) {
+              vn.textContent = msg;
+              vn.hidden = !msg;
+            }
+            appendStatus(form, msg);
+          }
+          const texts = [];
+          if (plan.moved.length) {
+            q(form, "excludeRules").value = plan.rest;
+            texts.push(`${MOVED_NOTICE} (${plan.moved.map((t) => `<${t}>`).join(" ")})`);
+            await host.save({ ...values, excludeRules: plan.rest, asDefault: false }).catch(() => {});
+          }
+          if (plan.stayed.length)
+            texts.push(stayedNotice(plan.stayed));
+          say(texts.join(" "));
+          if (plan.moved.length)
+            appendStatus(form, MOVED_NOTICE);
+          if (plan.stayed.length)
+            appendStatus(form, stayedNotice(plan.stayed));
         })();
       }, true);
     }
@@ -10452,6 +10607,7 @@ function mountLvForm(root, host) {
     },
     stop() {
       stopped = true;
+      hostRef = null;
       observer.disconnect();
       for (const el of Array.from(root.querySelectorAll("[data-lv-sections]")))
         el.remove();
@@ -10842,7 +10998,7 @@ function setup(ctx) {
   }
   function lvState() {
     if (!store) {
-      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "" }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
+      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "", voice: { from: "", backupSaved: false, backupPrompt: "", backupEnabled: false } }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
     }
     const s = current();
     let bundleId = s.bundleId;
@@ -10859,7 +11015,7 @@ function setup(ctx) {
       ready: true,
       chatKey: chatId ?? "",
       hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId },
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId, voice: { from: s.voiceFrom, backupSaved: s.voiceBackupSaved, backupPrompt: s.voiceBackupPrompt, backupEnabled: s.voiceBackupEnabled } },
       connections: options,
       connectionNote: note,
       linkNote: link === "none" ? "" : link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.",
@@ -10901,7 +11057,11 @@ function setup(ctx) {
         protectCode: v.protectCode,
         excludeRules: v.excludeRules,
         bundleId: v.bundleId,
-        connectionId: v.connectionId
+        connectionId: v.connectionId,
+        voiceFrom: v.voice.from,
+        voiceBackupSaved: v.voice.backupSaved,
+        voiceBackupPrompt: v.voice.backupPrompt,
+        voiceBackupEnabled: v.voice.backupEnabled
       };
       await call("lv.save", [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
     }

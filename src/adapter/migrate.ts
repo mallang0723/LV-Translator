@@ -123,7 +123,7 @@ export function planScopeMigration(file: Record<string, unknown>, store: Store, 
     }
   }
   // 0.4.0's 「제외할 HTML 태그」 (and `<tag>` lines of its exclusion rules) is the original's 「번역에서 제외할 태그」 (paragraph.keepTags, global). The settings form
-  // does the same for a `<tag>` line typed now (lv-form.ts `splitTagRules`: moved on save, so the exclusion rules hold text rules only):
+  // does the same for a `<tag>` line typed now (lv-form.ts `planTagMove`: moved on save, so the exclusion rules hold text rules only):
   // the names are added to it (nothing the original already lists is removed or reordered).
   const names = new Set<string>();
   const addAll = (text: string) => {

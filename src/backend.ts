@@ -340,7 +340,9 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
       const id = typeof arg.connectionId === 'string' ? arg.connectionId.trim() : settings.connectionId;
       settings.connectionId = id;
       if (chatId) store.chats[chatId] = settings;
-      if (arg.asDefault || !chatId) store.defaults = settings;
+      // A chat's 대사 지침 bookkeeping belongs to that chat's own scope of the original: it is not copied into the new-chat defaults.
+      if (arg.asDefault && chatId) store.defaults = { ...settings, voiceFrom: '', voiceBackupSaved: false, voiceBackupPrompt: '', voiceBackupEnabled: false };
+      else if (!chatId) store.defaults = settings;
       else store.defaults = { ...store.defaults, connectionId: id };
       await saveStore(uid, store);
       reply({ ok: true, data: true });

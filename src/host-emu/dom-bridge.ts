@@ -172,8 +172,20 @@ function watchActionState(view: View, host: HTMLElement, watchers: Map<View, () 
   sync();
 }
 
+/**
+ * A touch long-press on a button reaches Lumiverse's own listener as `contextmenu` (which it treats like a right-click: queue instead of send), and
+ * the host's long-press controller (pointer events on the MessageContent element, which a press on the copy never reaches) would have swallowed
+ * the click that can follow the release. Without that controller here, the click that follows a touch `contextmenu` on the same button is not
+ * forwarded, so one hold is one activation (as in the host). A mouse right-click is not affected.
+ */
+const HOLD_CLICK_MS = 1200;
+
 function makeRegexActionForwarder(watchers: Map<View, () => void>) {
-  return function forwardRegexAction(e: Event): void {
+  let lastPointer = 'mouse';
+  let held: { el: HTMLElement; until: number } | null = null;
+  const onPointer = (e: Event) => { lastPointer = (e as PointerEvent).pointerType || 'mouse'; };
+  window.addEventListener('pointerdown', onPointer, true);
+  const forward = function forwardRegexAction(e: Event): void {
     if (e instanceof KeyboardEvent && e.key !== 'Enter' && e.key !== ' ') return;
     const path = e.composedPath();
     const copy = path.find((n): n is HTMLElement => n instanceof HTMLElement && n.hasAttribute(REGEX_ACTION));
@@ -185,6 +197,11 @@ function makeRegexActionForwarder(watchers: Map<View, () => void>) {
     if (!real) return;
     e.preventDefault();
     e.stopPropagation();
+    if (e.type === 'click' && held && held.el === copy && Date.now() < held.until) {
+      held = null;
+      return;
+    }
+    held = e.type === 'contextmenu' && lastPointer !== 'mouse' ? { el: copy, until: Date.now() + HOLD_CLICK_MS } : null;
     const init = { bubbles: true, composed: true, cancelable: true };
     const again = e instanceof KeyboardEvent
       ? new KeyboardEvent(e.type, { ...init, key: e.key, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, altKey: e.altKey })
@@ -192,6 +209,7 @@ function makeRegexActionForwarder(watchers: Map<View, () => void>) {
     real.dispatchEvent(again);
     watchActionState(view, host, watchers);
   };
+  return Object.assign(forward, { dispose: () => window.removeEventListener('pointerdown', onPointer, true) });
 }
 
 /**
@@ -608,6 +626,7 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
       document.removeEventListener('click', forwardLongMessageToggle, true);
       for (const type of ['click', 'keydown', 'contextmenu']) window.removeEventListener(type, forwardRegexAction, true);
       for (const stop of Array.from(actionWatchers.values())) stop();
+      forwardRegexAction.dispose();
       document.removeEventListener('click', onContinueClick, true);
       document.removeEventListener('click', onTranslatePress, true);
       for (const t of noticeTimers.values()) clearTimeout(t);

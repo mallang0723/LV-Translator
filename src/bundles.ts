@@ -57,12 +57,67 @@ export function deleteBundle(store: Store, id: string): void {
   }
 }
 
-/** What a bundle adds to the system prompt of "내 메시지 번역": its glossary, additional guidance and voice guidance (each only when it has content). */
-export function outgoingBundleBlocks(bundle: Pick<UserBundle, 'glossary' | 'freeContext' | 'incomingVoicePrompt'>): string[] {
+/** What a bundle adds to the system prompt of "내 메시지 번역": its glossary and additional guidance (each only when it has content). The 대사 지침 is not here: the original uses it for response translation only, so it goes to the room's own 「대사 지침」 (`planRoomVoice`). */
+export function outgoingBundleBlocks(bundle: Pick<UserBundle, 'glossary' | 'freeContext'>): string[] {
   const pairs = parseGlossary(bundle.glossary);
   return [
     pairs.length ? `## Glossary (apply in both directions)\n${pairs.map((p) => `${p.left} = ${p.right}`).join('\n')}` : '',
     bundle.freeContext.trim() ? `## Additional guidance\n${bundle.freeContext.trim()}` : '',
-    bundle.incomingVoicePrompt.trim() ? `## Speaker voice guidance (how each speaker talks; keep it when it applies)\n${bundle.incomingVoicePrompt.trim()}` : '',
   ].filter(Boolean);
+}
+
+/** The room's 「대사 지침」 bookkeeping: which bundle wrote it, and what was there before. */
+export interface RoomVoice {
+  from: string;
+  backupSaved: boolean;
+  backupPrompt: string;
+  backupEnabled: boolean;
+}
+
+export interface RoomVoicePlan {
+  /** The room's 대사 지침 text and switch after the save. */
+  prompt: string;
+  enabled: boolean;
+  voice: RoomVoice;
+  /** What happened, for the message to the user. */
+  restored: boolean;
+  applied: boolean;
+  /** The room had its own non-empty 대사 지침 that the bundle's now stands in for. */
+  replaced: boolean;
+}
+
+/**
+ * 관리자 결정 2026-11-25: a bundle's 대사 지침 is written into the room's own 「대사 지침」 (what the original's response translation reads) while the
+ * bundle is applied. When the room's bundle changes (another bundle, 없음, a deleted bundle): the previous value is put back first (only if the bundle had
+ * overwritten it), then the new bundle's voice prompt (when it has one) replaces the room's text and the switch is turned on, and the text it replaced is
+ * kept for the next change. A bundle with no 대사 지침 leaves the room's own alone. While the bundle stays the same nothing is touched (the room's text
+ * may be edited by hand).
+ */
+export function planRoomVoice(
+  bundleId: string,
+  bundles: ReadonlyArray<Pick<UserBundle, 'id' | 'incomingVoicePrompt'>>,
+  room: { prompt: string; enabled: boolean },
+  voice: RoomVoice,
+): RoomVoicePlan {
+  const known = bundles.find((b) => b.id === bundleId);
+  const target = known ? bundleId : '';
+  if (target === voice.from) return { ...room, voice, restored: false, applied: false, replaced: false };
+  let { prompt, enabled } = room;
+  let restored = false;
+  if (voice.from && voice.backupSaved) {
+    prompt = voice.backupPrompt;
+    enabled = voice.backupEnabled;
+    restored = true;
+  }
+  let next: RoomVoice = { from: target, backupSaved: false, backupPrompt: '', backupEnabled: false };
+  let applied = false;
+  let replaced = false;
+  if (known && known.incomingVoicePrompt.trim()) {
+    next = { from: target, backupSaved: true, backupPrompt: prompt, backupEnabled: enabled };
+    replaced = prompt.trim() !== '';
+    prompt = known.incomingVoicePrompt;
+    enabled = true;
+    applied = true;
+  }
+  return { prompt, enabled, voice: next, restored, applied, replaced };
 }

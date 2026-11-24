@@ -1514,6 +1514,10 @@ var DEFAULT_SETTINGS = {
   freeContext: "",
   incomingVoiceEnabled: false,
   incomingVoicePrompt: "",
+  voiceFrom: "",
+  voiceBackupSaved: false,
+  voiceBackupPrompt: "",
+  voiceBackupEnabled: false,
   contextEnabled: false,
   contextIncludeOriginal: true,
   contextIncludeTranslation: true,
@@ -1555,6 +1559,10 @@ function normalizeSettings(value, base = DEFAULT_SETTINGS, bundles = []) {
     freeContext: str(s.freeContext, base.freeContext),
     incomingVoiceEnabled: bool(s.incomingVoiceEnabled, base.incomingVoiceEnabled),
     incomingVoicePrompt: str(s.incomingVoicePrompt, base.incomingVoicePrompt),
+    voiceFrom: str(s.voiceFrom, ""),
+    voiceBackupSaved: bool(s.voiceBackupSaved, false),
+    voiceBackupPrompt: str(s.voiceBackupPrompt, ""),
+    voiceBackupEnabled: bool(s.voiceBackupEnabled, false),
     contextEnabled: bool(s.contextEnabled, base.contextEnabled),
     contextIncludeOriginal: bool(s.contextIncludeOriginal, base.contextIncludeOriginal),
     contextIncludeTranslation: bool(s.contextIncludeTranslation, base.contextIncludeTranslation),
@@ -1765,6 +1773,8 @@ function planGlossary(meta, text, now) {
 
 // src/adapter/think-tags.ts
 var THINK_TAGS = ["think", "thinking", "reasoning"];
+var LIMIT = 500;
+var USER_KEEP_TAGS_MAX = LIMIT - THINK_TAGS.join(" ").length - 1;
 function withThinkTags(raw) {
   return [...THINK_TAGS, String(raw ?? "").trim()].filter(Boolean).join(" ");
 }
@@ -2815,7 +2825,9 @@ async function emu(uid, msg) {
       settings.connectionId = id;
       if (chatId)
         store.chats[chatId] = settings;
-      if (arg.asDefault || !chatId)
+      if (arg.asDefault && chatId)
+        store.defaults = { ...settings, voiceFrom: "", voiceBackupSaved: false, voiceBackupPrompt: "", voiceBackupEnabled: false };
+      else if (!chatId)
         store.defaults = settings;
       else
         store.defaults = { ...store.defaults, connectionId: id };

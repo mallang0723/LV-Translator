@@ -16,6 +16,8 @@ const nameOf = (part: string): string => {
 const isThink = (part: string) => THINK_TAGS.includes(nameOf(part));
 /** The original keeps at most this many characters of the list (`normalizeParagraph`). */
 const LIMIT = 500;
+/** What is left for the user's own list: the thinking tags are put in front of it before the original cuts it at LIMIT. */
+export const USER_KEEP_TAGS_MAX = LIMIT - THINK_TAGS.join(' ').length - 1;
 
 /** The list the original is given: the thinking tags first, then the user's list. */
 export function withThinkTags(raw: unknown): string {

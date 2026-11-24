@@ -81,6 +81,14 @@ export interface ChatSettings {
   freeContext: string;
   incomingVoiceEnabled: boolean;
   incomingVoicePrompt: string;
+  /**
+   * 관리자 결정 2026-11-25: choosing a bundle writes its 대사 지침 into the room's own 「대사 지침」 (the original's scope: what response translation uses).
+   * `voiceFrom` = the bundle whose voice prompt is written there now ('' = none); the room's earlier prompt/switch is kept here so it can be put back.
+   */
+  voiceFrom: string;
+  voiceBackupSaved: boolean;
+  voiceBackupPrompt: string;
+  voiceBackupEnabled: boolean;
   contextEnabled: boolean;
   contextIncludeOriginal: boolean;
   contextIncludeTranslation: boolean;
@@ -181,6 +189,10 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   freeContext: '',
   incomingVoiceEnabled: false,
   incomingVoicePrompt: '',
+  voiceFrom: '',
+  voiceBackupSaved: false,
+  voiceBackupPrompt: '',
+  voiceBackupEnabled: false,
   contextEnabled: false,
   contextIncludeOriginal: true,
   contextIncludeTranslation: true,
@@ -229,6 +241,10 @@ export function normalizeSettings(value: unknown, base: ChatSettings = DEFAULT_S
     freeContext: str(s.freeContext, base.freeContext),
     incomingVoiceEnabled: bool(s.incomingVoiceEnabled, base.incomingVoiceEnabled),
     incomingVoicePrompt: str(s.incomingVoicePrompt, base.incomingVoicePrompt),
+    voiceFrom: str(s.voiceFrom, ''),
+    voiceBackupSaved: bool(s.voiceBackupSaved, false),
+    voiceBackupPrompt: str(s.voiceBackupPrompt, ''),
+    voiceBackupEnabled: bool(s.voiceBackupEnabled, false),
     contextEnabled: bool(s.contextEnabled, base.contextEnabled),
     contextIncludeOriginal: bool(s.contextIncludeOriginal, base.contextIncludeOriginal),
     contextIncludeTranslation: bool(s.contextIncludeTranslation, base.contextIncludeTranslation),

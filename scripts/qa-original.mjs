@@ -815,6 +815,7 @@ await page2.waitForFunction(() => /저장했습니다/.test(document.querySelect
 check('0.5.10 think: saving the settings keeps the user\'s list as it was (the always-excluded names are not written)', (await page2.evaluate(() => window.__getStorage()?.config?.paragraph?.keepTags)) === 'tracker', await page2.evaluate(() => JSON.stringify(window.__getStorage()?.config?.paragraph)));
 // ---- 0.5.10-v2: glossary example text, 「새 묶음 만들기」 from the form's current values, 제외 규칙 = text rules only ----
 {
+  const lvStoreBefore = await page2.evaluate(() => JSON.stringify(window.__lvStore));
   const form = page2.locator('#tab .tpg-form');
   await page2.locator('#tab [data-tpg-add-row="glossary"]').click();
   await page2.waitForTimeout(400);
@@ -860,11 +861,23 @@ check('0.5.10 think: saving the settings keeps the user\'s list as it was (the a
   await form.evaluate((f) => f.requestSubmit());
   await page2.waitForTimeout(500);
   check('0.5.10-v2 제외 규칙: a rule that is not a text rule (nor a tag) is still refused with the original status line', /정규식 오류|이해하지 못했습니다|제외 규칙/.test(await page2.evaluate(() => document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || '')));
+  // the original keeps 500 characters of 「번역에서 제외할 태그」: a tag that does not fit is not moved (it would vanish on save), its line stays and the user is told
+  await page2.evaluate(() => {
+    const k = document.querySelector('#tab input[name="paraKeepTags"]'); k.value = Array.from({ length: 52 }, (_, i) => `tag_${String(i).padStart(4, '0')}`).join(' ');
+    const t = document.querySelector('#tab [name="lv:excludeRules"]'); t.value = '<short>\n<a_very_long_tag_name_that_does_not_fit_in_the_list>\n/x/'; t.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await form.evaluate((f) => f.requestSubmit());
+  await page2.waitForFunction(() => /475자/.test(document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
+  const over = await page2.evaluate(() => ({ rules: document.querySelector('#tab [name="lv:excludeRules"]').value, keep: document.querySelector('#tab input[name="paraKeepTags"]').value, stored: window.__getStorage()?.config?.paragraph?.keepTags, status: document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent }));
+  check('0.5.10-v2 제외 규칙: a tag that would overflow the 500-character list stays as a rule line (nothing vanishes), the one that fits moves, and the user is told why', over.rules === '<a_very_long_tag_name_that_does_not_fit_in_the_list>\n/x/' && over.keep.endsWith(' short') && over.keep.length <= 475 && over.stored === over.keep && /475자/.test(over.status) && /옮겼습니다/.test(over.status), JSON.stringify({ rules: over.rules, keepTail: over.keep.slice(-20), keepLen: over.keep.length, storedTail: String(over.stored).slice(-20), status: over.status }));
+  await page2.evaluate(() => { document.querySelector('#tab input[name="paraKeepTags"]').value = 'tracker'; });
+  await page2.evaluate((st) => { window.__lvStore = JSON.parse(st); }, lvStoreBefore); // the rules saved above are not left in the fake host's store
   await page2.evaluate(() => { const t = document.querySelector('#tab [name="lv:excludeRules"]'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); window.__setStorage({ config: { paragraph: { keepTags: 'tracker', viewMode: 'tr' } } }); });
 }
 // 0.5.10-v2: a room that uses a bundle gets the bundle's 대사 지침 in my-message translation as well (with the glossary and 추가 지침)
 {
   const baseStore = await page2.evaluate(() => JSON.stringify(window.__lvStore));
+  const baseStorage = await page2.evaluate(() => JSON.stringify(window.__getStorage()));
   await page2.evaluate(() => {
     window.__cleanup();
     window.__lvStore = LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English', bundleId: 'bundle-qa' }, userBundles: [{ id: 'bundle-qa', name: 'QA', glossary: 'Sola = 솔라', freeContext: 'Modern drama, keep names.', incomingVoicePrompt: '[Sola]\nSpeaks bluntly' }] });
@@ -876,8 +889,25 @@ check('0.5.10 think: saving the settings keeps the user\'s list as it was (the a
   await page2.waitForTimeout(1500);
   const bcall = await page2.evaluate((n) => window.__quiet.slice(n).find((c) => c.messages.some((m) => /^Translate the following text to English/.test(m.content))), qb);
   const sys = (bcall?.messages ?? []).filter((m) => m.role === 'system').map((m) => m.content).join('\n');
-  check('0.5.10-v2 bundle applied to a room: glossary, 추가 지침 and 대사 지침 all reach the my-message translation prompt', /Sola = 솔라/.test(sys) && /Modern drama, keep names\./.test(sys) && /\[Sola\]\nSpeaks bluntly/.test(sys), JSON.stringify(sys.slice(-400)));
-  await page2.evaluate((s) => { window.__cleanup(); window.__lvStore = JSON.parse(s); window.__cleanup = window.__LVSetup(window.__ctx); }, baseStore);
+  check('0.5.10-v2 bundle applied to a room: glossary and 추가 지침 reach the my-message translation prompt, the 대사 지침 does not (the original uses it for responses only)', /Sola = 솔라/.test(sys) && /Modern drama, keep names\./.test(sys) && !/Speaks bluntly/.test(sys), JSON.stringify(sys.slice(-400)));
+  // 관리자 결정 2026-11-25: saving with the bundle chosen writes its 대사 지침 into the room's own 「대사 지침」 (what response translation reads); 없음 puts the old value back
+  const scopeVoice = () => page2.evaluate(() => { const c = window.__getStorage()?.config; const sc = c?.chats?.c1 ?? c?.defaults ?? {}; return { prompt: sc.incomingVoicePrompt ?? '', on: sc.incomingVoiceEnabled === true }; });
+  const saveForm = async () => { await page2.locator('#tab .tpg-form').evaluate((f) => f.requestSubmit()); await page2.waitForFunction(() => /저장했습니다/.test(document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {}); await page2.waitForTimeout(500); };
+  await page2.evaluate(() => { const f = document.querySelector('#tab .tpg-form'); const t = f.elements.namedItem('incomingVoicePrompt'); t.value = '[Room]\nmy own voice'; const on = f.elements.namedItem('incomingVoiceEnabled'); on.checked = false; });
+  await page2.evaluate(() => { const sel = document.querySelector('#tab [name="lv:bundleId"]'); sel.value = ''; sel.dispatchEvent(new Event('change', { bubbles: true })); });
+  await saveForm();
+  await page2.evaluate(() => { const sel = document.querySelector('#tab [name="lv:bundleId"]'); sel.value = 'bundle-qa'; sel.dispatchEvent(new Event('change', { bubbles: true })); });
+  const hint = await page2.evaluate(() => document.querySelector('#tab [data-lv-voice-note]')?.textContent ?? '');
+  check('0.5.10-v2 대사 지침: choosing a bundle tells, before saving, that its 대사 지침 goes into the room\'s own and the old one comes back later', /저장하면 묶음 「QA」의 대사 지침이 이 방의 「대사 지침」에 적히고 켜집니다/.test(hint) && /되돌아옵니다/.test(hint), hint);
+  await saveForm();
+  const applied = await scopeVoice();
+  const voiceStatus = await page2.evaluate(() => document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent ?? '');
+  check('0.5.10-v2 대사 지침: saving with the bundle writes its 대사 지침 into the room\'s scope of the original and turns the switch on (the room\'s own text is replaced)', /\[Sola\]\s*\nSpeaks bluntly/.test(applied.prompt) && applied.on === true && /묶음 「QA」의 대사 지침을 이 방의/.test(voiceStatus), JSON.stringify({ applied, voiceStatus }));
+  await page2.evaluate(() => { const sel = document.querySelector('#tab [name="lv:bundleId"]'); sel.value = ''; sel.dispatchEvent(new Event('change', { bubbles: true })); });
+  await saveForm();
+  const back = await scopeVoice();
+  check('0.5.10-v2 대사 지침: 없음 puts the room\'s earlier 대사 지침 and switch back', /\[Room\]\s*\nmy own voice/.test(back.prompt) && back.on === false, JSON.stringify(back));
+  await page2.evaluate(([s, st]) => { window.__cleanup(); window.__lvStore = JSON.parse(s); window.__setStorage(JSON.parse(st)); window.__cleanup = window.__LVSetup(window.__ctx); }, [baseStore, baseStorage]);
   await page2.waitForTimeout(800);
 }
 await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m40"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm40'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
@@ -1188,6 +1218,26 @@ await page2.locator(`${rv} .i1:visible`).first().click({ button: 'right', modifi
 await page2.waitForTimeout(300);
 a = await acts();
 check('0.5.10-v2 regex actions: contextmenu keeps its modifier keys and reaches the island button', a.length === 1 && a[0].type === 'contextmenu' && a[0].shift === true && a[0].cls.includes('i1'), JSON.stringify(a));
+// a touch long-press arrives as contextmenu: forwarded once, and the click that may follow is not forwarded as a second activation; a mouse click still is
+await page2.evaluate(() => {
+  const el = [...document.querySelectorAll('[data-message-id="m17R"] .ptx-view .rw.l3')].find((x) => !x.closest('.ptx-o'));
+  const o = { bubbles: true, composed: true, cancelable: true };
+  el.dispatchEvent(new PointerEvent('pointerdown', { ...o, pointerType: 'touch' }));
+  el.dispatchEvent(new MouseEvent('contextmenu', o));
+  el.dispatchEvent(new MouseEvent('click', o));
+});
+await page2.waitForTimeout(300);
+a = await acts();
+check('0.5.10-v2 regex actions: a touch long-press (contextmenu) is one activation: the click after it is not forwarded', a.length === 1 && a[0].type === 'contextmenu', JSON.stringify(a));
+await page2.evaluate(() => {
+  const el = [...document.querySelectorAll('[data-message-id="m17R"] .ptx-view .rw.l3')].find((x) => !x.closest('.ptx-o'));
+  const o = { bubbles: true, composed: true, cancelable: true };
+  el.dispatchEvent(new PointerEvent('pointerdown', { ...o, pointerType: 'mouse' }));
+  el.dispatchEvent(new MouseEvent('click', o));
+});
+await page2.waitForTimeout(300);
+a = await acts();
+check('0.5.10-v2 regex actions: a mouse click after that is forwarded as usual', a.length === 1 && a[0].type === 'click', JSON.stringify(a));
 // text outside a button still toggles the paragraph as before
 await page2.evaluate(() => window.getSelection()?.removeAllRanges()); // the right-click above selects a word, and the original does not toggle while text is selected
 const introCell = page2.locator(`${rv} .intro .ptx-t:visible, ${rv} .ptx-u:has(> .ptx-t):not(:has(.rw)):visible`).first();
