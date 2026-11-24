@@ -15,7 +15,7 @@ import {
   effectiveConnectionId,
 } from './shared';
 import { checkMarkers, ExcludeRuleError, lenientTags, MARKER_INSTRUCTION, parseExcludeRules, protect, restore } from './translate/protect';
-import { outgoingBundleBlocks } from './bundles';
+import { BUNDLE_EDIT_NOTE, outgoingBundleBlocks } from './bundles';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
 import type { HostBridge, MessageRow } from './host-emu/api';
@@ -422,7 +422,7 @@ export function setup(ctx: SpindleFrontendContext) {
     const voice = el('textarea', { value: source.incomingVoicePrompt, spellcheck: false, placeholder: '[인물 이름]\n말투 지시 (이름 없이 적으면 모든 인물)' });
     modal.root.replaceChildren(el('div', { class: 'stt-modal stt-bundle-editor' }, [
       el('div', { class: 'stt-note' }, [existing
-        ? '저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다.'
+        ? BUNDLE_EDIT_NOTE
         : '설정 화면에 지금 적힌 내용(저장 전이어도)의 단어장·기타 번역 지침·대사 지침을 복사합니다. 저장 후 목록에서 선택해 주세요. 묶음은 내 메시지 번역에 더해집니다.']),
       el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['단어집']), glossary]),

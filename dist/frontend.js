@@ -1347,6 +1347,7 @@ function parseGlossary(raw) {
 }
 
 // src/bundles.ts
+var BUNDLE_EDIT_NOTE = "저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다. 단 대사 지침은 방의 「대사 지침」에 적히므로, 이미 열려 있는 화면에서는 페이지를 새로고침한 뒤의 응답 번역부터 반영됩니다.";
 function outgoingBundleBlocks(bundle) {
   const pairs = parseGlossary(bundle.glossary);
   return [
@@ -10974,7 +10975,7 @@ function setup(ctx) {
     const voice = el("textarea", { value: source.incomingVoicePrompt, spellcheck: false, placeholder: `[인물 이름]
 말투 지시 (이름 없이 적으면 모든 인물)` });
     modal.root.replaceChildren(el("div", { class: "stt-modal stt-bundle-editor" }, [
-      el("div", { class: "stt-note" }, [existing ? "저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다." : "설정 화면에 지금 적힌 내용(저장 전이어도)의 단어장·기타 번역 지침·대사 지침을 복사합니다. 저장 후 목록에서 선택해 주세요. 묶음은 내 메시지 번역에 더해집니다."]),
+      el("div", { class: "stt-note" }, [existing ? BUNDLE_EDIT_NOTE : "설정 화면에 지금 적힌 내용(저장 전이어도)의 단어장·기타 번역 지침·대사 지침을 복사합니다. 저장 후 목록에서 선택해 주세요. 묶음은 내 메시지 번역에 더해집니다."]),
       el("label", { class: "stt-field" }, [el("span", {}, ["이름"]), name]),
       el("label", { class: "stt-field" }, [el("span", {}, ["단어집"]), glossary]),
       el("label", { class: "stt-field" }, [el("span", {}, ["추가 지침"]), freeContext]),

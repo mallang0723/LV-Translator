@@ -50,6 +50,12 @@ export function saveBundle(store: Store, value: UserBundle): UserBundle {
   return bundle;
 }
 
+/**
+ * What the bundle edit dialog says it does. The original reads its settings only when it starts and translates responses from that copy, so a changed
+ * 대사 지침 (kept in the room's own 「대사 지침」) reaches response translation after the page is reloaded; glossary and 추가 지침 are read per request.
+ */
+export const BUNDLE_EDIT_NOTE = '저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다. 단 대사 지침은 방의 「대사 지침」에 적히므로, 이미 열려 있는 화면에서는 페이지를 새로고침한 뒤의 응답 번역부터 반영됩니다.';
+
 /** The room-scope fields of the original's own settings (`tt-config.json` → `config.chats[id]`) that the 대사 지침 lives in. */
 export interface TtVoiceScope {
   incomingVoicePrompt?: string;

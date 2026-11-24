@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { withHost } from './helpers/fake-host';
 import { normalizeStore } from '../src/shared';
-import { planRoomVoice } from '../src/bundles';
+import { BUNDLE_EDIT_NOTE, planRoomVoice } from '../src/bundles';
 
 const base = normalizeStore(null).defaults;
 const bundle = { id: 'b', name: 'B', glossary: '', freeContext: '', incomingVoicePrompt: 'old voice' };
@@ -59,4 +59,15 @@ test('an open original form that still holds the old text cannot undo the edit w
     await h.send({ type: 'emu', id: 'q', op: 'storage.patch', args: [{ config: tt('typed later').config }] });
     expect(h.ttConfig().config.chats.a.incomingVoicePrompt).toBe('typed later');
   });
+});
+
+test('what the original reads when it starts (storage.get) carries the edited text at once; the dialog says a reload is needed for an open screen', async () => {
+  await withHost(setup(), async (h) => {
+    await edit(h, 'new voice');
+    await h.send({ type: 'emu', id: 'g', op: 'storage.get', args: [] });
+    const reply = h.sent.findLast((m: any) => m.type === 'emu_result' && m.id === 'g');
+    expect(reply.data.config.chats.a).toMatchObject({ incomingVoicePrompt: 'new voice', incomingVoiceEnabled: true });
+  });
+  expect(BUNDLE_EDIT_NOTE).toContain('새로고침');
+  expect(BUNDLE_EDIT_NOTE).toContain('대사 지침');
 });
