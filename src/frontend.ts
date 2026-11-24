@@ -15,7 +15,7 @@ import {
   effectiveConnectionId,
 } from './shared';
 import { checkMarkers, ExcludeRuleError, lenientTags, MARKER_INSTRUCTION, parseExcludeRules, protect, restore } from './translate/protect';
-import { parseGlossary } from './translate/glossary';
+import { outgoingBundleBlocks } from './bundles';
 import { type ConnectionHint, friendlyError, pickConnection, SOURCE_LABELS } from './connection';
 import { MARINARA_TRANSLATION_GENERAL_PROMPTS } from './vendor/tt-1.8.0/prompts';
 import type { HostBridge, MessageRow } from './host-emu/api';
@@ -26,7 +26,7 @@ import { GenerationDriver, GenerationHub } from './host-emu/generation';
 import type { MarinaraStorage } from './host-emu/runtime';
 import { withBatchLimit } from './host-emu/split';
 import { withExclusions } from './host-emu/exclude';
-import { type LvForm, type LvState, type LvValues, mountLvForm } from './host-emu/lv-form';
+import { type BundleSeed, type LvForm, type LvState, type LvValues, mountLvForm } from './host-emu/lv-form';
 
 const PANEL_CSS = `
 .stt-btn { font: inherit; cursor: pointer; padding: 2px 8px; border-radius: var(--lumiverse-radius-sm, 6px);
@@ -286,12 +286,7 @@ export function setup(ctx: SpindleFrontendContext) {
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     // LV additions on top of the original's prompt: the shared bundle's glossary / guidance (the bundle's own fields only) and the protection marker rule.
     const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
-    const pairs = bundle ? parseGlossary(bundle.glossary) : [];
-    const extras = [
-      pairs.length ? `## Glossary (apply in both directions)\n${pairs.map((p) => `${p.left} = ${p.right}`).join('\n')}` : '',
-      bundle?.freeContext.trim() ? `## Additional guidance\n${bundle.freeContext.trim()}` : '',
-      held.pieces.length ? MARKER_INSTRUCTION : '',
-    ].filter(Boolean);
+    const extras = [...(bundle ? outgoingBundleBlocks(bundle) : []), held.pieces.length ? MARKER_INSTRUCTION : ''].filter(Boolean);
     if (extras.length) systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, '').trim(), ...extras].join('\n\n');
     let res: Response;
     outgoingInFlight++;
@@ -417,25 +412,28 @@ export function setup(ctx: SpindleFrontendContext) {
   // (src/host-emu/lv-form.ts) and are saved by the form's one save button.
   tab.root.replaceChildren(el('div', { class: 'stt-panel' }, [settingsHost.element]));
 
-  function editBundle(existing: UserBundle | null): void {
+  function editBundle(existing: UserBundle | null, seed?: BundleSeed): void {
     const modal = ctx.ui.showModal({ title: existing ? '묶음 편집' : '새 묶음으로 저장', width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
-    const source = existing ?? current();
+    // A new bundle starts from what the settings form holds right now (rows added and not yet saved included), not from the saved room settings.
+    const source: BundleSeed = existing ?? seed ?? { glossary: '', freeContext: '', incomingVoicePrompt: '' };
     const name = el('input', { type: 'text', value: existing?.name ?? '', placeholder: '묶음 이름' });
     const glossary = el('textarea', { value: source.glossary, spellcheck: false, placeholder: '내 언어 용어 = 모델 언어 용어' });
     const freeContext = el('textarea', { value: source.freeContext, spellcheck: false });
+    const voice = el('textarea', { value: source.incomingVoicePrompt, spellcheck: false, placeholder: '[인물 이름]\n말투 지시 (이름 없이 적으면 모든 인물)' });
     modal.root.replaceChildren(el('div', { class: 'stt-modal stt-bundle-editor' }, [
       el('div', { class: 'stt-note' }, [existing
         ? '저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다.'
-        : '이 방의 묶음 내용(단어집·추가 지침)을 복사합니다. 저장 후 목록에서 선택해 주세요.']),
+        : '설정 화면에 지금 적힌 내용(저장 전이어도)의 단어장·기타 번역 지침·대사 지침을 복사합니다. 저장 후 목록에서 선택해 주세요. 묶음은 내 메시지 번역에 더해집니다.']),
       el('label', { class: 'stt-field' }, [el('span', {}, ['이름']), name]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['단어집']), glossary]),
       el('label', { class: 'stt-field' }, [el('span', {}, ['추가 지침']), freeContext]),
+      el('label', { class: 'stt-field' }, [el('span', {}, ['대사 지침']), voice]),
       el('div', { class: 'stt-row' }, [
         button('저장', () => {
           if (!name.value.trim()) return notify('warning', '묶음 이름을 입력해 주세요.');
           toBackend({ type: 'save_bundle', bundle: {
             id: existing?.id ?? '', name: name.value, glossary: glossary.value,
-            freeContext: freeContext.value, incomingVoicePrompt: existing?.incomingVoicePrompt ?? '',
+            freeContext: freeContext.value, incomingVoicePrompt: voice.value,
           } });
           modal.dismiss();
         }, 'stt-primary'),
@@ -469,13 +467,13 @@ export function setup(ctx: SpindleFrontendContext) {
       connections: options,
       connectionNote: note,
       linkNote: link === 'none' ? '' : link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.',
-      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext })),
+      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext, incomingVoicePrompt: b.incomingVoicePrompt })),
     };
   }
 
   const lvForm: LvForm = mountLvForm(settingsHost.element, {
     state: lvState,
-    editBundle: (id) => editBundle(id ? (store?.userBundles.find((b) => b.id === id) ?? null) : null),
+    editBundle: (id, seed) => editBundle(id ? (store?.userBundles.find((b) => b.id === id) ?? null) : null, seed),
     deleteBundle: async (id) => {
       const selected = store?.userBundles.find((b) => b.id === id);
       if (!selected) return;

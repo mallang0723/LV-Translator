@@ -144,7 +144,7 @@ export function parseExcludeRules(raw: string): RegExp[] {
       out.push(new RegExp(`${escapeRegExp(range[0]!.trim())}[\\s\\S]*?${escapeRegExp(range[1]!.trim())}`, 'g'));
       return;
     }
-    throw new ExcludeRuleError(`${where}: "${rule}" 를 이해하지 못했습니다. <태그>, /정규식/, 시작 ... 끝 중 하나로 적어 주세요.`);
+    throw new ExcludeRuleError(`${where}: "${rule}" 를 이해하지 못했습니다. /정규식/, 시작 ... 끝 중 하나로 적어 주세요.`);
   });
   return out;
 }

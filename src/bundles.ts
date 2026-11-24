@@ -56,3 +56,13 @@ export function deleteBundle(store: Store, id: string): void {
     if (settings.bundleId === id) settings.bundleId = '';
   }
 }
+
+/** What a bundle adds to the system prompt of "내 메시지 번역": its glossary, additional guidance and voice guidance (each only when it has content). */
+export function outgoingBundleBlocks(bundle: Pick<UserBundle, 'glossary' | 'freeContext' | 'incomingVoicePrompt'>): string[] {
+  const pairs = parseGlossary(bundle.glossary);
+  return [
+    pairs.length ? `## Glossary (apply in both directions)\n${pairs.map((p) => `${p.left} = ${p.right}`).join('\n')}` : '',
+    bundle.freeContext.trim() ? `## Additional guidance\n${bundle.freeContext.trim()}` : '',
+    bundle.incomingVoicePrompt.trim() ? `## Speaker voice guidance (how each speaker talks; keep it when it applies)\n${bundle.incomingVoicePrompt.trim()}` : '',
+  ].filter(Boolean);
+}

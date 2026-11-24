@@ -15,7 +15,7 @@ export interface LvState {
   connections: Array<[string, string]>;
   connectionNote: { text: string; kind: '' | 'warn' | 'err' };
   linkNote: string;
-  bundles: Array<{ id: string; name: string; glossary: string; freeContext: string }>;
+  bundles: Array<{ id: string; name: string; glossary: string; freeContext: string; incomingVoicePrompt: string }>;
 }
 
 export interface LvValues {
@@ -36,11 +36,19 @@ export interface LvValues {
   asDefault: boolean;
 }
 
+/** The three texts a guide bundle holds, in the original's stored format (glossary `A = B` lines, 기타 지침, 대사 지침 `[이름]` blocks). */
+export interface BundleSeed {
+  glossary: string;
+  freeContext: string;
+  incomingVoicePrompt: string;
+}
+
 export interface LvHost {
   state(): LvState;
   /** Saves our values. Rejects with the message to show in the original's status line. */
   save(values: LvValues): Promise<void>;
-  editBundle(id: string | null): void;
+  /** `id` null = a new bundle, filled from `seed`: what the settings form holds right now (saved or not). */
+  editBundle(id: string | null, seed?: BundleSeed): void;
   deleteBundle(id: string): void;
 }
 
@@ -106,8 +114,9 @@ function build(cls: Classes, hasChat: boolean): string {
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
         ${switchRow(cls, 'protectHtml', 'HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역')}
         ${switchRow(cls, 'protectCode', '코드 블록(```) 은 번역하지 않음')}
-        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
-        ${field('제외 규칙 (한 줄에 하나)', `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;\n/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]"></textarea>`)}
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
+        ${field('제외 규칙 (한 줄에 하나)', `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]"></textarea>`)}
+        <p class="${cls.help}" data-lv-tag-moved hidden></p>
         <p class="${cls.help}">/정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 번역에 보내지 않고 번역 화면에 원문 그대로 둡니다(여러 문단에 걸쳐도 됩니다). {{매크로}} 는 항상 그대로 둡니다.</p>
       </section>
       <section class="tpg-group" data-lv-section="bundle">
@@ -118,32 +127,63 @@ function build(cls: Classes, hasChat: boolean): string {
           <button type="button" class="${cls.button}" data-lv-bundle-edit>묶음 편집</button>
           <button type="button" class="${cls.button}" data-lv-bundle-delete>삭제</button>
         </div>
-        <p class="${cls.help}">묶음의 단어집·추가 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침·말투는 위의 원작 설정에서 합니다). 선택은 아래 저장 버튼으로 적용합니다.</p>
+        <p class="${cls.help}">묶음의 단어집·추가 지침·대사 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침·말투는 위의 원작 설정에서 합니다). 「새 묶음 만들기」는 위 원작 설정에 지금 적힌 내용(저장 전이어도)을 가져옵니다. 선택은 아래 저장 버튼으로 적용합니다.</p>
         <details data-lv-bundle-preview hidden><summary class="${cls.help}"></summary>
           <label class="${cls.label}">단어집</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="glossary" placeholder="내용 없음"></textarea>
           <label class="${cls.label}">추가 지침</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="freeContext" placeholder="내용 없음"></textarea>
+          <label class="${cls.label}">대사 지침</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="incomingVoicePrompt" placeholder="내용 없음"></textarea>
         </details>
         ${hasChat ? switchRow(cls, 'asDefault', '새 채팅의 기본값으로도 저장', '위 설정을 앞으로 만드는 채팅의 기본값으로도 저장합니다.') : ''}
       </section>`;
 }
 
-/** Tag names of the `<tag>` lines of an exclusion-rules text. */
-export function tagRuleNames(rules: string): string[] {
-  const out: string[] = [];
+const TAG_LINE = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/;
+
+/**
+ * The exclusion rules are text rules (`/정규식/`, `시작 ... 끝`, plain text). A `<tag>` line is a tag exclusion, which the original's
+ * 「번역에서 제외할 태그」 does: it is taken out of the rules and its (lower-case, unique) names are returned.
+ */
+export function splitTagRules(rules: string): { rest: string; tags: string[] } {
+  const tags: string[] = [];
+  const rest: string[] = [];
   for (const line of rules.split(/\r?\n/)) {
-    const m = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/.exec(line);
-    if (m) out.push(m[1]!.toLowerCase());
+    const m = TAG_LINE.exec(line);
+    if (m) tags.push(m[1]!.toLowerCase());
+    else rest.push(line);
   }
-  return [...new Set(out)];
+  return { rest: tags.length ? rest.join('\n').replace(/^\s*\n+|\n+\s*$/g, '') : rules, tags: [...new Set(tags)] };
 }
 
-function addKeepTags(form: HTMLFormElement, names: string[]): void {
-  const field = form.elements.namedItem('paraKeepTags') as HTMLInputElement | null;
-  if (!field || !names.length) return;
-  const have = new Set(field.value.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, '').toLowerCase()).filter(Boolean));
-  const add = names.filter((n) => !have.has(n));
-  if (!add.length) return;
-  field.value = [field.value.trim(), ...add].filter(Boolean).join(' ');
+/** `names` added to the 「번역에서 제외할 태그」 text (names it already lists are not repeated); returns the new text. */
+export function mergeKeepTags(have: string, names: string[]): string {
+  const known = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, '').toLowerCase()).filter(Boolean));
+  const add = names.filter((n) => !known.has(n));
+  return add.length ? [have.trim(), ...add].filter(Boolean).join(' ') : have;
+}
+
+const MOVED_NOTICE = '태그는 위 「번역에서 제외할 태그」로 옮겼습니다.';
+
+/** Adds `text` to the original's "저장했습니다." status line once the original's own save has written it (nothing is added when the save failed). */
+function noticeAfterSave(form: HTMLFormElement, text: string): void {
+  const status = form.querySelector<HTMLElement>('[data-tpg-status]');
+  if (!status) return;
+  const done = () => {
+    if (status.dataset.kind !== 'success') return false;
+    if (!status.textContent?.includes(text)) status.textContent = `${status.textContent ?? ''} ${text}`.trim();
+    return true;
+  };
+  if (done()) return;
+  const o = new MutationObserver(() => {
+    if (done() || status.dataset.kind === 'error') o.disconnect();
+  });
+  o.observe(status, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['data-kind'] });
+  setTimeout(() => o.disconnect(), 6000);
+}
+
+/** What the original's form holds now (its hidden fields follow every edit of a glossary row, a voice row and the 기타 지침 box), saved or not. */
+function formGuides(form: HTMLFormElement): BundleSeed {
+  const text = (name: string) => (form.elements.namedItem(name) as HTMLTextAreaElement | null)?.value ?? '';
+  return { glossary: text('glossary'), freeContext: text('freeContext'), incomingVoicePrompt: text('incomingVoicePrompt') };
 }
 
 const q = <T extends HTMLElement>(form: HTMLElement, name: string) => form.querySelector<T>(`[name="lv:${name}"]`)!;
@@ -221,6 +261,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
       details.querySelector('summary')!.textContent = `${picked.name} · 내용 보기 (읽기 전용)`;
       details.querySelector<HTMLTextAreaElement>('[data-lv-preview="glossary"]')!.value = picked.glossary;
       details.querySelector<HTMLTextAreaElement>('[data-lv-preview="freeContext"]')!.value = picked.freeContext;
+      details.querySelector<HTMLTextAreaElement>('[data-lv-preview="incomingVoicePrompt"]')!.value = picked.incomingVoicePrompt;
     }
   }
 
@@ -267,7 +308,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
         const t = (e.target as HTMLElement | null)?.closest?.('button') as HTMLButtonElement | null;
         if (!t || !t.closest('[data-lv-sections]')) return;
         const id = q<HTMLSelectElement>(form, 'bundleId').value;
-        if (t.hasAttribute('data-lv-bundle-new')) host.editBundle(null);
+        if (t.hasAttribute('data-lv-bundle-new')) host.editBundle(null, formGuides(form));
         else if (t.hasAttribute('data-lv-bundle-edit') && id) host.editBundle(id);
         else if (t.hasAttribute('data-lv-bundle-delete') && id) host.deleteBundle(id);
       });
@@ -279,6 +320,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
         event.preventDefault();
         event.stopImmediatePropagation();
         void (async () => {
+          let moved: { rest: string; tags: string[] } = { rest: '', tags: [] };
           const button = form.querySelector<HTMLButtonElement>('.tpg-save');
           if (button) {
             button.disabled = true;
@@ -286,7 +328,10 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
           }
           setStatus(form, '설정을 저장하고 있습니다.');
           try {
-            await host.save(read(form));
+            const values = read(form);
+            moved = splitTagRules(values.excludeRules);
+            if (moved.tags.length) values.excludeRules = moved.rest;
+            await host.save(values);
           } catch (e) {
             setStatus(form, e instanceof Error && e.message ? e.message : '설정을 저장하지 못했습니다.', 'error');
             if (button) {
@@ -295,8 +340,20 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
             }
             return;
           }
-          // `<태그>` lines of the exclusion rules are tag exclusions: the original's own 「번역에서 제외할 태그」 does them.
-          addKeepTags(form, tagRuleNames(q<HTMLTextAreaElement>(form, 'excludeRules').value));
+          // `<태그>` lines of the exclusion rules are tag exclusions: they are not kept there but moved into the original's 「번역에서 제외할 태그」
+          // (its own save, below, writes them), and the user is told.
+          const note = form.querySelector<HTMLElement>('[data-lv-tag-moved]');
+          if (moved.tags.length) {
+            const keep = form.elements.namedItem('paraKeepTags') as HTMLInputElement | null;
+            if (keep) keep.value = mergeKeepTags(keep.value, moved.tags);
+            q<HTMLTextAreaElement>(form, 'excludeRules').value = moved.rest;
+            if (note) {
+              note.textContent = `${MOVED_NOTICE} (${moved.tags.map((t) => `<${t}>`).join(' ')})`;
+              note.hidden = false;
+            }
+          } else if (note) {
+            note.hidden = true;
+          }
           dirty.set(form, false);
           const asDefault = form.querySelector<HTMLInputElement>('[name="lv:asDefault"]');
           if (asDefault) asDefault.checked = false;
@@ -311,6 +368,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
           } finally {
             bypass.delete(form);
           }
+          if (moved.tags.length) noticeAfterSave(form, MOVED_NOTICE);
         })();
       }, true);
     }

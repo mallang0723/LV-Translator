@@ -154,7 +154,7 @@ function parseExcludeRules(raw) {
       out.push(new RegExp(`${escapeRegExp(range[0].trim())}[\\s\\S]*?${escapeRegExp(range[1].trim())}`, "g"));
       return;
     }
-    throw new ExcludeRuleError(`${where}: "${rule}" 를 이해하지 못했습니다. <태그>, /정규식/, 시작 ... 끝 중 하나로 적어 주세요.`);
+    throw new ExcludeRuleError(`${where}: "${rule}" 를 이해하지 못했습니다. /정규식/, 시작 ... 끝 중 하나로 적어 주세요.`);
   });
   return out;
 }
@@ -1340,6 +1340,20 @@ function parseGlossary(raw) {
       pairs.push({ left, right });
   }
   return pairs;
+}
+
+// src/bundles.ts
+function outgoingBundleBlocks(bundle) {
+  const pairs = parseGlossary(bundle.glossary);
+  return [
+    pairs.length ? `## Glossary (apply in both directions)
+${pairs.map((p) => `${p.left} = ${p.right}`).join(`
+`)}` : "",
+    bundle.freeContext.trim() ? `## Additional guidance
+${bundle.freeContext.trim()}` : "",
+    bundle.incomingVoicePrompt.trim() ? `## Speaker voice guidance (how each speaker talks; keep it when it applies)
+${bundle.incomingVoicePrompt.trim()}` : ""
+  ].filter(Boolean);
 }
 
 // src/connection.ts
@@ -8677,6 +8691,125 @@ function forwardLongMessageToggle(e) {
     }
   }
 }
+var REGEX_ACTION = "data-lumiverse-regex-action";
+var ISLAND = "[data-lumiverse-html-island]";
+var ACTION_STATE_ATTRS = ["aria-disabled", "aria-pressed", "tabindex"];
+var ACTION_STATE_STYLE = ["cursor", "opacity", "filter", "outline", "outline-offset"];
+var ACTION_FLAGS = ["used", "selected", "superseded", "budget-blocked", "state-blocked"].map((k) => `${REGEX_ACTION}-${k}`);
+function actionScopes(box) {
+  const skip = (el) => !!el.closest(`[${MIRROR}], .ptx-o`);
+  const pick = (root) => Array.from(root.querySelectorAll(`[${REGEX_ACTION}]`)).filter((el) => !skip(el));
+  const out = [{ island: null, actions: pick(box) }];
+  for (const island of Array.from(box.querySelectorAll(ISLAND))) {
+    if (!skip(island))
+      out.push({ island, actions: island.shadowRoot ? pick(island.shadowRoot) : [] });
+  }
+  return out;
+}
+function realActionFor(view, host, copy) {
+  const value = copy.getAttribute(REGEX_ACTION);
+  const mine = actionScopes(view);
+  const real = actionScopes(host);
+  const root = copy.getRootNode();
+  const at = mine.findIndex((s) => s.island ? s.island.shadowRoot === root : !(root instanceof ShadowRoot));
+  const byValue = (list) => list.find((el) => el.getAttribute(REGEX_ACTION) === value) ?? null;
+  if (at >= 0 && mine.length === real.length) {
+    const nth = mine[at].actions.indexOf(copy);
+    const paired = nth >= 0 ? real[at].actions[nth] : undefined;
+    if (paired && paired.getAttribute(REGEX_ACTION) === value)
+      return paired;
+    return byValue(real[at].actions);
+  }
+  for (const scope of real) {
+    const hit = byValue(scope.actions);
+    if (hit)
+      return hit;
+  }
+  return null;
+}
+function syncActionState(view, host) {
+  const mine = actionScopes(view);
+  const real = actionScopes(host);
+  if (mine.length !== real.length)
+    return;
+  mine.forEach((scope, i) => {
+    scope.actions.forEach((copy, n) => {
+      const from = real[i].actions[n];
+      if (!from || from.getAttribute(REGEX_ACTION) !== copy.getAttribute(REGEX_ACTION))
+        return;
+      for (const k of [...ACTION_STATE_ATTRS, ...ACTION_FLAGS]) {
+        const v = from.getAttribute(k);
+        if (v === null)
+          copy.removeAttribute(k);
+        else if (copy.getAttribute(k) !== v)
+          copy.setAttribute(k, v);
+      }
+      for (const k of ACTION_STATE_STYLE) {
+        const v = from.style.getPropertyValue(k);
+        if (v)
+          copy.style.setProperty(k, v);
+        else
+          copy.style.removeProperty(k);
+      }
+    });
+  });
+}
+function watchActionState(view, host, watchers) {
+  watchers.get(view)?.();
+  const sync = () => {
+    if (view.isConnected && host.isConnected)
+      syncActionState(view, host);
+  };
+  const nodes = [host, ...actionScopes(host).flatMap((s) => s.island?.shadowRoot ? [s.island.shadowRoot] : [])];
+  const observers = nodes.map((node) => {
+    const o = new MutationObserver(sync);
+    o.observe(node, { attributes: true, subtree: true, attributeFilter: [...ACTION_STATE_ATTRS, ...ACTION_FLAGS, "style"] });
+    return o;
+  });
+  const timer = setTimeout(() => stop(), 8000);
+  const stop = () => {
+    clearTimeout(timer);
+    for (const o of observers)
+      o.disconnect();
+    if (watchers.get(view) === stop)
+      watchers.delete(view);
+  };
+  watchers.set(view, stop);
+  sync();
+}
+function makeRegexActionForwarder(watchers) {
+  return function forwardRegexAction(e) {
+    if (e instanceof KeyboardEvent && e.key !== "Enter" && e.key !== " ")
+      return;
+    const path = e.composedPath();
+    const copy = path.find((n) => n instanceof HTMLElement && n.hasAttribute(REGEX_ACTION));
+    if (!copy)
+      return;
+    const view = path.find((n) => n instanceof HTMLElement && n.classList.contains("ptx-view"));
+    const host = view?._ptxFor;
+    if (!view || !host?.isConnected)
+      return;
+    const real = realActionFor(view, host, copy);
+    if (!real)
+      return;
+    e.preventDefault();
+    e.stopPropagation();
+    const init = { bubbles: true, composed: true, cancelable: true };
+    const again = e instanceof KeyboardEvent ? new KeyboardEvent(e.type, { ...init, key: e.key, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, altKey: e.altKey }) : new MouseEvent(e.type, { ...init, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, altKey: e.altKey, button: e.button, clientX: e.clientX, clientY: e.clientY });
+    real.dispatchEvent(again);
+    watchActionState(view, host, watchers);
+  };
+}
+var EXAMPLES = { "원문 (예: Marinara)": "원문 (예: Lumiverse)", "번역 (예: 마리나라)": "번역 (예: 루미버스)" };
+function swapExamples(root, swapped) {
+  for (const input of Array.from(root.querySelectorAll('input[data-pair="a"], input[data-pair="b"]'))) {
+    const next = EXAMPLES[input.getAttribute("placeholder") ?? ""];
+    if (!next)
+      continue;
+    swapped.set(input, input.placeholder);
+    input.placeholder = next;
+  }
+}
 var NO_UNITS_TOAST = "이 메시지에는 번역할 문단이 없습니다.";
 var NO_UNITS_AFTER_MS = 3000;
 var INFO_ICON = '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>';
@@ -8925,6 +9058,7 @@ function startDomBridge(root = document, options = {}) {
   let destroyed = false;
   const added = new Set;
   const shadowObservers = new Map;
+  const swapped = new Map;
   const autoTimers = new Map;
   const autoTried = new Map;
   function autoContinue(view) {
@@ -8985,6 +9119,7 @@ function startDomBridge(root = document, options = {}) {
       return;
     for (const m of Array.from(root.querySelectorAll("[data-message-id]")))
       tag(m);
+    swapExamples(root, swapped);
     for (const el of Array.from(root.querySelectorAll('.mari-message-content [aria-hidden="true"]:not([translate])'))) {
       if (el.closest(".ptx-view"))
         continue;
@@ -9014,7 +9149,11 @@ function startDomBridge(root = document, options = {}) {
   scan();
   const noticeTimers = new Map;
   const onTranslatePress = (e) => noticeSilentTranslate(e, noticeTimers);
+  const actionWatchers = new Map;
+  const forwardRegexAction = makeRegexActionForwarder(actionWatchers);
   document.addEventListener("click", forwardLongMessageToggle, true);
+  for (const type of ["click", "keydown", "contextmenu"])
+    window.addEventListener(type, forwardRegexAction, true);
   document.addEventListener("click", onContinueClick, true);
   document.addEventListener("click", onTranslatePress, true);
   return {
@@ -9022,6 +9161,10 @@ function startDomBridge(root = document, options = {}) {
     destroy() {
       destroyed = true;
       document.removeEventListener("click", forwardLongMessageToggle, true);
+      for (const type of ["click", "keydown", "contextmenu"])
+        window.removeEventListener(type, forwardRegexAction, true);
+      for (const stop of Array.from(actionWatchers.values()))
+        stop();
       document.removeEventListener("click", onContinueClick, true);
       document.removeEventListener("click", onTranslatePress, true);
       for (const t of noticeTimers.values())
@@ -9040,6 +9183,9 @@ function startDomBridge(root = document, options = {}) {
       shadowObservers.clear();
       for (const m of Array.from(document.querySelectorAll(`[${MIRROR}]`)))
         m.remove();
+      for (const [input, was] of swapped)
+        input.placeholder = was;
+      swapped.clear();
       for (const d of Array.from(document.querySelectorAll(`[${DECOR}]`))) {
         d.removeAttribute("translate");
         d.removeAttribute(DECOR);
@@ -10027,10 +10173,10 @@ function build(cls, hasChat) {
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
         ${switchRow(cls, "protectHtml", "HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역")}
         ${switchRow(cls, "protectCode", "코드 블록(```) 은 번역하지 않음")}
-        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙에 &lt;태그&gt; 줄을 적어도 그 태그가 거기에 더해집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
-        ${field("제외 규칙 (한 줄에 하나)", `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="&lt;status&gt;
-/HP: \\d+\\/\\d+/
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
+        ${field("제외 규칙 (한 줄에 하나)", `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="/HP: \\d+\\/\\d+/
 [상태창] ... [/상태창]"></textarea>`)}
+        <p class="${cls.help}" data-lv-tag-moved hidden></p>
         <p class="${cls.help}">/정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 번역에 보내지 않고 번역 화면에 원문 그대로 둡니다(여러 문단에 걸쳐도 됩니다). {{매크로}} 는 항상 그대로 둡니다.</p>
       </section>
       <section class="tpg-group" data-lv-section="bundle">
@@ -10041,32 +10187,58 @@ function build(cls, hasChat) {
           <button type="button" class="${cls.button}" data-lv-bundle-edit>묶음 편집</button>
           <button type="button" class="${cls.button}" data-lv-bundle-delete>삭제</button>
         </div>
-        <p class="${cls.help}">묶음의 단어집·추가 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침·말투는 위의 원작 설정에서 합니다). 선택은 아래 저장 버튼으로 적용합니다.</p>
+        <p class="${cls.help}">묶음의 단어집·추가 지침·대사 지침은 내 메시지 번역에 더해집니다(응답 번역의 단어장·기타 지침·말투는 위의 원작 설정에서 합니다). 「새 묶음 만들기」는 위 원작 설정에 지금 적힌 내용(저장 전이어도)을 가져옵니다. 선택은 아래 저장 버튼으로 적용합니다.</p>
         <details data-lv-bundle-preview hidden><summary class="${cls.help}"></summary>
           <label class="${cls.label}">단어집</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="glossary" placeholder="내용 없음"></textarea>
           <label class="${cls.label}">추가 지침</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="freeContext" placeholder="내용 없음"></textarea>
+          <label class="${cls.label}">대사 지침</label><textarea readonly class="${cls.textarea}" rows="2" data-lv-preview="incomingVoicePrompt" placeholder="내용 없음"></textarea>
         </details>
         ${hasChat ? switchRow(cls, "asDefault", "새 채팅의 기본값으로도 저장", "위 설정을 앞으로 만드는 채팅의 기본값으로도 저장합니다.") : ""}
       </section>`;
 }
-function tagRuleNames(rules) {
-  const out = [];
+var TAG_LINE = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/;
+function splitTagRules(rules) {
+  const tags = [];
+  const rest = [];
   for (const line of rules.split(/\r?\n/)) {
-    const m = /^\s*<\s*([A-Za-z][\w:.-]*)\s*\/?>\s*$/.exec(line);
+    const m = TAG_LINE.exec(line);
     if (m)
-      out.push(m[1].toLowerCase());
+      tags.push(m[1].toLowerCase());
+    else
+      rest.push(line);
   }
-  return [...new Set(out)];
+  return { rest: tags.length ? rest.join(`
+`).replace(/^\s*\n+|\n+\s*$/g, "") : rules, tags: [...new Set(tags)] };
 }
-function addKeepTags(form, names) {
-  const field = form.elements.namedItem("paraKeepTags");
-  if (!field || !names.length)
+function mergeKeepTags(have, names) {
+  const known = new Set(have.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
+  const add = names.filter((n) => !known.has(n));
+  return add.length ? [have.trim(), ...add].filter(Boolean).join(" ") : have;
+}
+var MOVED_NOTICE = "태그는 위 「번역에서 제외할 태그」로 옮겼습니다.";
+function noticeAfterSave(form, text) {
+  const status = form.querySelector("[data-tpg-status]");
+  if (!status)
     return;
-  const have = new Set(field.value.split(/[\s,;]+/).map((t) => t.replace(/^<|>$/g, "").toLowerCase()).filter(Boolean));
-  const add = names.filter((n) => !have.has(n));
-  if (!add.length)
+  const done = () => {
+    if (status.dataset.kind !== "success")
+      return false;
+    if (!status.textContent?.includes(text))
+      status.textContent = `${status.textContent ?? ""} ${text}`.trim();
+    return true;
+  };
+  if (done())
     return;
-  field.value = [field.value.trim(), ...add].filter(Boolean).join(" ");
+  const o = new MutationObserver(() => {
+    if (done() || status.dataset.kind === "error")
+      o.disconnect();
+  });
+  o.observe(status, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["data-kind"] });
+  setTimeout(() => o.disconnect(), 6000);
+}
+function formGuides(form) {
+  const text = (name) => form.elements.namedItem(name)?.value ?? "";
+  return { glossary: text("glossary"), freeContext: text("freeContext"), incomingVoicePrompt: text("incomingVoicePrompt") };
 }
 var q = (form, name) => form.querySelector(`[name="lv:${name}"]`);
 function mountLvForm(root, host) {
@@ -10135,6 +10307,7 @@ function mountLvForm(root, host) {
       details.querySelector("summary").textContent = `${picked.name} · 내용 보기 (읽기 전용)`;
       details.querySelector('[data-lv-preview="glossary"]').value = picked.glossary;
       details.querySelector('[data-lv-preview="freeContext"]').value = picked.freeContext;
+      details.querySelector('[data-lv-preview="incomingVoicePrompt"]').value = picked.incomingVoicePrompt;
     }
   }
   function read(form) {
@@ -10189,7 +10362,7 @@ function mountLvForm(root, host) {
           return;
         const id = q(form, "bundleId").value;
         if (t.hasAttribute("data-lv-bundle-new"))
-          host.editBundle(null);
+          host.editBundle(null, formGuides(form));
         else if (t.hasAttribute("data-lv-bundle-edit") && id)
           host.editBundle(id);
         else if (t.hasAttribute("data-lv-bundle-delete") && id)
@@ -10204,6 +10377,7 @@ function mountLvForm(root, host) {
         event.preventDefault();
         event.stopImmediatePropagation();
         (async () => {
+          let moved = { rest: "", tags: [] };
           const button = form.querySelector(".tpg-save");
           if (button) {
             button.disabled = true;
@@ -10211,7 +10385,11 @@ function mountLvForm(root, host) {
           }
           setStatus(form, "설정을 저장하고 있습니다.");
           try {
-            await host.save(read(form));
+            const values = read(form);
+            moved = splitTagRules(values.excludeRules);
+            if (moved.tags.length)
+              values.excludeRules = moved.rest;
+            await host.save(values);
           } catch (e) {
             setStatus(form, e instanceof Error && e.message ? e.message : "설정을 저장하지 못했습니다.", "error");
             if (button) {
@@ -10220,7 +10398,19 @@ function mountLvForm(root, host) {
             }
             return;
           }
-          addKeepTags(form, tagRuleNames(q(form, "excludeRules").value));
+          const note = form.querySelector("[data-lv-tag-moved]");
+          if (moved.tags.length) {
+            const keep = form.elements.namedItem("paraKeepTags");
+            if (keep)
+              keep.value = mergeKeepTags(keep.value, moved.tags);
+            q(form, "excludeRules").value = moved.rest;
+            if (note) {
+              note.textContent = `${MOVED_NOTICE} (${moved.tags.map((t) => `<${t}>`).join(" ")})`;
+              note.hidden = false;
+            }
+          } else if (note) {
+            note.hidden = true;
+          }
           dirty.set(form, false);
           const asDefault = form.querySelector('[name="lv:asDefault"]');
           if (asDefault)
@@ -10235,6 +10425,8 @@ function mountLvForm(root, host) {
           } finally {
             bypass.delete(form);
           }
+          if (moved.tags.length)
+            noticeAfterSave(form, MOVED_NOTICE);
         })();
       }, true);
     }
@@ -10502,15 +10694,7 @@ function setup(ctx) {
     const held = protect(text, { ...settings, excludeTags: lenientTags(keep.replace(/;/g, ",")).join(", ") });
     let systemPrompt = settingsHost.prompts().outgoing.trim();
     const bundle = store?.userBundles.find((b) => b.id === settings.bundleId);
-    const pairs = bundle ? parseGlossary(bundle.glossary) : [];
-    const extras = [
-      pairs.length ? `## Glossary (apply in both directions)
-${pairs.map((p) => `${p.left} = ${p.right}`).join(`
-`)}` : "",
-      bundle?.freeContext.trim() ? `## Additional guidance
-${bundle.freeContext.trim()}` : "",
-      held.pieces.length ? MARKER_INSTRUCTION : ""
-    ].filter(Boolean);
+    const extras = [...bundle ? outgoingBundleBlocks(bundle) : [], held.pieces.length ? MARKER_INSTRUCTION : ""].filter(Boolean);
     if (extras.length)
       systemPrompt = [systemPrompt || MARINARA_TRANSLATION_GENERAL_PROMPTS.base.replace(/\n*\{\{(?:voice|vocab)\}\}/g, "").trim(), ...extras].join(`
 
@@ -10625,17 +10809,20 @@ ${bundle.freeContext.trim()}` : "",
     iconSvg: ICON
   });
   tab.root.replaceChildren(el("div", { class: "stt-panel" }, [settingsHost.element]));
-  function editBundle(existing) {
+  function editBundle(existing, seed) {
     const modal = ctx.ui.showModal({ title: existing ? "묶음 편집" : "새 묶음으로 저장", width: Math.min(680, window.innerWidth - 32), maxHeight: 820, persistent: true });
-    const source = existing ?? current();
+    const source = existing ?? seed ?? { glossary: "", freeContext: "", incomingVoicePrompt: "" };
     const name = el("input", { type: "text", value: existing?.name ?? "", placeholder: "묶음 이름" });
     const glossary = el("textarea", { value: source.glossary, spellcheck: false, placeholder: "내 언어 용어 = 모델 언어 용어" });
     const freeContext = el("textarea", { value: source.freeContext, spellcheck: false });
+    const voice = el("textarea", { value: source.incomingVoicePrompt, spellcheck: false, placeholder: `[인물 이름]
+말투 지시 (이름 없이 적으면 모든 인물)` });
     modal.root.replaceChildren(el("div", { class: "stt-modal stt-bundle-editor" }, [
-      el("div", { class: "stt-note" }, [existing ? "저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다." : "이 방의 묶음 내용(단어집·추가 지침)을 복사합니다. 저장 후 목록에서 선택해 주세요."]),
+      el("div", { class: "stt-note" }, [existing ? "저장하면 이 묶음을 사용하는 모든 방의 다음 번역부터 반영됩니다." : "설정 화면에 지금 적힌 내용(저장 전이어도)의 단어장·기타 번역 지침·대사 지침을 복사합니다. 저장 후 목록에서 선택해 주세요. 묶음은 내 메시지 번역에 더해집니다."]),
       el("label", { class: "stt-field" }, [el("span", {}, ["이름"]), name]),
       el("label", { class: "stt-field" }, [el("span", {}, ["단어집"]), glossary]),
       el("label", { class: "stt-field" }, [el("span", {}, ["추가 지침"]), freeContext]),
+      el("label", { class: "stt-field" }, [el("span", {}, ["대사 지침"]), voice]),
       el("div", { class: "stt-row" }, [
         button("저장", () => {
           if (!name.value.trim())
@@ -10645,7 +10832,7 @@ ${bundle.freeContext.trim()}` : "",
             name: name.value,
             glossary: glossary.value,
             freeContext: freeContext.value,
-            incomingVoicePrompt: existing?.incomingVoicePrompt ?? ""
+            incomingVoicePrompt: voice.value
           } });
           modal.dismiss();
         }, "stt-primary"),
@@ -10676,12 +10863,12 @@ ${bundle.freeContext.trim()}` : "",
       connections: options,
       connectionNote: note,
       linkNote: link === "none" ? "" : link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.",
-      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext }))
+      bundles: store.userBundles.map((b) => ({ id: b.id, name: b.name, glossary: b.glossary, freeContext: b.freeContext, incomingVoicePrompt: b.incomingVoicePrompt }))
     };
   }
   const lvForm = mountLvForm(settingsHost.element, {
     state: lvState,
-    editBundle: (id) => editBundle(id ? store?.userBundles.find((b) => b.id === id) ?? null : null),
+    editBundle: (id, seed) => editBundle(id ? store?.userBundles.find((b) => b.id === id) ?? null : null, seed),
     deleteBundle: async (id) => {
       const selected = store?.userBundles.find((b) => b.id === id);
       if (!selected)

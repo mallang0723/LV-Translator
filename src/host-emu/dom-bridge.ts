@@ -67,6 +67,149 @@ function forwardLongMessageToggle(e: MouseEvent): void {
 }
 
 /**
+ * Regex action buttons (`data-lumiverse-regex-action`: a preset's choice rows, branch icons) are answered by a listener Lumiverse puts on the
+ * MessageContent element itself (MessageContent.tsx, click/keydown/contextmenu, target found through `composedPath()`). A translated view is a
+ * sibling of that element, and its islands are new shadow roots, so a press on the copy never reaches it. The same press is sent to the real
+ * button in the hidden content (modifier keys kept: they pick "queue" or "send").
+ *
+ * Which real button: the view is a clone of the content, so the pair is found by position: the same scope (the message's own light DOM, or the
+ * n-th HTML island's shadow root) and the same ordinal among the action elements of that scope. The attribute value is only a check (it names
+ * the script, action and instance, but two buttons may still carry the same one); when the structures do not line up the first real button with
+ * that value in the same scope is used. A copy inside an opened original text (`.ptx-o`) has no ordinal of its own and is found by value.
+ *
+ * Listened for on `window` in the capture phase, so the original's paragraph toggle (a capture listener on `document`) never sees a press on a
+ * button; a press anywhere else on the view still reaches it. The event sent to the real button has no `.ptx-view` in its path, so it is not
+ * forwarded a second time.
+ */
+const REGEX_ACTION = 'data-lumiverse-regex-action';
+const ISLAND = '[data-lumiverse-html-island]';
+/** What Lumiverse writes on a button to show its state (MessageContent.tsx, a layout effect): copied to the view's button after a press. */
+const ACTION_STATE_ATTRS = ['aria-disabled', 'aria-pressed', 'tabindex'];
+const ACTION_STATE_STYLE = ['cursor', 'opacity', 'filter', 'outline', 'outline-offset'];
+const ACTION_FLAGS = ['used', 'selected', 'superseded', 'budget-blocked', 'state-blocked'].map((k) => `${REGEX_ACTION}-${k}`);
+
+type View = HTMLElement & { _ptxFor?: HTMLElement };
+interface ActionScope { island: HTMLElement | null; actions: HTMLElement[] }
+
+/** The scopes of a message content or view, in order: its light DOM and the shadow root of each island. Mirrors and opened originals are left out. */
+function actionScopes(box: HTMLElement): ActionScope[] {
+  const skip = (el: Element) => !!el.closest(`[${MIRROR}], .ptx-o`);
+  const pick = (root: ParentNode) => Array.from(root.querySelectorAll<HTMLElement>(`[${REGEX_ACTION}]`)).filter((el) => !skip(el));
+  const out: ActionScope[] = [{ island: null, actions: pick(box) }];
+  for (const island of Array.from(box.querySelectorAll<HTMLElement>(ISLAND))) {
+    if (!skip(island)) out.push({ island, actions: island.shadowRoot ? pick(island.shadowRoot) : [] });
+  }
+  return out;
+}
+
+/** The real button for a button of the view, or null. */
+function realActionFor(view: View, host: HTMLElement, copy: HTMLElement): HTMLElement | null {
+  const value = copy.getAttribute(REGEX_ACTION);
+  const mine = actionScopes(view);
+  const real = actionScopes(host);
+  const root = copy.getRootNode();
+  const at = mine.findIndex((s) => (s.island ? s.island.shadowRoot === root : !(root instanceof ShadowRoot)));
+  const byValue = (list: HTMLElement[]) => list.find((el) => el.getAttribute(REGEX_ACTION) === value) ?? null;
+  if (at >= 0 && mine.length === real.length) {
+    const nth = mine[at]!.actions.indexOf(copy);
+    const paired = nth >= 0 ? real[at]!.actions[nth] : undefined;
+    if (paired && paired.getAttribute(REGEX_ACTION) === value) return paired;
+    return byValue(real[at]!.actions);
+  }
+  for (const scope of real) {
+    const hit = byValue(scope.actions);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Copies the state Lumiverse shows on the real buttons to their copies in the view (same pairing as the press). */
+function syncActionState(view: View, host: HTMLElement): void {
+  const mine = actionScopes(view);
+  const real = actionScopes(host);
+  if (mine.length !== real.length) return;
+  mine.forEach((scope, i) => {
+    scope.actions.forEach((copy, n) => {
+      const from = real[i]!.actions[n];
+      if (!from || from.getAttribute(REGEX_ACTION) !== copy.getAttribute(REGEX_ACTION)) return;
+      for (const k of [...ACTION_STATE_ATTRS, ...ACTION_FLAGS]) {
+        const v = from.getAttribute(k);
+        if (v === null) copy.removeAttribute(k);
+        else if (copy.getAttribute(k) !== v) copy.setAttribute(k, v);
+      }
+      for (const k of ACTION_STATE_STYLE) {
+        const v = from.style.getPropertyValue(k);
+        if (v) copy.style.setProperty(k, v);
+        else copy.style.removeProperty(k);
+      }
+    });
+  });
+}
+
+/**
+ * The state of a pressed button comes back through Lumiverse's own redraw of the real button, some time after the press (it waits for the
+ * server). Inside an island the mirror's observer carries it over to the view; a button in the light DOM is changed in place with no node
+ * added or removed, which the original never notices, so its state is copied here, for a few seconds after a press.
+ */
+function watchActionState(view: View, host: HTMLElement, watchers: Map<View, () => void>): void {
+  watchers.get(view)?.();
+  const sync = () => {
+    if (view.isConnected && host.isConnected) syncActionState(view, host);
+  };
+  const nodes: Node[] = [host, ...actionScopes(host).flatMap((s) => (s.island?.shadowRoot ? [s.island.shadowRoot] : []))];
+  const observers = nodes.map((node) => {
+    const o = new MutationObserver(sync);
+    o.observe(node, { attributes: true, subtree: true, attributeFilter: [...ACTION_STATE_ATTRS, ...ACTION_FLAGS, 'style'] });
+    return o;
+  });
+  const timer = setTimeout(() => stop(), 8000);
+  const stop = () => {
+    clearTimeout(timer);
+    for (const o of observers) o.disconnect();
+    if (watchers.get(view) === stop) watchers.delete(view);
+  };
+  watchers.set(view, stop);
+  sync();
+}
+
+function makeRegexActionForwarder(watchers: Map<View, () => void>) {
+  return function forwardRegexAction(e: Event): void {
+    if (e instanceof KeyboardEvent && e.key !== 'Enter' && e.key !== ' ') return;
+    const path = e.composedPath();
+    const copy = path.find((n): n is HTMLElement => n instanceof HTMLElement && n.hasAttribute(REGEX_ACTION));
+    if (!copy) return;
+    const view = path.find((n) => n instanceof HTMLElement && n.classList.contains('ptx-view')) as View | undefined;
+    const host = view?._ptxFor;
+    if (!view || !host?.isConnected) return;
+    const real = realActionFor(view, host, copy);
+    if (!real) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const init = { bubbles: true, composed: true, cancelable: true };
+    const again = e instanceof KeyboardEvent
+      ? new KeyboardEvent(e.type, { ...init, key: e.key, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, altKey: e.altKey })
+      : new MouseEvent(e.type, { ...init, ctrlKey: (e as MouseEvent).ctrlKey, metaKey: (e as MouseEvent).metaKey, shiftKey: (e as MouseEvent).shiftKey, altKey: (e as MouseEvent).altKey, button: (e as MouseEvent).button, clientX: (e as MouseEvent).clientX, clientY: (e as MouseEvent).clientY });
+    real.dispatchEvent(again);
+    watchActionState(view, host, watchers);
+  };
+}
+
+/**
+ * The original's glossary row shows the example of the host it was written for in its empty fields (extension.js ~5923: `원문 (예: Marinara)` /
+ * `번역 (예: 마리나라)`). Here the example is this host's name. Only those two exact texts are replaced; the original is not edited.
+ */
+const EXAMPLES: Record<string, string> = { '원문 (예: Marinara)': '원문 (예: Lumiverse)', '번역 (예: 마리나라)': '번역 (예: 루미버스)' };
+
+function swapExamples(root: ParentNode, swapped: Map<HTMLInputElement, string>): void {
+  for (const input of Array.from(root.querySelectorAll<HTMLInputElement>('input[data-pair="a"], input[data-pair="b"]'))) {
+    const next = EXAMPLES[input.getAttribute('placeholder') ?? ''];
+    if (!next) continue;
+    swapped.set(input, input.placeholder);
+    input.placeholder = next;
+  }
+}
+
+/**
  * The original answers the translate button in one of three ways: it translates, it toggles the original/translation, or - when the message has nothing to
  * translate - it shows a toast, but only for a message with no translation record (extension.js translateMessage: `!getRecord(id)`). A message that already
  * has a record (even an empty one) and no translatable cell takes the toggle path instead, which draws nothing: the button does nothing at all. This
@@ -369,6 +512,7 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
   let destroyed = false;
   const added = new Set<Element>();
   const shadowObservers = new Map<ShadowRoot, MutationObserver>();
+  const swapped = new Map<HTMLInputElement, string>();
   const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const autoTried = new Map<string, string>();
 
@@ -423,6 +567,7 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
   function scan(): void {
     if (destroyed) return;
     for (const m of Array.from(root.querySelectorAll('[data-message-id]'))) tag(m);
+    swapExamples(root, swapped);
     // Same rule as in an island's mirror (mirrorHtml): decoration hidden from readers is not text to translate, in a plain message too.
     for (const el of Array.from(root.querySelectorAll<HTMLElement>('.mari-message-content [aria-hidden="true"]:not([translate])'))) {
       if (el.closest('.ptx-view')) continue;
@@ -450,7 +595,10 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
   scan();
   const noticeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const onTranslatePress = (e: MouseEvent) => noticeSilentTranslate(e, noticeTimers);
+  const actionWatchers = new Map<View, () => void>();
+  const forwardRegexAction = makeRegexActionForwarder(actionWatchers);
   document.addEventListener('click', forwardLongMessageToggle, true);
+  for (const type of ['click', 'keydown', 'contextmenu']) window.addEventListener(type, forwardRegexAction, true);
   document.addEventListener('click', onContinueClick, true);
   document.addEventListener('click', onTranslatePress, true);
   return {
@@ -458,6 +606,8 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
     destroy() {
       destroyed = true;
       document.removeEventListener('click', forwardLongMessageToggle, true);
+      for (const type of ['click', 'keydown', 'contextmenu']) window.removeEventListener(type, forwardRegexAction, true);
+      for (const stop of Array.from(actionWatchers.values())) stop();
       document.removeEventListener('click', onContinueClick, true);
       document.removeEventListener('click', onTranslatePress, true);
       for (const t of noticeTimers.values()) clearTimeout(t);
@@ -470,6 +620,8 @@ export function startDomBridge(root: ParentNode = document, options: DomBridgeOp
       for (const o of shadowObservers.values()) o.disconnect();
       shadowObservers.clear();
       for (const m of Array.from(document.querySelectorAll(`[${MIRROR}]`))) m.remove();
+      for (const [input, was] of swapped) input.placeholder = was;
+      swapped.clear();
       for (const d of Array.from(document.querySelectorAll(`[${DECOR}]`))) {
         d.removeAttribute('translate');
         d.removeAttribute(DECOR);

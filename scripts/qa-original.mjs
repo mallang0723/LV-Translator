@@ -259,11 +259,12 @@ await page2.evaluate(() => {
   const noop = () => {};
   const ctx = {
     dom: { addStyle: (css) => { const s = document.createElement('style'); s.textContent = css; document.head.append(s); return () => s.remove(); }, cleanup: noop, listMessageElements: () => [], findMessageElement: () => null, inject: noop, uninject: noop },
-    ui: { mount: () => document.createElement('span'), registerDrawerTab: () => ({ root: tabRoot, activate: noop, destroy: noop, setBadge: noop }), registerInputBarAction: () => ({ onClick: () => noop, destroy: noop }), showModal: noop, showConfirm: async () => ({ confirmed: true }) },
+    ui: { mount: () => document.createElement('span'), registerDrawerTab: () => ({ root: tabRoot, activate: noop, destroy: noop, setBadge: noop }), registerInputBarAction: () => ({ onClick: () => noop, destroy: noop }), showModal: () => { document.querySelector('#fake-modal')?.remove(); const root = document.createElement('div'); root.id = 'fake-modal'; document.body.append(root); return { root, dismiss: () => root.remove() }; }, showConfirm: async () => ({ confirmed: true }) },
     events: { on: (name, h) => { (window.__handlers ||= {})[name] = [...((window.__handlers || {})[name] || []), h]; return () => { window.__handlers[name] = window.__handlers[name].filter((x) => x !== h); }; } }, connections: { getActive: () => ({ activeProfileId: 'conn1' }) }, chats: { get: async () => ({ metadata: {} }) },
     onBackendMessage: (h) => { handlers.push(h); return noop; },
     sendToBackend: async (msg) => {
       if (window.__dbg) console.log('send', msg.type, msg.op);
+      (window.__toBackend ||= []).push(msg);
       if (msg.type === 'hello') return reply({ type: 'state', store: window.__lvStore ||= LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English' } }), connections: [{ id: 'conn1', name: 'Fake', model: 'none', isDefault: true }], link: 'none' });
       if (msg.type !== 'emu') return;
       await new Promise((r) => setTimeout(r, 0)); // a real backend answers later
@@ -812,6 +813,73 @@ check('0.5.10 think: the thinking text and the tracker block are not sent to the
 await page2.locator('#tab .tpg-form').evaluate((f) => f.requestSubmit());
 await page2.waitForFunction(() => /저장했습니다/.test(document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
 check('0.5.10 think: saving the settings keeps the user\'s list as it was (the always-excluded names are not written)', (await page2.evaluate(() => window.__getStorage()?.config?.paragraph?.keepTags)) === 'tracker', await page2.evaluate(() => JSON.stringify(window.__getStorage()?.config?.paragraph)));
+// ---- 0.5.10-v2: glossary example text, 「새 묶음 만들기」 from the form's current values, 제외 규칙 = text rules only ----
+{
+  const form = page2.locator('#tab .tpg-form');
+  await page2.locator('#tab [data-tpg-add-row="glossary"]').click();
+  await page2.waitForTimeout(400);
+  const ph = await page2.evaluate(() => [...document.querySelectorAll('#tab [data-tpg-pairs="glossary"] .tpg-pair')].pop()?.querySelectorAll('input[data-pair]').length ? [...[...document.querySelectorAll('#tab [data-tpg-pairs="glossary"] .tpg-pair')].pop().querySelectorAll('input[data-pair]')].map((i) => i.placeholder) : []);
+  check('0.5.10-v2 glossary example: an empty row shows "Lumiverse" / "루미버스" (not Marinara / 마리나라)', ph.length === 2 && ph[0] === '원문 (예: Lumiverse)' && ph[1] === '번역 (예: 루미버스)', JSON.stringify(ph));
+  // unsaved input in the original's form: a glossary row, 기타 지침 and a voice row
+  await page2.evaluate(() => {
+    const f = document.querySelector('#tab .tpg-form');
+    const row = [...f.querySelectorAll('[data-tpg-pairs="glossary"] .tpg-pair')].pop();
+    const set = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+    set(row.querySelector('[data-pair="a"]'), 'Sola'); set(row.querySelector('[data-pair="b"]'), '솔라');
+    set(f.elements.namedItem('freeContext'), 'Modern drama, keep names.');
+    f.querySelector('[data-tpg-add-row="voice"]').click();
+    const v = [...f.querySelectorAll('[data-tpg-pairs="voice"] .tpg-pair')].pop();
+    set(v.querySelector('[data-pair="a"]'), 'Mina'); set(v.querySelector('[data-pair="b"]'), 'Speaks politely');
+    window.__toBackend = [];
+  });
+  await page2.locator('#tab [data-lv-bundle-new]').click();
+  await page2.waitForSelector('#fake-modal .stt-bundle-editor', { timeout: 3000 }).catch(() => {});
+  const seeded = await page2.evaluate(() => [...document.querySelectorAll('#fake-modal textarea')].map((t) => t.value));
+  check('0.5.10-v2 새 묶음: the save window opens with the form\'s CURRENT values (unsaved glossary row, 기타 지침, 대사 지침) in three fields', seeded.length === 3 && seeded[0].includes('Sola = 솔라') && seeded[1] === 'Modern drama, keep names.' && /\[Mina\]\s*\nSpeaks politely/.test(seeded[2]), JSON.stringify(seeded));
+  await page2.locator('#fake-modal input[type="text"]').fill('Mine');
+  await page2.locator('#fake-modal button', { hasText: '저장' }).first().click();
+  const saved = await page2.evaluate(() => window.__toBackend.filter((m) => m.type === 'save_bundle').pop()?.bundle);
+  check('0.5.10-v2 새 묶음: saving sends glossary, 추가 지침 and 대사 지침 together', !!saved && saved.name === 'Mine' && saved.glossary.includes('Sola = 솔라') && saved.freeContext === 'Modern drama, keep names.' && /\[Mina\]\s*\nSpeaks politely/.test(saved.incomingVoicePrompt), JSON.stringify(saved));
+  // 제외 규칙: a <tag> line is moved to 「번역에서 제외할 태그」
+  const rulesHelp = await page2.evaluate(() => document.querySelector('#tab [name="lv:excludeRules"]').placeholder);
+  check('0.5.10-v2 제외 규칙: the placeholder shows text rules only (no <status>)', !/</.test(rulesHelp) && /\/HP/.test(rulesHelp) && /\.\.\./.test(rulesHelp), JSON.stringify(rulesHelp));
+  await page2.evaluate(() => { const t = document.querySelector('#tab [name="lv:excludeRules"]'); t.value = '<status>\n/HP: \\d+/\n<Tracker>\n<scene>'; t.dispatchEvent(new Event('input', { bubbles: true })); });
+  await form.evaluate((f) => f.requestSubmit());
+  await page2.waitForFunction(() => /저장했습니다/.test(document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
+  await page2.waitForTimeout(300);
+  const after = await page2.evaluate(() => ({
+    rules: document.querySelector('#tab [name="lv:excludeRules"]').value,
+    keep: document.querySelector('#tab input[name="paraKeepTags"]').value,
+    stored: window.__getStorage()?.config?.paragraph?.keepTags,
+    status: document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent,
+    note: [...document.querySelectorAll('#tab [data-lv-tag-moved]')].map((n) => (n.hidden ? '' : n.textContent)).join(''),
+  }));
+  check('0.5.10-v2 제외 규칙: <tag> lines leave the rules and join 「번역에서 제외할 태그」 once each (existing entry not repeated, saved by the original\'s save)', after.rules === '/HP: \\d+/' && after.keep === 'tracker status scene' && after.stored === 'tracker status scene', JSON.stringify(after));
+  check('0.5.10-v2 제외 규칙: the user is told the tags were moved (status line and note)', /태그는 위 「번역에서 제외할 태그」로 옮겼습니다/.test(after.status) && /태그는 위 「번역에서 제외할 태그」로 옮겼습니다/.test(after.note), JSON.stringify(after));
+  await page2.evaluate(() => { const t = document.querySelector('#tab [name="lv:excludeRules"]'); t.value = '/bad('; t.dispatchEvent(new Event('input', { bubbles: true })); });
+  await form.evaluate((f) => f.requestSubmit());
+  await page2.waitForTimeout(500);
+  check('0.5.10-v2 제외 규칙: a rule that is not a text rule (nor a tag) is still refused with the original status line', /정규식 오류|이해하지 못했습니다|제외 규칙/.test(await page2.evaluate(() => document.querySelector('#tab .tpg-form [data-tpg-status]')?.textContent || '')));
+  await page2.evaluate(() => { const t = document.querySelector('#tab [name="lv:excludeRules"]'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); window.__setStorage({ config: { paragraph: { keepTags: 'tracker', viewMode: 'tr' } } }); });
+}
+// 0.5.10-v2: a room that uses a bundle gets the bundle's 대사 지침 in my-message translation as well (with the glossary and 추가 지침)
+{
+  const baseStore = await page2.evaluate(() => JSON.stringify(window.__lvStore));
+  await page2.evaluate(() => {
+    window.__cleanup();
+    window.__lvStore = LVInt.normalizeStore({ defaults: { translateMyMessages: true, modelLanguage: 'English', bundleId: 'bundle-qa' }, userBundles: [{ id: 'bundle-qa', name: 'QA', glossary: 'Sola = 솔라', freeContext: 'Modern drama, keep names.', incomingVoicePrompt: '[Sola]\nSpeaks bluntly' }] });
+    window.__cleanup = window.__LVSetup(window.__ctx);
+  });
+  await page2.waitForTimeout(1500);
+  const qb = await page2.evaluate(() => window.__quiet.length);
+  await page2.evaluate(() => fetch('/api/v1/chats/c1/messages', { method: 'POST', body: JSON.stringify({ is_user: true, content: '안녕, 솔라.' }) }).catch(() => {}));
+  await page2.waitForTimeout(1500);
+  const bcall = await page2.evaluate((n) => window.__quiet.slice(n).find((c) => c.messages.some((m) => /^Translate the following text to English/.test(m.content))), qb);
+  const sys = (bcall?.messages ?? []).filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+  check('0.5.10-v2 bundle applied to a room: glossary, 추가 지침 and 대사 지침 all reach the my-message translation prompt', /Sola = 솔라/.test(sys) && /Modern drama, keep names\./.test(sys) && /\[Sola\]\nSpeaks bluntly/.test(sys), JSON.stringify(sys.slice(-400)));
+  await page2.evaluate((s) => { window.__cleanup(); window.__lvStore = JSON.parse(s); window.__cleanup = window.__LVSetup(window.__ctx); }, baseStore);
+  await page2.waitForTimeout(800);
+}
 await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m40"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm40'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
 await page2.waitForTimeout(800);
 
@@ -1050,6 +1118,96 @@ const lightDecor = await page2.evaluate(() => {
   return { letters: shown('.lf b'), paras: shown('.ptx-u').filter((t) => t.length > 8 && !/^[A-H]+$/.test(t)) };
 });
 check('0.5.10 (plain message): aria-hidden decoration (letters A-H) is kept as written, the paragraphs are translated', lightDecor.letters.join('') === 'ABCDEFGH' && lightDecor.letters.length === 8 && lightDecor.paras.length >= 2 && lightDecor.paras.every((t) => t.includes('번역')), JSON.stringify(lightDecor));
+// ---- 0.5.10-v2: regex action buttons (choice rows, branch icons) work inside the translated view ----
+await page2.evaluate(() => {
+  window.__cleanup();
+  window.__act = [];
+  window.__messages.push({ id: 'm17R', role: 'assistant', content: 'Pick a road.', swipes: ['x'], swipe_id: 0, extra: {}, metadata: {}, send_date: Math.floor(Date.now() / 1000), swipe_dates: [Math.floor(Date.now() / 1000)] });
+  const row = document.createElement('div');
+  row.setAttribute('data-component', 'BubbleMessage'); row.setAttribute('data-message-id', 'm17R');
+  row.innerHTML = '<div><div data-component="MessageContent"><div class="b17r"></div></div><span data-spindle-mount="message_footer"></span></div><div data-component="BubbleActions"><button>a</button><button>b</button><button>c</button></div>';
+  const body = row.querySelector('.b17r');
+  body.innerHTML = '<p class="intro">Pick a road for the long walk.</p>'
+    + '<div class="rw l1" role="button" tabindex="0" data-lumiverse-regex-action="A">Go left to the old mill</div>'
+    + '<div class="rw l2" role="button" tabindex="0" data-lumiverse-regex-action="A">Go left to the old mill</div>'
+    + '<div class="rw l3" role="button" tabindex="0" data-lumiverse-regex-action="C">Rest by the fire tonight</div>';
+  const d = document.createElement('div'); d.setAttribute('data-lumiverse-html-island', '');
+  d.attachShadow({ mode: 'open' }).innerHTML = '<div class="isl"><p>An island with a branch icon.</p><div class="rw i1" role="button" tabindex="0" data-lumiverse-regex-action="B">Wait by the stone bridge</div><div class="rw i2" role="button" tabindex="0" data-lumiverse-regex-action="A">Go left to the old mill</div></div>';
+  body.append(d);
+  // What Lumiverse does: one listener on the MessageContent element (target through composedPath), and a redraw of the real button's state a moment later.
+  const content = row.querySelector('[data-component="MessageContent"]');
+  const handle = (e) => {
+    if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+    const t = e.composedPath().find((n) => n instanceof Element && n.hasAttribute('data-lumiverse-regex-action'));
+    if (!t) return;
+    e.preventDefault(); e.stopPropagation();
+    window.__act.push({ type: e.type, cls: t.className, ctrl: e.ctrlKey, shift: e.shiftKey, key: e.key ?? null, trusted: e.isTrusted });
+    if (e.type === 'click' || e.type === 'keydown') setTimeout(() => { t.setAttribute('data-lumiverse-regex-action-used', ''); t.setAttribute('aria-disabled', 'true'); t.setAttribute('tabindex', '-1'); t.style.opacity = '0.55'; t.style.cursor = 'not-allowed'; }, 150);
+  };
+  for (const type of ['click', 'keydown', 'contextmenu']) content.addEventListener(type, handle);
+  document.querySelector('#chat').append(row);
+  window.__cleanup = window.__LVSetup(window.__ctx);
+});
+await page2.waitForTimeout(1500);
+await page2.locator('[data-message-id="m17R"] .mari-message-actions button:has(svg.lucide-languages)').click();
+await page2.waitForSelector('[data-message-id="m17R"] .ptx-view', { timeout: 8000 }).catch(() => {});
+await page2.waitForTimeout(1800);
+const rv = '[data-message-id="m17R"] .ptx-view';
+const acts = () => page2.evaluate(() => window.__act.splice(0));
+const viewState = () => page2.evaluate(() => {
+  const v = document.querySelector('[data-message-id="m17R"] .ptx-view');
+  const shown = [...v.querySelectorAll('.rw')].filter((x) => !x.closest('.ptx-o')).concat([...v.querySelectorAll('[data-lumiverse-html-island]')].flatMap((i) => [...i.shadowRoot.querySelectorAll('.rw')].filter((x) => !x.closest('.ptx-o'))));
+  return Object.fromEntries(shown.map((x) => [x.classList[1], { used: x.hasAttribute('data-lumiverse-regex-action-used'), dis: x.getAttribute('aria-disabled'), op: x.style.opacity, text: x.textContent.trim().slice(0, 12) }]));
+});
+const before = await viewState();
+check('0.5.10-v2 regex actions: the view shows five translated buttons, none used', Object.keys(before).length === 5 && Object.values(before).every((b) => !b.used && b.text.includes('번역')), JSON.stringify(before));
+// two buttons of the same message carry the same value (A): the second one is pressed, and the second one answers (not the first with that value)
+await page2.locator(`${rv} .l2:visible`).first().click();
+await page2.waitForTimeout(500);
+let a = await acts();
+check('0.5.10-v2 regex actions: a press on the 2nd of two same-valued buttons reaches that real button (by position, once)', a.length === 1 && a[0].type === 'click' && a[0].cls.includes('l2'), JSON.stringify(a));
+const afterClick = await viewState();
+check('0.5.10-v2 regex actions: the pressed button\'s state (used / disabled / dimmed) comes back to the view, the others stay', afterClick.l2.used && afterClick.l2.dis === 'true' && afterClick.l2.op === '0.55' && !afterClick.l1.used && !afterClick.l3.used && !afterClick.i2.used, JSON.stringify(afterClick));
+check('0.5.10-v2 regex actions: a press on a button does not open the original-text toggle of its paragraph', (await page2.locator(`${rv} .ptx-u.is-open`).count()) === 0);
+// the island: same value A as the light buttons, but its own scope
+await page2.locator(`${rv} .i2:visible`).first().click();
+await page2.waitForTimeout(700);
+a = await acts();
+check('0.5.10-v2 regex actions: a button inside an HTML island is answered by the island\'s real button (not the light button with the same value)', a.length === 1 && a[0].cls.includes('i2'), JSON.stringify(a));
+await page2.waitForTimeout(600);
+const afterIsland = await viewState();
+check('0.5.10-v2 regex actions: the island button\'s used state is shown in the view as well (mirror carries it over)', afterIsland.i2?.used === true && afterIsland.i1?.used === false, JSON.stringify(afterIsland));
+// keyboard: Enter on a focused button, Space, and a key that is neither; contextmenu with a modifier
+await page2.locator(`${rv} .l3:visible`).first().focus();
+await page2.keyboard.press('x');
+await page2.keyboard.press('Enter');
+await page2.waitForTimeout(400);
+a = await acts();
+check('0.5.10-v2 regex actions: Enter on a focused button is forwarded, another key is not', a.length === 1 && a[0].type === 'keydown' && a[0].key === 'Enter' && a[0].cls.includes('l3'), JSON.stringify(a));
+await page2.locator(`${rv} .i1:visible`).first().click({ button: 'right', modifiers: ['Shift'] });
+await page2.waitForTimeout(300);
+a = await acts();
+check('0.5.10-v2 regex actions: contextmenu keeps its modifier keys and reaches the island button', a.length === 1 && a[0].type === 'contextmenu' && a[0].shift === true && a[0].cls.includes('i1'), JSON.stringify(a));
+// text outside a button still toggles the paragraph as before
+await page2.evaluate(() => window.getSelection()?.removeAllRanges()); // the right-click above selects a word, and the original does not toggle while text is selected
+const introCell = page2.locator(`${rv} .intro .ptx-t:visible, ${rv} .ptx-u:has(> .ptx-t):not(:has(.rw)):visible`).first();
+await introCell.click();
+await page2.waitForTimeout(300);
+const opened = await page2.locator(`${rv} .ptx-u.is-open`).count();
+check('0.5.10-v2 regex actions: a press on ordinary text is not taken (the paragraph toggle still works), and nothing reaches the real content', opened >= 1 && (await acts()).length === 0, JSON.stringify({ opened, html: (await page2.evaluate(() => document.querySelector('[data-message-id="m17R"] .ptx-view')?.innerHTML.slice(0, 500))) }));
+// turning the extension off removes the listeners: a view-shaped copy of a button reaches nothing
+await page2.evaluate(() => window.__cleanup());
+await page2.evaluate(() => {
+  const host = document.querySelector('[data-message-id="m17R"] [data-component="MessageContent"]');
+  const fake = document.createElement('div'); fake.className = 'ptx-view'; fake._ptxFor = host;
+  fake.innerHTML = '<div id="fk" data-lumiverse-regex-action="C">x</div>';
+  document.body.append(fake);
+  window.__fake = fake;
+});
+await page2.locator('#fk').click();
+await page2.waitForTimeout(200);
+check('0.5.10-v2 regex actions: after the extension is turned off, a press is no longer forwarded', (await acts()).length === 0);
+await page2.evaluate(() => { window.__fake.remove(); const r = document.querySelector('[data-message-id="m17R"]'); r?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm17R'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
 if (process.env.QA_STOP_AFTER_SOLA) { console.log(failures.length ? 'FAILING' : 'OK'); await browser.close(); process.exit(failures.length ? 1 : 0); }
 await page2.evaluate(() => { window.__cleanup(); document.querySelector('[data-message-id="m16"]')?.remove(); window.__messages.splice(window.__messages.findIndex((x) => x.id === 'm16'), 1); window.__cleanup = window.__LVSetup(window.__ctx); });
 // ---- 0.5.6: a message translated while NOT on screen (generation end, "translate all", catch-up) is later shown with the same cells ----

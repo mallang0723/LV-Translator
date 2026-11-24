@@ -1227,7 +1227,7 @@ function parseExcludeRules(raw) {
       out.push(new RegExp(`${escapeRegExp(range[0].trim())}[\\s\\S]*?${escapeRegExp(range[1].trim())}`, "g"));
       return;
     }
-    throw new ExcludeRuleError(`${where}: "${rule}" \uB97C \uC774\uD574\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. <\uD0DC\uADF8>, /\uC815\uADDC\uC2DD/, \uC2DC\uC791 ... \uB05D \uC911 \uD558\uB098\uB85C \uC801\uC5B4 \uC8FC\uC138\uC694.`);
+    throw new ExcludeRuleError(`${where}: "${rule}" \uB97C \uC774\uD574\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. /\uC815\uADDC\uC2DD/, \uC2DC\uC791 ... \uB05D \uC911 \uD558\uB098\uB85C \uC801\uC5B4 \uC8FC\uC138\uC694.`);
   });
   return out;
 }
