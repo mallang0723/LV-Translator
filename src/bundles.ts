@@ -45,9 +45,41 @@ export function saveBundle(store: Store, value: UserBundle): UserBundle {
     freeContext: typeof value.freeContext === 'string' ? value.freeContext : '',
     incomingVoicePrompt: typeof value.incomingVoicePrompt === 'string' ? value.incomingVoicePrompt : '',
   };
+  const before = existing >= 0 ? store.userBundles[existing]!.incomingVoicePrompt : null;
   if (existing >= 0) store.userBundles[existing] = bundle;
   else store.userBundles.push(bundle);
+  if (before !== null && before !== bundle.incomingVoicePrompt) reapplyBundleVoice(store, bundle);
   return bundle;
+}
+
+/**
+ * The bundle's 대사 지침 was edited: every room that has it written into its own 「대사 지침」 (`voiceFrom` is the bundle) gets the new text and the
+ * switch on, the same as when the bundle is applied. The room's saved original value (`voiceBackup*`) stays as it is, so 「없음」 or another bundle
+ * still puts it back. A room whose bundle had no 대사 지침 yet (nothing saved) saves its current value first. When the edit empties the prompt, it is
+ * treated as the apply path treats an empty one: the saved original value is put back and the room's own is left alone from then on.
+ */
+export function reapplyBundleVoice(store: Store, bundle: UserBundle): number {
+  let count = 0;
+  for (const room of Object.values(store.chats)) {
+    if (room.voiceFrom !== bundle.id) continue;
+    if (bundle.incomingVoicePrompt.trim()) {
+      if (!room.voiceBackupSaved) {
+        room.voiceBackupSaved = true;
+        room.voiceBackupPrompt = room.incomingVoicePrompt;
+        room.voiceBackupEnabled = room.incomingVoiceEnabled;
+      }
+      room.incomingVoicePrompt = bundle.incomingVoicePrompt;
+      room.incomingVoiceEnabled = true;
+    } else if (room.voiceBackupSaved) {
+      room.incomingVoicePrompt = room.voiceBackupPrompt;
+      room.incomingVoiceEnabled = room.voiceBackupEnabled;
+      room.voiceBackupSaved = false;
+      room.voiceBackupPrompt = '';
+      room.voiceBackupEnabled = false;
+    } else continue;
+    count++;
+  }
+  return count;
 }
 
 export function deleteBundle(store: Store, id: string): void {

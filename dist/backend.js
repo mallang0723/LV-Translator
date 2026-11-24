@@ -1111,11 +1111,39 @@ function saveBundle(store, value) {
     freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
     incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
   };
+  const before = existing >= 0 ? store.userBundles[existing].incomingVoicePrompt : null;
   if (existing >= 0)
     store.userBundles[existing] = bundle;
   else
     store.userBundles.push(bundle);
+  if (before !== null && before !== bundle.incomingVoicePrompt)
+    reapplyBundleVoice(store, bundle);
   return bundle;
+}
+function reapplyBundleVoice(store, bundle) {
+  let count = 0;
+  for (const room of Object.values(store.chats)) {
+    if (room.voiceFrom !== bundle.id)
+      continue;
+    if (bundle.incomingVoicePrompt.trim()) {
+      if (!room.voiceBackupSaved) {
+        room.voiceBackupSaved = true;
+        room.voiceBackupPrompt = room.incomingVoicePrompt;
+        room.voiceBackupEnabled = room.incomingVoiceEnabled;
+      }
+      room.incomingVoicePrompt = bundle.incomingVoicePrompt;
+      room.incomingVoiceEnabled = true;
+    } else if (room.voiceBackupSaved) {
+      room.incomingVoicePrompt = room.voiceBackupPrompt;
+      room.incomingVoiceEnabled = room.voiceBackupEnabled;
+      room.voiceBackupSaved = false;
+      room.voiceBackupPrompt = "";
+      room.voiceBackupEnabled = false;
+    } else
+      continue;
+    count++;
+  }
+  return count;
 }
 function deleteBundle(store, id) {
   store.userBundles = store.userBundles.filter((b) => b.id !== id);
