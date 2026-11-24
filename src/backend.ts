@@ -7,7 +7,7 @@ import { hostCaps } from './adapter/host';
 import { appliedMark, deleteMark, deleteSeen, reconcileTt, repairedKeys, shiftAfterDelete } from './adapter/swipe-repair';
 import { classifyPeer, glossaryText, handshake, PEER_ID, type PeerState, planGlossary, PROVIDES } from './adapter/contract';
 import { buildPubFromTt, keptTagNames } from './adapter/pub';
-import { deleteBundle, saveBundle } from './bundles';
+import { applyRebases, deleteBundle, reapplyBundleVoice, saveBundle, type VoiceRebase } from './bundles';
 import { type ConnectionHint, friendlyError, resolveConnection } from './connection';
 import { createEmuBridge, type EmuHost, eventMsg, eventRow, resolveSpeakers, TT_KEY, WideReads } from './host-emu/backend-ops';
 import { planGlossaryMigration, planScopeMigration } from './adapter/migrate';
@@ -76,10 +76,15 @@ function errorText(e: unknown): string {
 
 interface TtScope {
   glossary?: string;
+  incomingVoicePrompt?: string;
+  incomingVoiceEnabled?: boolean;
 }
 interface TtConfig {
   config?: { defaults?: TtScope; chats?: Record<string, TtScope>; paragraph?: { keepTags?: string } };
 }
+
+/** Room 대사 지침 values changed by a bundle edit that an open original form may still hold the old text of (per user, `applyRebases`). */
+const voiceRebases = new Map<string, VoiceRebase[]>();
 
 const configCache = new Map<string, { at: number; value: TtConfig }>();
 
@@ -357,6 +362,9 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
     if (msg.op === 'storage.patch') {
       const prev = await readTtConfig(uid, true);
       const next = { ...prev, ...((msg.args[0] ?? {}) as Record<string, unknown>) };
+      // The original saves its whole in-memory config: a bundle edit made since it loaded must not be undone by it.
+      const pending = voiceRebases.get(userKey(uid));
+      if (pending?.length && next.config && next.config !== prev.config) voiceRebases.set(userKey(uid), applyRebases(next.config as never, pending));
       await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
       configCache.set(userKey(uid), { at: Date.now(), value: next as TtConfig });
       reply({ ok: true, data: next });
@@ -455,7 +463,19 @@ async function handle(msg: ToBackend, uid: Uid): Promise<void> {
     }
     case 'save_bundle': {
       const store = await loadStore(uid);
-      saveBundle(store, msg.bundle);
+      const oldPrompt = store.userBundles.find((b) => b.id === msg.bundle.id)?.incomingVoicePrompt ?? null;
+      const saved = saveBundle(store, msg.bundle);
+      if (oldPrompt !== null && oldPrompt !== saved.incomingVoicePrompt) {
+        // The rooms that use the bundle hold its 대사 지침 in the original's own scope (tt-config.json): change it there.
+        const prev = await readTtConfig(uid, true);
+        const tt = structuredClone(prev);
+        const done = reapplyBundleVoice(store, tt as never, saved, oldPrompt);
+        if (done.length) {
+          await spindle.userStorage.setJson(TT_CONFIG_PATH, tt, { indent: 2, userId: uid });
+          configCache.set(userKey(uid), { at: Date.now(), value: tt });
+          voiceRebases.set(userKey(uid), [...(voiceRebases.get(userKey(uid)) ?? []), ...done]);
+        }
+      }
       await saveStore(uid, store);
       await sendState(uid);
       return;

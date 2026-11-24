@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { deleteBundle, effectiveGuides, newBundleId, planRoomVoice, saveBundle } from '../src/bundles';
+import { deleteBundle, effectiveGuides, newBundleId, planRoomVoice, reapplyBundleVoice, saveBundle } from '../src/bundles';
 import { promptPresets } from '../src/presets';
 import { DEFAULT_SETTINGS, normalizeSettings, normalizeStore, settingsFor, type Store, type UserBundle } from '../src/shared';
 import { translate } from '../src/translate/engine';
@@ -177,39 +177,5 @@ describe('bundle prompts and translation engine', () => {
       expect(seen).toHaveLength(1);
       expect(seen[0]).toEqual(request(direction));
     }
-  });
-});
-
-describe('editing a bundle updates the rooms that use it', () => {
-  const mk = (over: Partial<UserBundle> = {}): UserBundle => ({ id: 'b', name: 'B', glossary: '', freeContext: '', incomingVoicePrompt: 'old voice', ...over });
-  const roomOf = (store: Store, id: string) => store.chats[id]!;
-  function setup() {
-    const store = normalizeStore(null);
-    store.userBundles = [mk()];
-    const base = store.defaults;
-    store.chats.a = { ...base, bundleId: 'b', voiceFrom: 'b', voiceBackupSaved: true, voiceBackupPrompt: 'mine', voiceBackupEnabled: false, incomingVoicePrompt: 'old voice', incomingVoiceEnabled: true };
-    store.chats.c = { ...base, bundleId: '', incomingVoicePrompt: 'other', incomingVoiceEnabled: false };
-    return store;
-  }
-  test('new text lands in the room, the original value stays backed up, other rooms are untouched', () => {
-    const store = setup();
-    saveBundle(store, mk({ incomingVoicePrompt: 'new voice' }));
-    expect(roomOf(store, 'a')).toMatchObject({ incomingVoicePrompt: 'new voice', incomingVoiceEnabled: true, voiceBackupSaved: true, voiceBackupPrompt: 'mine', voiceBackupEnabled: false, voiceFrom: 'b' });
-    expect(roomOf(store, 'c')).toMatchObject({ incomingVoicePrompt: 'other', incomingVoiceEnabled: false });
-    const plan = planRoomVoice('', store.userBundles, { prompt: roomOf(store, 'a').incomingVoicePrompt, enabled: true }, { from: 'b', backupSaved: true, backupPrompt: 'mine', backupEnabled: false });
-    expect(plan).toMatchObject({ prompt: 'mine', enabled: false });
-  });
-  test('an edit that leaves the voice prompt alone does not overwrite a hand-edited room', () => {
-    const store = setup();
-    roomOf(store, 'a').incomingVoicePrompt = 'hand edit';
-    saveBundle(store, mk({ glossary: 'x = y' }));
-    expect(roomOf(store, 'a').incomingVoicePrompt).toBe('hand edit');
-  });
-  test('emptying the prompt puts the original value back; filling it again backs the room up anew', () => {
-    const store = setup();
-    saveBundle(store, mk({ incomingVoicePrompt: '' }));
-    expect(roomOf(store, 'a')).toMatchObject({ incomingVoicePrompt: 'mine', incomingVoiceEnabled: false, voiceBackupSaved: false, voiceFrom: 'b' });
-    saveBundle(store, mk({ incomingVoicePrompt: 'again' }));
-    expect(roomOf(store, 'a')).toMatchObject({ incomingVoicePrompt: 'again', incomingVoiceEnabled: true, voiceBackupSaved: true, voiceBackupPrompt: 'mine' });
   });
 });

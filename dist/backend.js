@@ -1111,39 +1111,61 @@ function saveBundle(store, value) {
     freeContext: typeof value.freeContext === "string" ? value.freeContext : "",
     incomingVoicePrompt: typeof value.incomingVoicePrompt === "string" ? value.incomingVoicePrompt : ""
   };
-  const before = existing >= 0 ? store.userBundles[existing].incomingVoicePrompt : null;
   if (existing >= 0)
     store.userBundles[existing] = bundle;
   else
     store.userBundles.push(bundle);
-  if (before !== null && before !== bundle.incomingVoicePrompt)
-    reapplyBundleVoice(store, bundle);
   return bundle;
 }
-function reapplyBundleVoice(store, bundle) {
-  let count = 0;
-  for (const room of Object.values(store.chats)) {
+function reapplyBundleVoice(store, tt, bundle, oldPrompt) {
+  const out = [];
+  const chats = tt.config?.chats;
+  if (!chats)
+    return out;
+  const next = bundle.incomingVoicePrompt;
+  for (const [chatId, room] of Object.entries(store.chats)) {
     if (room.voiceFrom !== bundle.id)
       continue;
-    if (bundle.incomingVoicePrompt.trim()) {
+    const scope = chats[chatId];
+    if (!scope)
+      continue;
+    const value = typeof scope.incomingVoicePrompt === "string" ? scope.incomingVoicePrompt : "";
+    const enabled = scope.incomingVoiceEnabled === true;
+    if (next.trim()) {
       if (!room.voiceBackupSaved) {
         room.voiceBackupSaved = true;
-        room.voiceBackupPrompt = room.incomingVoicePrompt;
-        room.voiceBackupEnabled = room.incomingVoiceEnabled;
-      }
-      room.incomingVoicePrompt = bundle.incomingVoicePrompt;
-      room.incomingVoiceEnabled = true;
-    } else if (room.voiceBackupSaved) {
-      room.incomingVoicePrompt = room.voiceBackupPrompt;
-      room.incomingVoiceEnabled = room.voiceBackupEnabled;
+        room.voiceBackupPrompt = value;
+        room.voiceBackupEnabled = enabled;
+      } else if (value !== oldPrompt)
+        continue;
+      scope.incomingVoicePrompt = next;
+      scope.incomingVoiceEnabled = true;
+      out.push({ chatId, from: value, prompt: next, enabled: true });
+    } else if (room.voiceBackupSaved && value === oldPrompt) {
+      scope.incomingVoicePrompt = room.voiceBackupPrompt;
+      scope.incomingVoiceEnabled = room.voiceBackupEnabled;
+      out.push({ chatId, from: value, prompt: room.voiceBackupPrompt, enabled: room.voiceBackupEnabled });
       room.voiceBackupSaved = false;
       room.voiceBackupPrompt = "";
       room.voiceBackupEnabled = false;
-    } else
-      continue;
-    count++;
+    }
   }
-  return count;
+  return out;
+}
+function applyRebases(config, rebases) {
+  const left = [];
+  for (const r of rebases) {
+    const scope = config?.chats?.[r.chatId];
+    if (!scope) {
+      left.push(r);
+      continue;
+    }
+    if (scope.incomingVoicePrompt === r.from) {
+      scope.incomingVoicePrompt = r.prompt;
+      scope.incomingVoiceEnabled = r.enabled;
+    }
+  }
+  return left;
 }
 function deleteBundle(store, id) {
   store.userBundles = store.userBundles.filter((b) => b.id !== id);
@@ -2633,6 +2655,7 @@ function errorText(e) {
     return "\uBC88\uC5ED\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4.";
   return friendlyError(e instanceof Error ? e.message : String(e));
 }
+var voiceRebases = new Map;
 var configCache = new Map;
 async function readTtConfig(uid, fresh = false) {
   const cached = configCache.get(userKey(uid));
@@ -2872,6 +2895,9 @@ async function emu(uid, msg) {
     if (msg.op === "storage.patch") {
       const prev = await readTtConfig(uid, true);
       const next = { ...prev, ...msg.args[0] ?? {} };
+      const pending = voiceRebases.get(userKey(uid));
+      if (pending?.length && next.config && next.config !== prev.config)
+        voiceRebases.set(userKey(uid), applyRebases(next.config, pending));
       await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
       configCache.set(userKey(uid), { at: Date.now(), value: next });
       reply({ ok: true, data: next });
@@ -2972,7 +2998,18 @@ async function handle(msg, uid) {
     }
     case "save_bundle": {
       const store = await loadStore(uid);
-      saveBundle(store, msg.bundle);
+      const oldPrompt = store.userBundles.find((b) => b.id === msg.bundle.id)?.incomingVoicePrompt ?? null;
+      const saved = saveBundle(store, msg.bundle);
+      if (oldPrompt !== null && oldPrompt !== saved.incomingVoicePrompt) {
+        const prev = await readTtConfig(uid, true);
+        const tt = structuredClone(prev);
+        const done = reapplyBundleVoice(store, tt, saved, oldPrompt);
+        if (done.length) {
+          await spindle.userStorage.setJson(TT_CONFIG_PATH, tt, { indent: 2, userId: uid });
+          configCache.set(userKey(uid), { at: Date.now(), value: tt });
+          voiceRebases.set(userKey(uid), [...voiceRebases.get(userKey(uid)) ?? [], ...done]);
+        }
+      }
       await saveStore(uid, store);
       await sendState(uid);
       return;

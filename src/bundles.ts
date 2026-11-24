@@ -45,41 +45,86 @@ export function saveBundle(store: Store, value: UserBundle): UserBundle {
     freeContext: typeof value.freeContext === 'string' ? value.freeContext : '',
     incomingVoicePrompt: typeof value.incomingVoicePrompt === 'string' ? value.incomingVoicePrompt : '',
   };
-  const before = existing >= 0 ? store.userBundles[existing]!.incomingVoicePrompt : null;
   if (existing >= 0) store.userBundles[existing] = bundle;
   else store.userBundles.push(bundle);
-  if (before !== null && before !== bundle.incomingVoicePrompt) reapplyBundleVoice(store, bundle);
   return bundle;
 }
 
+/** The room-scope fields of the original's own settings (`tt-config.json` → `config.chats[id]`) that the 대사 지침 lives in. */
+export interface TtVoiceScope {
+  incomingVoicePrompt?: string;
+  incomingVoiceEnabled?: boolean;
+  [key: string]: unknown;
+}
+export interface TtVoiceConfig {
+  config?: { chats?: Record<string, TtVoiceScope>; [key: string]: unknown };
+  [key: string]: unknown;
+}
+/** A change made to one room's value in the original's scope. While an open original form may still hold `from`, a later save of it is corrected to `prompt`. */
+export interface VoiceRebase {
+  chatId: string;
+  from: string;
+  prompt: string;
+  enabled: boolean;
+}
+
 /**
- * The bundle's 대사 지침 was edited: every room that has it written into its own 「대사 지침」 (`voiceFrom` is the bundle) gets the new text and the
- * switch on, the same as when the bundle is applied. The room's saved original value (`voiceBackup*`) stays as it is, so 「없음」 or another bundle
- * still puts it back. A room whose bundle had no 대사 지침 yet (nothing saved) saves its current value first. When the edit empties the prompt, it is
- * treated as the apply path treats an empty one: the saved original value is put back and the room's own is left alone from then on.
+ * The bundle's 대사 지침 was edited (`oldPrompt` -> `bundle.incomingVoicePrompt`). The room's real 「대사 지침」 is the original's own
+ * (`config.chats[id]` in `tt-config.json`, which response translation reads); our `store.chats[id]` only keeps the bookkeeping (`voiceFrom`, `voiceBackup*`).
+ * Every room with the bundle applied (`voiceFrom`) is changed in `tt` (mutated in place) as follows:
+ * - the room's value still is the old bundle text (a hand edit is kept): it becomes the new text and the switch is turned on; the saved original value stays;
+ * - nothing was saved yet (the bundle had no 대사 지침 when applied or it was emptied before): the room's current value is saved first, then the new text goes in;
+ * - the new prompt is empty: the saved original value is put back into the original's scope, and only then is the saved copy dropped.
+ *   If the room's value was hand edited, nothing is touched and the saved copy stays, so 「없음」 still restores it.
+ * Returns what changed, so a stale form of the original can be corrected when it saves (`applyRebases`).
  */
-export function reapplyBundleVoice(store: Store, bundle: UserBundle): number {
-  let count = 0;
-  for (const room of Object.values(store.chats)) {
+export function reapplyBundleVoice(store: Store, tt: TtVoiceConfig, bundle: UserBundle, oldPrompt: string): VoiceRebase[] {
+  const out: VoiceRebase[] = [];
+  const chats = tt.config?.chats;
+  if (!chats) return out;
+  const next = bundle.incomingVoicePrompt;
+  for (const [chatId, room] of Object.entries(store.chats)) {
     if (room.voiceFrom !== bundle.id) continue;
-    if (bundle.incomingVoicePrompt.trim()) {
+    const scope = chats[chatId];
+    if (!scope) continue;
+    const value = typeof scope.incomingVoicePrompt === 'string' ? scope.incomingVoicePrompt : '';
+    const enabled = scope.incomingVoiceEnabled === true;
+    if (next.trim()) {
       if (!room.voiceBackupSaved) {
         room.voiceBackupSaved = true;
-        room.voiceBackupPrompt = room.incomingVoicePrompt;
-        room.voiceBackupEnabled = room.incomingVoiceEnabled;
-      }
-      room.incomingVoicePrompt = bundle.incomingVoicePrompt;
-      room.incomingVoiceEnabled = true;
-    } else if (room.voiceBackupSaved) {
-      room.incomingVoicePrompt = room.voiceBackupPrompt;
-      room.incomingVoiceEnabled = room.voiceBackupEnabled;
+        room.voiceBackupPrompt = value;
+        room.voiceBackupEnabled = enabled;
+      } else if (value !== oldPrompt) continue;
+      scope.incomingVoicePrompt = next;
+      scope.incomingVoiceEnabled = true;
+      out.push({ chatId, from: value, prompt: next, enabled: true });
+    } else if (room.voiceBackupSaved && value === oldPrompt) {
+      scope.incomingVoicePrompt = room.voiceBackupPrompt;
+      scope.incomingVoiceEnabled = room.voiceBackupEnabled;
+      out.push({ chatId, from: value, prompt: room.voiceBackupPrompt, enabled: room.voiceBackupEnabled });
       room.voiceBackupSaved = false;
       room.voiceBackupPrompt = '';
       room.voiceBackupEnabled = false;
-    } else continue;
-    count++;
+    }
   }
-  return count;
+  return out;
+}
+
+/** A save from an original form that still held the pre-edit text: where the room's value still is `from`, it becomes the edited one. */
+export function applyRebases(config: TtVoiceConfig['config'] | undefined, rebases: readonly VoiceRebase[]): VoiceRebase[] {
+  const left: VoiceRebase[] = [];
+  for (const r of rebases) {
+    const scope = config?.chats?.[r.chatId];
+    if (!scope) {
+      left.push(r);
+      continue;
+    }
+    if (scope.incomingVoicePrompt === r.from) {
+      scope.incomingVoicePrompt = r.prompt;
+      scope.incomingVoiceEnabled = r.enabled;
+    }
+  }
+  return left;
 }
 
 export function deleteBundle(store: Store, id: string): void {
