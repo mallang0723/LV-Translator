@@ -115,18 +115,17 @@ describe('bundle creation', () => {
     expect(store.userBundles).toHaveLength(1);
   });
 
-  test('uses native UUID when available', () => {
-    expect(newBundleId({ randomUUID: () => '00000000-0000-4000-8000-000000000000' })).toBe('bundle-00000000-0000-4000-8000-000000000000');
+  test('uses host UUID when available', () => {
+    expect(newBundleId({ uuid: { v4: () => '00000000-0000-4000-8000-000000000000' } })).toBe('bundle-00000000-0000-4000-8000-000000000000');
   });
 
-  test('plain HTTP fallback works without randomUUID', () => {
-    const cryptoApi = { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) };
-    const ids = Array.from({ length: 50 }, () => newBundleId(cryptoApi));
+  test('older hosts use the UUID fallback', () => {
+    const ids = Array.from({ length: 50 }, () => newBundleId());
     expect(ids.every((id) => uuid.test(id))).toBe(true);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  test('also handles hosts with no crypto methods', () => {
+  test('also handles hosts with no UUID service', () => {
     expect(newBundleId({})).toMatch(uuid);
   });
 });

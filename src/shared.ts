@@ -1,3 +1,4 @@
+import { newId, type UUIDContext } from './uuid';
 // Types, defaults and messages shared by the backend and frontend.
 
 import { normalizeIllustrations } from './illustrations';
@@ -12,7 +13,7 @@ const notesTools = createAssembly({ currentScope: () => ({}), storedConfig: { pr
 
 /** Limits inherited from Translation Tools 1.8.0: 100 notes, names up to 60 characters, text up to 12,000. */
 export const NOTE_LIMITS = { count: notesTools.NOTES_MAX as number, name: notesTools.NOTE_NAME_MAX as number, text: FREE_CONTEXT_MAX };
-export const newNoteId = (): string => notesTools.newNoteId();
+export const newNoteId = (ctx?: UUIDContext): string => `note-${newId(ctx)}`;
 
 /**
  * below: original, then translation. above: translation, then original. only: translation alone.

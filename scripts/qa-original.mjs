@@ -13,7 +13,16 @@ const work = mkdtempSync(join(tmpdir(), 'lv-tt-qa-'));
 const shots = process.env.QA_SHOT_DIR || join(tmpdir(), 'lv-translator-qa');
 mkdirSync(shots, { recursive: true });
 writeFileSync(join(work, 'entry.ts'), `import { startOriginal, createSettingsHost } from '${root}src/host-emu/boot';\n(window as any).LVEmu = { startOriginal, createSettingsHost };\n`);
-execFileSync('bun', ['build', join(work, 'entry.ts'), '--outfile', join(work, 'emu.js'), '--target', 'browser'], { stdio: 'inherit' });
+// Exercise the same in-memory vendor anchors as the shipped frontend.
+function buildBrowser(entry, output) {
+  execFileSync('bun', ['-e', `
+    import { originalUUIDPlugin } from ${JSON.stringify(join(root, 'scripts/patches.mjs'))};
+    const result = await Bun.build({ entrypoints: [${JSON.stringify(entry)}], target: 'browser', plugins: [originalUUIDPlugin] });
+    if (!result.success) throw new AggregateError(result.logs, 'Browser QA build failed');
+    await Bun.write(${JSON.stringify(output)}, result.outputs[0]);
+  `], { stdio: 'inherit' });
+}
+buildBrowser(join(work, 'entry.ts'), join(work, 'emu.js'));
 const emu = readFileSync(join(work, 'emu.js'), 'utf8');
 
 const pwm = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -221,7 +230,7 @@ import { blockKey } from '${root}src/adapter/keys';
 (window as any).LVInt = { setup, createEmuBridge: backendOps.createEmuBridge, eventRow: (backendOps as any).eventRow, blockKey, normalizeStore, sourceHash };
 (window as any).__LVSetup = setup;
 `);
-execFileSync('bun', ['build', join(work, 'entry2.ts'), '--outfile', join(work, 'int.js'), '--target', 'browser'], { stdio: 'inherit' });
+buildBrowser(join(work, 'entry2.ts'), join(work, 'int.js'));
 const intJs = readFileSync(join(work, 'int.js'), 'utf8');
 const page2 = await browser.newPage({ viewport: { width: 420, height: 900 } });
 page2.setDefaultTimeout(6000);

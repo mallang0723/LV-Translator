@@ -1,4 +1,6 @@
 // @bun
+// st_translator 0.5.11-v1
+
 // src/adapter/host.ts
 function hostCaps(api) {
   const caps = api?.host?.capabilities ?? {};
@@ -1048,6 +1050,17 @@ var BUILTIN_PRESET_ORDER = new Map([
   "builtin-bilingual-dialogue-korean",
   "builtin-bilingual-dialogue-korean-v2"
 ].map((id, index) => [id, index]));
+// src/uuid.ts
+function newId(ctx) {
+  if (typeof ctx?.uuid?.v4 === "function")
+    return ctx.uuid.v4();
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // src/translate/glossary.ts
 function parseGlossary(raw) {
   const pairs = [];
@@ -1083,19 +1096,8 @@ function effectiveGuides(store, settings) {
     incomingVoicePrompt: join(bundle.incomingVoicePrompt, settings.incomingVoicePrompt)
   };
 }
-function newBundleId(cryptoApi = globalThis.crypto) {
-  if (typeof cryptoApi?.randomUUID === "function")
-    return `bundle-${cryptoApi.randomUUID()}`;
-  const bytes = new Uint8Array(16);
-  if (typeof cryptoApi?.getRandomValues === "function")
-    cryptoApi.getRandomValues(bytes);
-  else
-    for (let i = 0;i < bytes.length; i++)
-      bytes[i] = Math.floor(Math.random() * 256);
-  bytes[6] = bytes[6] & 15 | 64;
-  bytes[8] = bytes[8] & 63 | 128;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+function newBundleId(ctx) {
+  return `bundle-${newId(ctx)}`;
 }
 function saveBundle(store, value) {
   if (!value || typeof value.name !== "string" || !value.name.trim())
@@ -2665,7 +2667,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.10";
+var SELF_VERSION = "0.5.11-v1";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;

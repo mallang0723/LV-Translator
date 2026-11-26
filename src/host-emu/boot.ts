@@ -1,3 +1,4 @@
+import type { UUIDContext } from '../uuid';
 // Starts the original Translation Tools 1.10.0 inside Lumiverse: styles, DOM anchors, then the original itself.
 import ORIGINAL from '../vendor/tt-1.10.0/personal-extension/extension.js' with { type: 'text' };
 import { thinkAwareStorage } from '../adapter/think-tags';
@@ -8,6 +9,7 @@ import { type EmuHandle, type MarinaraStorage, runOriginal } from './runtime';
 import { SHIM_CSS } from './shim-css';
 
 export interface StartOptions {
+  ctx?: UUIDContext;
   bridge: HostBridge;
   storage: MarinaraStorage;
   activeChatId: () => string | null;
@@ -36,7 +38,7 @@ export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandl
   // Before the original starts: it looks for the cache while it starts.
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
   // The thinking tags are always excluded: added to the tag list the original reads, never to what is saved (adapter/think-tags.ts).
-  const emu = runOriginal({ source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: thinkAwareStorage(opts.storage), activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
+  const emu = runOriginal({ ctx: opts.ctx, source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: thinkAwareStorage(opts.storage), activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
     emu,
     stop() {

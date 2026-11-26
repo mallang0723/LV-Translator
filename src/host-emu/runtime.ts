@@ -1,7 +1,8 @@
-// Runs the original Translation Tools 1.10.0 `extension.js` whole and unmodified inside Lumiverse.
+import { newId, type UUIDContext } from '../uuid';
+// Runs the original Translation Tools 1.10.0 `extension.js` with build-time UUID anchors inside Lumiverse.
 // The original is a Marinara "personal extension": a script body that expects a `marinara` object, the page's
 // `window.fetch` (it wraps it) and the active chat id in localStorage. Those are provided here as shadows.
-// Nothing in the original is edited; see scripts/verify-original.mjs.
+// Pinned files stay unchanged; see scripts/patches.mjs and scripts/verify-original.mjs.
 
 import { createApiFetch, type HostBridge } from './api';
 import { guardStorage, STORAGE_TIMEOUT_MS } from './guard';
@@ -18,6 +19,7 @@ export interface MarinaraStorage {
 export interface EmuOptions {
   /** The text of the original `extension.js`. */
   source: string;
+  ctx?: UUIDContext;
   bridge: HostBridge;
   storage: MarinaraStorage;
   /** Chat id of the chat on screen (Lumiverse route), or null. */
@@ -119,6 +121,7 @@ export function runOriginal(opts: EmuOptions): EmuHandle {
   const cleanups: Array<() => unknown> = [watchOnPrimary()];
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const marinara = {
+    newId: () => newId(opts.ctx),
     extension: { id: EXTENSION_ID },
     storage: guardStorage(opts.storage, opts.storageTimeoutMs ?? STORAGE_TIMEOUT_MS),
     log: { info: (...a: unknown[]) => log.info(...a), warn: (...a: unknown[]) => log.warn(...a), error: (...a: unknown[]) => log.error(...a) },

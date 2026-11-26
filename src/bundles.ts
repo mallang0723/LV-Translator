@@ -1,3 +1,4 @@
+import { newId, type UUIDContext } from './uuid';
 import type { ChatSettings, Store, UserBundle } from './shared';
 import { parseGlossary } from './translate/glossary';
 
@@ -21,16 +22,9 @@ export function effectiveGuides(store: GuideLibrary, settings: ChatSettings): Gu
   };
 }
 
-/** randomUUID is secure-context-only; getRandomValues also works on plain HTTP. */
-export function newBundleId(cryptoApi: Partial<Pick<Crypto, 'randomUUID' | 'getRandomValues'>> | undefined = globalThis.crypto): string {
-  if (typeof cryptoApi?.randomUUID === 'function') return `bundle-${cryptoApi.randomUUID()}`;
-  const bytes = new Uint8Array(16);
-  if (typeof cryptoApi?.getRandomValues === 'function') cryptoApi.getRandomValues(bytes);
-  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  return `bundle-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+/** Shared bundle identifiers use the same HTTP-compatible UUID implementation. */
+export function newBundleId(ctx?: UUIDContext): string {
+  return `bundle-${newId(ctx)}`;
 }
 
 /** Update the shared library, keeping references linked to the same id. */

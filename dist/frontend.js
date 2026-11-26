@@ -1,3 +1,16 @@
+// st_translator 0.5.11-v1
+
+// src/uuid.ts
+function newId(ctx) {
+  if (typeof ctx?.uuid?.v4 === "function")
+    return ctx.uuid.v4();
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // src/illustrations.ts
 var MALFORMED_ANNOTATION = "⟦삽화가: 그림 태그 형식 오류 — 고치면 다시 시도됩니다⟧";
 var START = /<pic(?=[\s/>]|$)|<pic⟦삽화가:|!\[그림:|\[⚠️ 그림 생성 실패\(|\[한 답변당 그림 상한\(|<pic-(?:failed|skipped)\b/g;
@@ -1107,7 +1120,7 @@ function createAssembly(host) {
   }
   function newNoteId() {
     try {
-      return `note-${crypto.randomUUID()}`;
+      return `note-${newId(host)}`;
     } catch {
       return `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     }
@@ -6522,7 +6535,7 @@ Dialogue the model already wrote (keep as is):
 
   function newNoteId() {
     try {
-      return \`note-\${crypto.randomUUID()}\`;
+      return \`note-\${marinara.newId()}\`;
     } catch {
       return \`note-\${Date.now().toString(36)}-\${Math.random().toString(36).slice(2)}\`;
     }
@@ -6530,7 +6543,7 @@ Dialogue the model already wrote (keep as is):
 
   function newPresetId() {
     try {
-      return \`custom-\${crypto.randomUUID()}\`;
+      return \`custom-\${marinara.newId()}\`;
     } catch {
       return \`custom-\${Date.now().toString(36)}-\${Math.random().toString(36).slice(2)}\`;
     }
@@ -9607,6 +9620,7 @@ function runOriginal(opts) {
   const cleanups = [watchOnPrimary()];
   const timers = new Set;
   const marinara = {
+    newId: () => newId(opts.ctx),
     extension: { id: EXTENSION_ID },
     storage: guardStorage(opts.storage, opts.storageTimeoutMs ?? STORAGE_TIMEOUT_MS),
     log: { info: (...a) => log.info(...a), warn: (...a) => log.warn(...a), error: (...a) => log.error(...a) },
@@ -9791,7 +9805,7 @@ function startOriginal(opts) {
     }
   });
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
-  const emu = runOriginal({ source: opts.source ?? extension_default, bridge: opts.bridge, storage: thinkAwareStorage(opts.storage), activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
+  const emu = runOriginal({ ctx: opts.ctx, source: opts.source ?? extension_default, bridge: opts.bridge, storage: thinkAwareStorage(opts.storage), activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
     emu,
     stop() {
@@ -10772,6 +10786,7 @@ function setup(ctx) {
     patch: (p) => call("storage.patch", [p])
   };
   const original = startOriginal({
+    ctx,
     bridge,
     cache,
     storage: emuStorage,

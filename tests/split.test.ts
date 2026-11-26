@@ -77,7 +77,7 @@ const vendor = (() => {
   return new Function(`${src.slice(a, b)}\nreturn { extractSegments, stripThinking };`)() as { extractSegments(s: string): { map: Map<number, string>; rest: string } };
 })();
 
-describe('reading replies like the original (0.5.3, Honey SYHO-234)', () => {
+describe('reading replies like the original (0.5.3)', () => {
   const replies = [
     '<segment id="1">\n하나\n</segment>\n<segment id="2">\n둘\n</segment>',
     '<segment id="1">\n하나\n<segment id="2">\n둘\n', // closing tags missing (loose)
@@ -109,7 +109,7 @@ describe('reading replies like the original (0.5.3, Honey SYHO-234)', () => {
   };
   const withPre = (r: ReturnType<typeof request>) => ({ ...r, messages: [...r.messages, { role: 'assistant', content: '알겠습니다:' }] });
 
-  test('Honey\'s repro: no closing tags, <think>, prefill, limit set: the result read by the original equals the no-limit result', async () => {
+  test('review repro: no closing tags, <think>, prefill, limit set: the result read by the original equals the no-limit result', async () => {
     const req = withPre(request([800, 800, 800, 800, 800]));
     const plain = await withBatchLimit(sloppy(), () => 0)(req);
     const limited = await withBatchLimit(sloppy(), () => 1700)(req);

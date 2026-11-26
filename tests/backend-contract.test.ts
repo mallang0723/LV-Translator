@@ -24,7 +24,7 @@ const meta = (m: any) => m.metadata ?? {};
 test('handshake: the translator provides pub-translation@1 and glossary@1 again, readable by any extension', async () => {
   await withEmu({}, async (h) => {
     expect(h.rpc.policies.get('contract')).toEqual({ requires: [] });
-    expect(h.rpc.synced.get('contract')).toEqual({ name: 'lv-tx', v: 1, ext: 'st_translator', version: '0.5.10', provides: ['pub-translation@1', 'glossary@1'] });
+    expect(h.rpc.synced.get('contract')).toEqual({ name: 'lv-tx', v: 1, ext: 'st_translator', version: '0.5.11-v1', provides: ['pub-translation@1', 'glossary@1'] });
   });
 });
 

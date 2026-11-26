@@ -1,3 +1,4 @@
+import type { UUIDContext } from './uuid';
 // Frontend: settings tab, per-message translation controls, outgoing message translation
 // (the message create request is translated before it leaves the browser, like Marinara),
 // and the draft translate button beside the chat input.
@@ -200,6 +201,7 @@ export function setup(ctx: SpindleFrontendContext) {
     patch: (p) => call('storage.patch', [p]),
   };
   const original = startOriginal({
+    ctx: ctx as SpindleFrontendContext & UUIDContext,
     bridge,
     cache,
     storage: emuStorage,
