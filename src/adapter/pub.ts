@@ -29,10 +29,10 @@ export interface TtRecord {
 const isRecord = (v: unknown): v is TtRecord => !!v && typeof v === 'object' && typeof (v as TtRecord).map === 'object' && (v as TtRecord).map !== null;
 
 /** Tag names the original keeps (its 문단 번역 "번역에서 제외할 태그"), as `keptTagNames` reads them. */
-export function keptTagNames(raw: unknown): Set<string> {
-  // The thinking tags are always kept (think-tags.ts): the original is given the list with them, so the keys here follow the same list.
+export function keptTagNames(raw: unknown, excludeThinking = true): Set<string> {
+  // Use the same effective list as the original, including the per-user thinking setting.
   return new Set(
-    withThinkTags(raw)
+    withThinkTags(raw, excludeThinking)
       .split(/[\s,;]+/)
       .map((part) => {
         const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);

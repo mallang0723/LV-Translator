@@ -19,7 +19,7 @@ describe('frontend UUID compatibility', () => {
     for (const file of files) {
       const source = readFileSync(new URL(file, dist), 'utf8');
       expect(source).not.toMatch(blocked);
-      expect(source).toContain('0.5.11');
+      expect(source).toContain('0.5.12-v1');
       expect(source).toContain('marinara.newId()');
     }
   });

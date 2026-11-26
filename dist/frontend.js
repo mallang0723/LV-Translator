@@ -1,4 +1,4 @@
-// st_translator 0.5.11
+// st_translator 0.5.12-v1
 
 // src/uuid.ts
 function newId(ctx) {
@@ -8628,46 +8628,44 @@ The user's persona is named "\${name}". When she/her/he/him/they or similar refe
 
 // src/adapter/think-tags.ts
 var THINK_TAGS = ["think", "thinking", "reasoning"];
-var nameOf = (part) => {
-  const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);
-  return m ? (m[1] || m[2] || "").toLowerCase() : "";
-};
-var isThink = (part) => THINK_TAGS.includes(nameOf(part));
 var LIMIT = 500;
 var USER_KEEP_TAGS_MAX = LIMIT - THINK_TAGS.join(" ").length - 1;
-function withThinkTags(raw) {
+function withThinkTags(raw, enabled = true) {
+  if (!enabled)
+    return String(raw ?? "");
   return [...THINK_TAGS, String(raw ?? "").trim()].filter(Boolean).join(" ");
-}
-function hideThinkTags(shown) {
-  return String(shown ?? "").split(/([\s,;]+)/).filter((part, i) => i % 2 === 1 || !isThink(part)).join("").replace(/^[\s,;]+/, "").replace(/[ \t]{2,}/g, " ");
-}
-function saveKeepTags(shown, before) {
-  const prior = String(before ?? "");
-  const own = prior.split(/[\s,;]+/).filter((p) => p && isThink(p));
-  const base = hideThinkTags(shown);
-  if (prior.length > LIMIT - THINK_TAGS.join(" ").length - 1 && prior.startsWith(base))
-    return prior;
-  return [base.trim(), ...own].filter(Boolean).join(" ");
 }
 function thinkAwareStorage(inner) {
   let saved = "";
+  let enabled = true;
+  let supplied = "";
+  const unprefix = (text) => {
+    if (text !== supplied.slice(0, LIMIT))
+      return text;
+    return saved;
+  };
   const seen = (r) => {
+    enabled = r?.lvExcludeThinking !== false;
     const c = r?.config && typeof r.config === "object" ? r.config : {};
     const raw = c.paragraph?.keepTags;
     saved = typeof raw === "string" ? raw : "";
-    return { ...r ?? {}, config: { ...c, paragraph: { ...c.paragraph ?? {}, keepTags: withThinkTags(saved) } } };
+    if (!enabled)
+      return r;
+    supplied = withThinkTags(saved);
+    return { ...r ?? {}, config: { ...c, paragraph: { ...c.paragraph ?? {}, keepTags: supplied } } };
   };
   return {
     ...inner,
     get: async () => seen(await inner.get()),
     patch: async (p) => {
       const c = p.config;
-      const out = c && typeof c === "object" && c.paragraph && typeof c.paragraph === "object" && typeof c.paragraph.keepTags === "string" ? { ...p, config: { ...c, paragraph: { ...c.paragraph, keepTags: saveKeepTags(c.paragraph.keepTags, saved) } } } : p;
+      const out = enabled && c && typeof c === "object" && c.paragraph && typeof c.paragraph === "object" && typeof c.paragraph.keepTags === "string" ? { ...p, config: { ...c, paragraph: { ...c.paragraph, keepTags: unprefix(c.paragraph.keepTags) } } } : p;
       return seen(await inner.patch(out));
     }
   };
 }
-function hideThinkInField(field) {
+function hideThinkInField(field, enabled = () => true) {
+  const visible = (v) => enabled() && (v === THINK_TAGS.join(" ") || v.startsWith(THINK_TAGS.join(" ") + " ")) ? v.slice(THINK_TAGS.join(" ").length).replace(/^ /, "") : v;
   if (field.hasAttribute("data-lv-think-hidden"))
     return;
   field.setAttribute("data-lv-think-hidden", "");
@@ -8681,10 +8679,10 @@ function hideThinkInField(field) {
       return get.call(this);
     },
     set(v) {
-      set.call(this, hideThinkTags(v));
+      set.call(this, visible(v));
     }
   });
-  set.call(field, hideThinkTags(get.call(field)));
+  set.call(field, visible(get.call(field)));
 }
 
 // src/host-emu/dom-bridge.ts
@@ -10227,9 +10225,10 @@ function build(cls, hasChat) {
       </section>
       <section class="tpg-group" data-lv-section="exclude">
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
+        ${switchRow(cls, "excludeThinking", "생각 블록 번역 제외", "기본 켜짐. think·thinking·reasoning 블록을 번역 요청에서 빼고 원문으로 둡니다. 끄면 원작처럼 별도로 제외하지 않습니다. 사용자별 모든 채팅에 적용되며 저장 즉시 반영됩니다.")}
         ${switchRow(cls, "protectHtml", "HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역")}
         ${switchRow(cls, "protectCode", "코드 블록(```) 은 번역하지 않음")}
-        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록 번역 제외를 켜면 think·thinking·reasoning을 목록에 적지 않아도 됩니다. 끈 경우에도 목록에 직접 적은 태그는 원작처럼 제외됩니다.</p>
         ${field("제외 규칙 (한 줄에 하나)", `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="/HP: \\d+\\/\\d+/
 [상태창] ... [/상태창]"></textarea>`)}
         <p class="${cls.help}" data-lv-tag-moved hidden></p>
@@ -10289,7 +10288,7 @@ function planTagMove(rules, keepText, max = KEEP_TAGS_MAX) {
   return { rest: moved.length ? out.join(`
 `).replace(/^\s*\n+|\n+\s*$/g, "") : rules, keep, moved, stayed };
 }
-var stayedNotice = (names) => `${names.map((t) => `<${t}>`).join(" ")}: 「번역에서 제외할 태그」가 길이 한도(${KEEP_TAGS_MAX}자)를 넘어 옮기지 못했습니다. 제외 규칙에 그대로 두었고 그대로 동작합니다.`;
+var stayedNotice = (names, max = KEEP_TAGS_MAX) => `${names.map((t) => `<${t}>`).join(" ")}: 「번역에서 제외할 태그」가 길이 한도(${max}자)를 넘어 옮기지 못했습니다. 제외 규칙에 그대로 두었고 그대로 동작합니다.`;
 function savedResult(form) {
   const status = form.querySelector("[data-tpg-status]");
   return new Promise((resolve) => {
@@ -10384,7 +10383,7 @@ function mountLvForm(root, host) {
     q(form, "myLanguage").value = s.values.myLanguage;
     q(form, "batchChars").value = s.values.batchChars > 0 ? String(s.values.batchChars) : "";
     q(form, "excludeRules").value = s.values.excludeRules;
-    for (const k of ["autoTranslate", "translateMyMessages", "showDraftButton", "healOffscreen", "protectHtml", "protectCode"])
+    for (const k of ["autoTranslate", "translateMyMessages", "showDraftButton", "healOffscreen", "excludeThinking", "protectHtml", "protectCode"])
       q(form, k).checked = s.values[k];
     const asDefault = form.querySelector('[name="lv:asDefault"]');
     if (asDefault)
@@ -10433,6 +10432,7 @@ function mountLvForm(root, host) {
       translateMyMessages: checked("translateMyMessages"),
       showDraftButton: checked("showDraftButton"),
       healOffscreen: checked("healOffscreen"),
+      excludeThinking: checked("excludeThinking"),
       protectHtml: checked("protectHtml"),
       protectCode: checked("protectCode"),
       excludeRules: q(form, "excludeRules").value,
@@ -10444,7 +10444,7 @@ function mountLvForm(root, host) {
   function inject(form) {
     const keepField = form.elements.namedItem("paraKeepTags");
     if (keepField)
-      hideThinkInField(keepField);
+      hideThinkInField(keepField, () => host.state().values.excludeThinking !== false);
     if (form.querySelector("[data-lv-sections]"))
       return;
     const bar = form.querySelector(".tpg-savebar");
@@ -10506,7 +10506,7 @@ function mountLvForm(root, host) {
           setStatus(form, "설정을 저장하고 있습니다.");
           try {
             values = read(form);
-            plan = planTagMove(values.excludeRules, keepBefore);
+            plan = planTagMove(values.excludeRules, keepBefore, values.excludeThinking ? KEEP_TAGS_MAX : 500);
             const vf = voiceFields(form);
             voiceBefore = { prompt: vf.text?.value ?? "", enabled: vf.on?.checked ?? false, voice: values.voice };
             if (vf.text && vf.on) {
@@ -10591,12 +10591,12 @@ function mountLvForm(root, host) {
             await host.save({ ...values, excludeRules: plan.rest, asDefault: false }).catch(() => {});
           }
           if (plan.stayed.length)
-            texts.push(stayedNotice(plan.stayed));
+            texts.push(stayedNotice(plan.stayed, values.excludeThinking ? KEEP_TAGS_MAX : 500));
           say(texts.join(" "));
           if (plan.moved.length)
             appendStatus(form, MOVED_NOTICE);
           if (plan.stayed.length)
-            appendStatus(form, stayedNotice(plan.stayed));
+            appendStatus(form, stayedNotice(plan.stayed, values.excludeThinking ? KEEP_TAGS_MAX : 500));
         })();
       }, true);
     }
@@ -11014,7 +11014,7 @@ function setup(ctx) {
   }
   function lvState() {
     if (!store) {
-      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "", voice: { from: "", backupSaved: false, backupPrompt: "", backupEnabled: false } }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
+      return { ready: false, chatKey: chatId ?? "", hasChat: !!chatId, values: { connectionId: "", modelLanguage: "", myLanguage: "", batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, excludeThinking: true, protectHtml: false, protectCode: false, excludeRules: "", bundleId: "", voice: { from: "", backupSaved: false, backupPrompt: "", backupEnabled: false } }, connections: [], connectionNote: { text: "", kind: "" }, linkNote: "", bundles: [] };
     }
     const s = current();
     let bundleId = s.bundleId;
@@ -11031,7 +11031,7 @@ function setup(ctx) {
       ready: true,
       chatKey: chatId ?? "",
       hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId, voice: { from: s.voiceFrom, backupSaved: s.voiceBackupSaved, backupPrompt: s.voiceBackupPrompt, backupEnabled: s.voiceBackupEnabled } },
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, excludeThinking: store.excludeThinking, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId, voice: { from: s.voiceFrom, backupSaved: s.voiceBackupSaved, backupPrompt: s.voiceBackupPrompt, backupEnabled: s.voiceBackupEnabled } },
       connections: options,
       connectionNote: note,
       linkNote: link === "none" ? "" : link === "ok" ? "기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다." : "기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.",
@@ -11079,7 +11079,9 @@ function setup(ctx) {
         voiceBackupPrompt: v.voice.backupPrompt,
         voiceBackupEnabled: v.voice.backupEnabled
       };
-      await call("lv.save", [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
+      await call("lv.save", [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId, excludeThinking: v.excludeThinking }]);
+      if (store)
+        store.excludeThinking = v.excludeThinking;
     }
   });
   const renderPanel = () => lvForm.refresh();

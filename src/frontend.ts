@@ -446,7 +446,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   function lvState(): LvState {
     if (!store) {
-      return { ready: false, chatKey: chatId ?? '', hasChat: !!chatId, values: { connectionId: '', modelLanguage: '', myLanguage: '', batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, protectHtml: false, protectCode: false, excludeRules: '', bundleId: '', voice: { from: '', backupSaved: false, backupPrompt: '', backupEnabled: false } }, connections: [], connectionNote: { text: '', kind: '' }, linkNote: '', bundles: [] };
+      return { ready: false, chatKey: chatId ?? '', hasChat: !!chatId, values: { connectionId: '', modelLanguage: '', myLanguage: '', batchChars: 0, autoTranslate: false, translateMyMessages: false, showDraftButton: false, healOffscreen: true, excludeThinking: true, protectHtml: false, protectCode: false, excludeRules: '', bundleId: '', voice: { from: '', backupSaved: false, backupPrompt: '', backupEnabled: false } }, connections: [], connectionNote: { text: '', kind: '' }, linkNote: '', bundles: [] };
     }
     const s = current();
     let bundleId = s.bundleId;
@@ -465,7 +465,7 @@ export function setup(ctx: SpindleFrontendContext) {
       ready: true,
       chatKey: chatId ?? '',
       hasChat: !!chatId,
-      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId, voice: { from: s.voiceFrom, backupSaved: s.voiceBackupSaved, backupPrompt: s.voiceBackupPrompt, backupEnabled: s.voiceBackupEnabled } },
+      values: { connectionId, modelLanguage: s.modelLanguage, myLanguage: s.myLanguage, batchChars: s.batchChars, autoTranslate: s.autoTranslate, translateMyMessages: s.translateMyMessages, showDraftButton: s.showDraftButton, healOffscreen: s.healOffscreen, excludeThinking: store.excludeThinking, protectHtml: s.protectHtml, protectCode: s.protectCode, excludeRules: s.excludeRules, bundleId, voice: { from: s.voiceFrom, backupSaved: s.voiceBackupSaved, backupPrompt: s.voiceBackupPrompt, backupEnabled: s.voiceBackupEnabled } },
       connections: options,
       connectionNote: note,
       linkNote: link === 'none' ? '' : link === 'ok' ? '기억 서재와 연동 중: 번역 결과와 이 방의 단어장을 기억 서재에 공개합니다.' : '기억 서재와 연동 규격 버전이 달라 연동을 쓰지 않습니다. 두 확장을 모두 최신으로 올려 주세요.',
@@ -499,7 +499,8 @@ export function setup(ctx: SpindleFrontendContext) {
         bundleId: v.bundleId, connectionId: v.connectionId,
         voiceFrom: v.voice.from, voiceBackupSaved: v.voice.backupSaved, voiceBackupPrompt: v.voice.backupPrompt, voiceBackupEnabled: v.voice.backupEnabled,
       };
-      await call('lv.save', [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId }]);
+      await call('lv.save', [{ chatId, settings, asDefault: v.asDefault, connectionId: v.connectionId, excludeThinking: v.excludeThinking }]);
+      if (store) store.excludeThinking = v.excludeThinking;
     },
   });
   const renderPanel = () => lvForm.refresh();

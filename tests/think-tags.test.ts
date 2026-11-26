@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { keptTagNames } from '../src/adapter/pub';
 import { hideThinkTags, saveKeepTags, thinkAwareStorage, withThinkTags } from '../src/adapter/think-tags';
 
-describe('thinking tags are always excluded (0.5.10, port decision)', () => {
+describe('thinking tags are excluded by default', () => {
   test('the list the original reads has think / thinking / reasoning first; the user\'s list follows', () => {
     expect(withThinkTags('')).toBe('think thinking reasoning');
     expect(withThinkTags('tracker <cyoa>')).toBe('think thinking reasoning tracker <cyoa>');
@@ -47,5 +47,55 @@ describe('thinking tags are always excluded (0.5.10, port decision)', () => {
     expect(((await s.get())?.config as { paragraph: { keepTags: string } }).paragraph.keepTags).toBe('think thinking reasoning');
     file = { lvMigrations: {} } as { config?: unknown };
     expect(((await s.get())?.config as { paragraph: { keepTags: string } }).paragraph.keepTags).toBe('think thinking reasoning');
+  });
+});
+
+describe('thinking exclusion setting', () => {
+  test('OFF leaves the original tag list and storage payload unchanged', async () => {
+    const tags = '  <think>; TRACKER, thinking  ';
+    expect(withThinkTags(tags, false)).toBe(tags);
+    expect([...keptTagNames('tracker', false)]).toEqual(['tracker']);
+    expect([...keptTagNames(tags, false)].sort()).toEqual(['think', 'thinking', 'tracker']);
+    let file: any = { lvExcludeThinking: false, config: { paragraph: { keepTags: tags }, notes: ['note'] } };
+    let written: unknown;
+    const s = thinkAwareStorage({ get: async () => file, patch: async (p: Record<string, unknown>) => { written = p; return file = { ...file, ...p }; } });
+    expect(await s.get()).toBe(file);
+    const patch = { config: { paragraph: { keepTags: tags }, notes: ['updated'] } };
+    expect(await s.patch(patch)).toBe(file);
+    expect(written).toBe(patch);
+  });
+
+  test('ON → OFF → ON uses the new policy in each save response without leaking injected tags', async () => {
+    let enabled = true;
+    let file: any = { config: { paragraph: { keepTags: '<think> tracker' } } };
+    const s = thinkAwareStorage({
+      get: async () => ({ ...file, lvExcludeThinking: enabled }),
+      patch: async (p: Record<string, unknown>) => { file = { ...file, ...p }; return { ...file, lvExcludeThinking: enabled }; },
+    });
+    const on: any = await s.get();
+    enabled = false;
+    const off: any = await s.patch({ config: on.config });
+    expect(off.config.paragraph.keepTags).toBe('<think> tracker');
+    expect(file.config.paragraph.keepTags).toBe('<think> tracker');
+    // Explicit edits while OFF have the exact original meaning.
+    const edited: any = await s.patch({ config: { paragraph: { keepTags: 'reasoning status' } } });
+    expect(edited.config.paragraph.keepTags).toBe('reasoning status');
+    enabled = true;
+    const again: any = await s.patch({ config: edited.config });
+    expect(again.config.paragraph.keepTags).toBe('think thinking reasoning reasoning status');
+    expect(file.config.paragraph.keepTags).toBe('reasoning status');
+  });
+
+  test('ON preserves explicit thinking tags entered in the form and long lists on background saves', async () => {
+    let file: any = { config: { paragraph: { keepTags: 'tracker' } } };
+    const s = thinkAwareStorage({ get: async () => file, patch: async (p: Record<string, unknown>) => file = { ...file, ...p } });
+    await s.get();
+    await s.patch({ config: { paragraph: { keepTags: '<think> tracker' } } });
+    expect(file.config.paragraph.keepTags).toBe('<think> tracker');
+    file = { config: { paragraph: { keepTags: Array.from({ length: 80 }, (_, i) => `tag${i}`).join(' ').padEnd(500, ' ') } } };
+    const raw = file.config.paragraph.keepTags;
+    const loaded: any = await s.get();
+    await s.patch({ config: { paragraph: { keepTags: loaded.config.paragraph.keepTags.slice(0, 500) } } });
+    expect(file.config.paragraph.keepTags).toBe(raw);
   });
 });

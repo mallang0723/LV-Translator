@@ -147,6 +147,8 @@ export interface Note {
 }
 
 export interface Store {
+  /** Per-user setting, shared by all chats; missing values default to on. */
+  excludeThinking: boolean;
   version: 1;
   view: ViewSettings;
   userPresets: UserPreset[];
@@ -284,7 +286,7 @@ export function normalizeStore(value: unknown): Store {
     seen.add(id);
     userPresets.push({ id, name, prompt });
   }
-  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, notes: notesTools.normalizeNotes(raw.notes) as Note[], defaults, chats };
+  return { version: 1, excludeThinking: bool(raw.excludeThinking, true), view: normalizeView(raw.view), userPresets, userBundles, notes: notesTools.normalizeNotes(raw.notes) as Note[], defaults, chats };
 }
 
 export function settingsFor(store: Store, chatId: string | null): ChatSettings {

@@ -1,10 +1,10 @@
-// 생각 블록 태그는 항상 번역 제외 (이식판 결정, 원작에는 없음).
+// 생각 블록 태그는 기본으로 번역 제외. 사용자 설정을 끄면 원작 목록을 그대로 사용한다.
 // The original's `keptRanges` starts an excluded range at the first listed tag it meets and ends it at the matching close tag. A thinking block
 // (`<think> ... </think>`) that merely MENTIONS a listed tag (`<tracker>`, `<prose>`) opens a range inside the thinking text that ends at the
 // real `</tracker>` far below, the range's start is then looked up on screen, is not found, and the whole message is refused ("unresolved").
-// The thinking tags are therefore handed to the original as always excluded: the thinking block is one excluded range (nested tags inside it
+// The thinking tags are therefore handed to the original as excluded when enabled: the thinking block is one excluded range (nested tags inside it
 // are skipped), and it is neither translated nor sent to the model. The user's own saved list is never changed: the names are added to what
-// the original READS (`withThinkTags`) and taken off again before anything is saved (`saveKeepTags`). Nothing in the original is edited.
+// the original READS (`withThinkTags`) and taken off again before anything is saved (storage adapter). Nothing in the original is edited.
 
 export const THINK_TAGS: readonly string[] = ['think', 'thinking', 'reasoning'];
 
@@ -20,7 +20,8 @@ const LIMIT = 500;
 export const USER_KEEP_TAGS_MAX = LIMIT - THINK_TAGS.join(' ').length - 1;
 
 /** The list the original is given: the thinking tags first, then the user's list. */
-export function withThinkTags(raw: unknown): string {
+export function withThinkTags(raw: unknown, enabled = true): string {
+  if (!enabled) return String(raw ?? '');
   return [...THINK_TAGS, String(raw ?? '').trim()].filter(Boolean).join(' ');
 }
 
@@ -47,23 +48,37 @@ export function saveKeepTags(shown: unknown, before: unknown): string {
 type Cfg = { paragraph?: { keepTags?: unknown } } & Record<string, unknown>;
 type Result = { config?: unknown; [k: string]: unknown } | null;
 
-/** The original's storage with the thinking tags added to the list it reads and removed from the list it writes. */
+/**
+ * The backend attaches the per-user `lvExcludeThinking` flag to each storage response (never to the saved original file).
+ * OFF returns the original config unchanged. ON injects tags only into reads and restores an unchanged injected list on writes.
+ * Form writes already contain the visible user list, including any explicitly configured thinking tags.
+ */
 export function thinkAwareStorage<S extends { get(): Promise<Result>; patch(p: Record<string, unknown>): Promise<Result> }>(inner: S): S {
   let saved = '';
+  let enabled = true;
+  let supplied = '';
+  // Strip only the prefix we supplied, preserving explicitly configured thinking tags.
+  const unprefix = (text: string) => {
+    if (text !== supplied.slice(0, LIMIT)) return text;
+    return saved;
+  };
   const seen = (r: Result): Result => {
     // Nothing saved yet (no file, or a file with no `config`) reads as the original's defaults plus the thinking tags.
+    enabled = r?.lvExcludeThinking !== false;
     const c = (r?.config && typeof r.config === 'object' ? r.config : {}) as Cfg;
     const raw = c.paragraph?.keepTags;
     saved = typeof raw === 'string' ? raw : '';
-    return { ...(r ?? {}), config: { ...c, paragraph: { ...(c.paragraph ?? {}), keepTags: withThinkTags(saved) } } };
+    if (!enabled) return r;
+    supplied = withThinkTags(saved);
+    return { ...(r ?? {}), config: { ...c, paragraph: { ...(c.paragraph ?? {}), keepTags: supplied } } };
   };
   return {
     ...inner,
     get: async () => seen(await inner.get()),
     patch: async (p) => {
       const c = p.config as Cfg | undefined;
-      const out = c && typeof c === 'object' && c.paragraph && typeof c.paragraph === 'object' && typeof c.paragraph.keepTags === 'string'
-        ? { ...p, config: { ...c, paragraph: { ...c.paragraph, keepTags: saveKeepTags(c.paragraph.keepTags, saved) } } }
+      const out = enabled && c && typeof c === 'object' && c.paragraph && typeof c.paragraph === 'object' && typeof c.paragraph.keepTags === 'string'
+        ? { ...p, config: { ...c, paragraph: { ...c.paragraph, keepTags: unprefix(c.paragraph.keepTags) } } }
         : p;
       return seen(await inner.patch(out));
     },
@@ -71,7 +86,9 @@ export function thinkAwareStorage<S extends { get(): Promise<Result>; patch(p: R
 }
 
 /** Shows the user's list only in a settings field: what the original writes into it has the thinking tags taken off. */
-export function hideThinkInField(field: HTMLInputElement): void {
+export function hideThinkInField(field: HTMLInputElement, enabled: () => boolean = () => true): void {
+  const visible = (v: string) => enabled() && (v === THINK_TAGS.join(' ') || v.startsWith(THINK_TAGS.join(' ') + ' '))
+    ? v.slice(THINK_TAGS.join(' ').length).replace(/^ /, '') : v;
   if (field.hasAttribute('data-lv-think-hidden')) return;
   field.setAttribute('data-lv-think-hidden', '');
   const own = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
@@ -83,8 +100,8 @@ export function hideThinkInField(field: HTMLInputElement): void {
       return get.call(this);
     },
     set(v: string) {
-      set.call(this, hideThinkTags(v));
+      set.call(this, visible(v));
     },
   });
-  set.call(field, hideThinkTags(get.call(field)));
+  set.call(field, visible(get.call(field)));
 }

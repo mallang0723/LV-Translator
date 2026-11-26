@@ -30,6 +30,8 @@ export interface LvValues {
   showDraftButton: boolean;
   /** Continue once a message translated off screen when it reaches the screen with untranslated cells (one more model call). */
   healOffscreen: boolean;
+  /** Per-user, shared by all chats; applied on save without a reload. */
+  excludeThinking: boolean;
   protectHtml: boolean;
   protectCode: boolean;
   excludeRules: string;
@@ -115,9 +117,10 @@ function build(cls: Classes, hasChat: boolean): string {
       </section>
       <section class="tpg-group" data-lv-section="exclude">
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
+        ${switchRow(cls, 'excludeThinking', '생각 블록 번역 제외', '기본 켜짐. think·thinking·reasoning 블록을 번역 요청에서 빼고 원문으로 둡니다. 끄면 원작처럼 별도로 제외하지 않습니다. 사용자별 모든 채팅에 적용되며 저장 즉시 반영됩니다.')}
         ${switchRow(cls, 'protectHtml', 'HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역')}
         ${switchRow(cls, 'protectCode', '코드 블록(```) 은 번역하지 않음')}
-        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록(think·thinking·reasoning)은 항상 번역에서 제외되니 목록에 적지 않아도 됩니다.</p>
+        <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록 번역 제외를 켜면 think·thinking·reasoning을 목록에 적지 않아도 됩니다. 끈 경우에도 목록에 직접 적은 태그는 원작처럼 제외됩니다.</p>
         ${field('제외 규칙 (한 줄에 하나)', `<textarea name="lv:excludeRules" class="${cls.textarea}" rows="3" spellcheck="false" placeholder="/HP: \\d+\\/\\d+/\n[상태창] ... [/상태창]"></textarea>`)}
         <p class="${cls.help}" data-lv-tag-moved hidden></p>
         <p class="${cls.help}">/정규식/ 은 일치하는 부분, 시작 ... 끝 은 그 사이 전체를 번역에 보내지 않고 번역 화면에 원문 그대로 둡니다(여러 문단에 걸쳐도 됩니다). {{매크로}} 는 항상 그대로 둡니다.</p>
@@ -153,7 +156,7 @@ export function mergeKeepTags(have: string, names: string[]): string {
 const MOVED_NOTICE = '태그는 위 「번역에서 제외할 태그」로 옮겼습니다.';
 /**
  * The original keeps at most 500 characters of 「번역에서 제외할 태그」 (extension.js `normalizeParagraph`: `keepTags.slice(0, 500)`); the rest is cut off when it saves.
- * The always-excluded thinking tags are put in front of the list first (think-tags.ts), so the user's own list has 475.
+ * With thinking exclusion ON, injected tags reserve 25 characters. OFF uses the original 500-character limit.
  */
 export const KEEP_TAGS_MAX = USER_KEEP_TAGS_MAX;
 
@@ -197,7 +200,7 @@ export function planTagMove(rules: string, keepText: string, max = KEEP_TAGS_MAX
   return { rest: moved.length ? out.join('\n').replace(/^\s*\n+|\n+\s*$/g, '') : rules, keep, moved, stayed };
 }
 
-const stayedNotice = (names: string[]) => `${names.map((t) => `<${t}>`).join(' ')}: 「번역에서 제외할 태그」가 길이 한도(${KEEP_TAGS_MAX}자)를 넘어 옮기지 못했습니다. 제외 규칙에 그대로 두었고 그대로 동작합니다.`;
+const stayedNotice = (names: string[], max = KEEP_TAGS_MAX) => `${names.map((t) => `<${t}>`).join(' ')}: 「번역에서 제외할 태그」가 길이 한도(${max}자)를 넘어 옮기지 못했습니다. 제외 규칙에 그대로 두었고 그대로 동작합니다.`;
 
 /** Waits for the original's own save to write its result in the status line. */
 function savedResult(form: HTMLFormElement): Promise<'success' | 'error' | 'timeout'> {
@@ -302,7 +305,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
     q<HTMLInputElement>(form, 'myLanguage').value = s.values.myLanguage;
     q<HTMLInputElement>(form, 'batchChars').value = s.values.batchChars > 0 ? String(s.values.batchChars) : '';
     q<HTMLTextAreaElement>(form, 'excludeRules').value = s.values.excludeRules;
-    for (const k of ['autoTranslate', 'translateMyMessages', 'showDraftButton', 'healOffscreen', 'protectHtml', 'protectCode'] as const) q<HTMLInputElement>(form, k).checked = s.values[k];
+    for (const k of ['autoTranslate', 'translateMyMessages', 'showDraftButton', 'healOffscreen', 'excludeThinking', 'protectHtml', 'protectCode'] as const) q<HTMLInputElement>(form, k).checked = s.values[k];
     const asDefault = form.querySelector<HTMLInputElement>('[name="lv:asDefault"]');
     if (asDefault) asDefault.checked = false;
     // The original paints its switch rows on every form `change`.
@@ -353,6 +356,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
       translateMyMessages: checked('translateMyMessages'),
       showDraftButton: checked('showDraftButton'),
       healOffscreen: checked('healOffscreen'),
+      excludeThinking: checked('excludeThinking'),
       protectHtml: checked('protectHtml'),
       protectCode: checked('protectCode'),
       excludeRules: q<HTMLTextAreaElement>(form, 'excludeRules').value,
@@ -364,7 +368,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
 
   function inject(form: HTMLFormElement) {
     const keepField = form.elements.namedItem('paraKeepTags') as HTMLInputElement | null;
-    if (keepField) hideThinkInField(keepField);
+    if (keepField) hideThinkInField(keepField, () => host.state().values.excludeThinking !== false);
     if (form.querySelector('[data-lv-sections]')) return;
     const bar = form.querySelector('.tpg-savebar');
     if (!bar) return; // the original has not finished drawing the form
@@ -415,7 +419,7 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
           setStatus(form, '설정을 저장하고 있습니다.');
           try {
             values = read(form);
-            plan = planTagMove(values.excludeRules, keepBefore);
+            plan = planTagMove(values.excludeRules, keepBefore, values.excludeThinking ? KEEP_TAGS_MAX : 500);
             // 관리자 결정 2026-11-25: the bundle's 대사 지침 goes into the room's own 「대사 지침」 (written by the original's own save, below).
             const vf = voiceFields(form);
             voiceBefore = { prompt: vf.text?.value ?? '', enabled: vf.on?.checked ?? false, voice: values.voice };
@@ -498,10 +502,10 @@ export function mountLvForm(root: HTMLElement, host: LvHost): LvForm {
             // The tags are saved in the original's list; drop their lines from the saved rules too.
             await host.save({ ...values, excludeRules: plan.rest, asDefault: false }).catch(() => {});
           }
-          if (plan.stayed.length) texts.push(stayedNotice(plan.stayed));
+          if (plan.stayed.length) texts.push(stayedNotice(plan.stayed, values.excludeThinking ? KEEP_TAGS_MAX : 500));
           say(texts.join(' '));
           if (plan.moved.length) appendStatus(form, MOVED_NOTICE);
-          if (plan.stayed.length) appendStatus(form, stayedNotice(plan.stayed));
+          if (plan.stayed.length) appendStatus(form, stayedNotice(plan.stayed, values.excludeThinking ? KEEP_TAGS_MAX : 500));
         })();
       }, true);
     }

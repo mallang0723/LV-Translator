@@ -27,3 +27,34 @@ test('lv.save with the default switch also stores the new-chat defaults; with no
     expect(result(h, 'b').ok).toBe(true);
   });
 });
+
+test('thinking exclusion defaults ON; OFF is per-user across chats and storage responses update immediately', async () => {
+  expect(normalizeStore(null).excludeThinking).toBe(true);
+  expect(normalizeStore({ excludeThinking: 'false' }).excludeThinking).toBe(true);
+  expect(normalizeStore({ excludeThinking: false }).excludeThinking).toBe(false);
+  await withHost({}, async (h) => {
+    const base = normalizeStore(null).defaults;
+    const storageUsers: unknown[] = [];
+    const set = h.api.userStorage.setJson;
+    h.api.userStorage.setJson = async (path: string, data: unknown, opts: { userId: string }) => {
+      storageUsers.push(opts.userId);
+      return set(path, data, opts);
+    };
+    await h.send({ type: 'emu', id: 'off', op: 'lv.save', args: [{ chatId: 'chat', settings: base, excludeThinking: false }] });
+    expect(h.store().excludeThinking).toBe(false);
+    expect(h.store().chats.chat.excludeThinking).toBeUndefined();
+    expect(h.store().defaults.excludeThinking).toBeUndefined();
+    await h.send({ type: 'emu', id: 'get', op: 'storage.get', args: [] });
+    expect(result(h, 'get').data.lvExcludeThinking).toBe(false);
+    await h.send({ type: 'emu', id: 'another', op: 'lv.save', args: [{ chatId: 'another', settings: base }] });
+    expect(h.store().excludeThinking).toBe(false);
+    await h.send({ type: 'emu', id: 'on', op: 'lv.save', args: [{ chatId: null, settings: base, excludeThinking: true }] });
+    await h.send({ type: 'emu', id: 'patch', op: 'storage.patch', args: [{ config: { paragraph: { keepTags: 'tracker' } } }] });
+    expect(result(h, 'patch').data.lvExcludeThinking).toBe(true);
+    expect(h.ttConfig().lvExcludeThinking).toBeUndefined();
+    expect(storageUsers.length).toBeGreaterThan(0);
+    expect(storageUsers.every((uid) => uid === h.uid)).toBe(true);
+  });
+  // Another user store with no saved value still defaults ON.
+  await withHost({}, async (h) => expect(h.store().excludeThinking).toBe(true));
+});

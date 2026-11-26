@@ -1,5 +1,5 @@
 // @bun
-// st_translator 0.5.11
+// st_translator 0.5.12-v1
 
 // src/adapter/host.ts
 function hostCaps(api) {
@@ -1656,7 +1656,7 @@ function normalizeStore(value) {
     seen.add(id);
     userPresets.push({ id, name, prompt });
   }
-  return { version: 1, view: normalizeView(raw.view), userPresets, userBundles, notes: notesTools.normalizeNotes(raw.notes), defaults, chats };
+  return { version: 1, excludeThinking: bool(raw.excludeThinking, true), view: normalizeView(raw.view), userPresets, userBundles, notes: notesTools.normalizeNotes(raw.notes), defaults, chats };
 }
 function settingsFor(store, chatId) {
   return chatId && store.chats[chatId] ? store.chats[chatId] : store.defaults;
@@ -1827,14 +1827,16 @@ function planGlossary(meta, text, now) {
 var THINK_TAGS = ["think", "thinking", "reasoning"];
 var LIMIT = 500;
 var USER_KEEP_TAGS_MAX = LIMIT - THINK_TAGS.join(" ").length - 1;
-function withThinkTags(raw) {
+function withThinkTags(raw, enabled = true) {
+  if (!enabled)
+    return String(raw ?? "");
   return [...THINK_TAGS, String(raw ?? "").trim()].filter(Boolean).join(" ");
 }
 
 // src/adapter/pub.ts
 var isRecord = (v) => !!v && typeof v === "object" && typeof v.map === "object" && v.map !== null;
-function keptTagNames(raw) {
-  return new Set(withThinkTags(raw).split(/[\s,;]+/).map((part) => {
+function keptTagNames(raw, excludeThinking = true) {
+  return new Set(withThinkTags(raw, excludeThinking).split(/[\s,;]+/).map((part) => {
     const m = /^(?:<([a-z][\w:-]*)>|([a-z][\w:-]*))$/i.exec(part);
     return m ? (m[1] || m[2] || "").toLowerCase() : "";
   }).filter(Boolean));
@@ -2667,7 +2669,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.11";
+var SELF_VERSION = "0.5.12-v1";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;
@@ -2762,7 +2764,7 @@ var isObject4 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 async function projectionFor(uid, chatId) {
   const store = await loadStore(uid);
   const cfg = (await readTtConfig(uid)).config;
-  return { publish: await peerState() === "ok", language: settingsFor(store, chatId).myLanguage, kept: keptTagNames(cfg?.paragraph?.keepTags) };
+  return { publish: await peerState() === "ok", language: settingsFor(store, chatId).myLanguage, kept: keptTagNames(cfg?.paragraph?.keepTags, store.excludeThinking) };
 }
 async function refreshPub(uid, chatId, raw) {
   if (!raw.id || typeof raw.content !== "string")
@@ -2826,7 +2828,7 @@ async function forwardMessage(uid, chatId, raw) {
   try {
     character = await resolveSpeakers(spindle, uid, chatId);
   } catch {}
-  const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags);
+  const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags, (await loadStore(uid)).excludeThinking);
   send({ type: "msg_event", chatId, kind: "upsert", row: eventRow(chatId, raw, character, kept) }, uid);
 }
 for (const event of ["MESSAGE_EDITED", "MESSAGE_SWIPED", "SWIPE_EDITED", "MESSAGE_SENT"]) {
@@ -2884,6 +2886,8 @@ async function emu(uid, msg) {
         store.defaults = settings;
       else
         store.defaults = { ...store.defaults, connectionId: id };
+      if (typeof arg.excludeThinking === "boolean")
+        store.excludeThinking = arg.excludeThinking;
       await saveStore(uid, store);
       reply({ ok: true, data: true });
       await sendState(uid);
@@ -2891,7 +2895,7 @@ async function emu(uid, msg) {
     }
     if (msg.op === "storage.get") {
       await migrateGlossary(uid);
-      reply({ ok: true, data: await readTtConfig(uid, true) });
+      reply({ ok: true, data: { ...await readTtConfig(uid, true), lvExcludeThinking: (await loadStore(uid)).excludeThinking } });
       return;
     }
     if (msg.op === "storage.patch") {
@@ -2902,7 +2906,7 @@ async function emu(uid, msg) {
         voiceRebases.set(userKey(uid), applyRebases(next.config, pending));
       await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
       configCache.set(userKey(uid), { at: Date.now(), value: next });
-      reply({ ok: true, data: next });
+      reply({ ok: true, data: { ...next, lvExcludeThinking: (await loadStore(uid)).excludeThinking } });
       const open = lastChat.get(userKey(uid));
       if (open)
         publishGlossary(uid, open);
@@ -2923,12 +2927,12 @@ async function emu(uid, msg) {
         return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate, outgoingPrompt: settings.outgoingPrompt, incomingPrompt: settings.incomingPrompt };
       },
       wide: wideReads,
-      keptTags: async () => keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags),
+      keptTags: async () => keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags, (await loadStore(uid)).excludeThinking),
       projection: (chatId) => projectionFor(uid, chatId),
       async legacy(chatId) {
         const store = await loadStore(uid);
         const cfg = (await readTtConfig(uid)).config;
-        return { settings: settingsFor(store, chatId), kept: keptTagNames(cfg?.paragraph?.keepTags) };
+        return { settings: settingsFor(store, chatId), kept: keptTagNames(cfg?.paragraph?.keepTags, store.excludeThinking) };
       },
       onLegacySkipped: (id) => {
         if (!legacySkipped.has(id))

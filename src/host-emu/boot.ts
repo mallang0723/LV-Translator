@@ -37,7 +37,7 @@ export function startOriginal(opts: StartOptions): { stop(): void; emu: EmuHandl
   });
   // Before the original starts: it looks for the cache while it starts.
   const removeCache = opts.cache ? installQueryClient(opts.cache) : () => {};
-  // The thinking tags are always excluded: added to the tag list the original reads, never to what is saved (adapter/think-tags.ts).
+  // When enabled, thinking tags are excluded: added to the tag list the original reads, never to what is saved (adapter/think-tags.ts).
   const emu = runOriginal({ ctx: opts.ctx, source: opts.source ?? ORIGINAL, bridge: opts.bridge, storage: thinkAwareStorage(opts.storage), activeChatId: opts.activeChatId, storageTimeoutMs: opts.storageTimeoutMs });
   return {
     emu,

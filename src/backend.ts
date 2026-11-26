@@ -98,7 +98,7 @@ async function readTtConfig(uid: Uid, fresh = false): Promise<TtConfig> {
 
 // ---- link with the memory extension (LV-TX v1, src/adapter/contract.ts) ----
 
-const SELF_VERSION = '0.5.11';
+const SELF_VERSION = '0.5.12-v1';
 const PEER_TTL_MS = 20_000;
 let peer: { at: number; state: PeerState } = { at: 0, state: 'none' };
 let warnedPeerDenied = false;
@@ -221,7 +221,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
 async function projectionFor(uid: Uid, chatId: string) {
   const store = await loadStore(uid);
   const cfg = (await readTtConfig(uid)).config;
-  return { publish: (await peerState()) === 'ok', language: settingsFor(store, chatId).myLanguage, kept: keptTagNames(cfg?.paragraph?.keepTags) };
+  return { publish: (await peerState()) === 'ok', language: settingsFor(store, chatId).myLanguage, kept: keptTagNames(cfg?.paragraph?.keepTags, store.excludeThinking) };
 }
 
 /** Brings `pub` in line with the message's current content after a swipe or an edit, when that changes anything. */
@@ -290,7 +290,7 @@ async function forwardMessage(uid: Uid, chatId: string, raw: Record<string, any>
   } catch {
     // the speaker is a nicety
   }
-  const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags);
+  const kept = keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags, (await loadStore(uid)).excludeThinking);
   send({ type: 'msg_event', chatId, kind: 'upsert', row: eventRow(chatId, raw, character, kept) }, uid);
 }
 
@@ -338,7 +338,7 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
     }
     if (msg.op === 'lv.save') {
       // Our own settings, saved by the original form's one save button (src/host-emu/lv-form.ts). Answers only once they are stored.
-      const arg = (msg.args[0] ?? {}) as { chatId?: string | null; settings?: unknown; asDefault?: boolean; connectionId?: string };
+      const arg = (msg.args[0] ?? {}) as { chatId?: string | null; settings?: unknown; asDefault?: boolean; connectionId?: string; excludeThinking?: boolean };
       const chatId = typeof arg.chatId === 'string' && arg.chatId ? arg.chatId : null;
       const store = await loadStore(uid);
       const settings = normalizeSettings(arg.settings, store.defaults, store.userBundles);
@@ -349,6 +349,7 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
       if (arg.asDefault && chatId) store.defaults = { ...settings, voiceFrom: '', voiceBackupSaved: false, voiceBackupPrompt: '', voiceBackupEnabled: false };
       else if (!chatId) store.defaults = settings;
       else store.defaults = { ...store.defaults, connectionId: id };
+      if (typeof arg.excludeThinking === 'boolean') store.excludeThinking = arg.excludeThinking;
       await saveStore(uid, store);
       reply({ ok: true, data: true });
       await sendState(uid);
@@ -356,7 +357,7 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
     }
     if (msg.op === 'storage.get') {
       await migrateGlossary(uid);
-      reply({ ok: true, data: await readTtConfig(uid, true) });
+      reply({ ok: true, data: { ...await readTtConfig(uid, true), lvExcludeThinking: (await loadStore(uid)).excludeThinking } });
       return;
     }
     if (msg.op === 'storage.patch') {
@@ -367,7 +368,7 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
       if (pending?.length && next.config && next.config !== prev.config) voiceRebases.set(userKey(uid), applyRebases(next.config as never, pending));
       await spindle.userStorage.setJson(TT_CONFIG_PATH, next, { indent: 2, userId: uid });
       configCache.set(userKey(uid), { at: Date.now(), value: next as TtConfig });
-      reply({ ok: true, data: next });
+      reply({ ok: true, data: { ...next, lvExcludeThinking: (await loadStore(uid)).excludeThinking } });
       // The glossary the memory extension reads is the original's: the chat on screen may just have changed it.
       const open = lastChat.get(userKey(uid));
       if (open) void publishGlossary(uid, open);
@@ -390,12 +391,12 @@ async function emu(uid: Uid, msg: Extract<ToBackend, { type: 'emu' }>): Promise<
         return { connectionId, myLanguage: settings.myLanguage, autoTranslate: settings.autoTranslate, outgoingPrompt: settings.outgoingPrompt, incomingPrompt: settings.incomingPrompt };
       },
       wide: wideReads,
-      keptTags: async () => keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags),
+      keptTags: async () => keptTagNames((await readTtConfig(uid)).config?.paragraph?.keepTags, (await loadStore(uid)).excludeThinking),
       projection: (chatId) => projectionFor(uid, chatId),
       async legacy(chatId) {
         const store = await loadStore(uid);
         const cfg = (await readTtConfig(uid)).config;
-        return { settings: settingsFor(store, chatId), kept: keptTagNames(cfg?.paragraph?.keepTags) };
+        return { settings: settingsFor(store, chatId), kept: keptTagNames(cfg?.paragraph?.keepTags, store.excludeThinking) };
       },
       onLegacySkipped: (id) => {
         if (!legacySkipped.has(id)) legacySkipped.add(id);
