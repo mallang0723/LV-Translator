@@ -1,4 +1,4 @@
-// st_translator 0.5.11-v1
+// st_translator 0.5.11
 
 // src/uuid.ts
 function newId(ctx) {

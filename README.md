@@ -8,7 +8,7 @@
 
 Lumiverse에는 기본 채팅 번역 기능이 없어서, 번역은 이 확장이 모두 맡습니다.
 
-## 0.5.11-v1
+## 0.5.11
 
 Lumiverse 1.3.0의 프런트엔드 UUID 검사에 대응했습니다. 호스트 UUID API가 있으면 사용하고, 1.2.5 개발 빌드와 HTTP/LAN에서는 `crypto.getRandomValues`로 v4 UUID를 만듭니다. 원작 파일은 그대로 보존하며 빌드할 때 ID 생성 3곳만 치환합니다.
 
