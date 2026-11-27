@@ -1,5 +1,5 @@
 // @bun
-// st_translator 0.5.12-v1
+// st_translator 0.5.12-v2
 
 // src/adapter/host.ts
 function hostCaps(api) {
@@ -2669,7 +2669,7 @@ async function readTtConfig(uid, fresh = false) {
   configCache.set(userKey(uid), { at: Date.now(), value });
   return value;
 }
-var SELF_VERSION = "0.5.12-v1";
+var SELF_VERSION = "0.5.12-v2";
 var PEER_TTL_MS = 20000;
 var peer = { at: 0, state: "none" };
 var warnedPeerDenied = false;

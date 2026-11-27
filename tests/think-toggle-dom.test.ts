@@ -1,9 +1,11 @@
 import { expect, test } from 'bun:test';
 import { originalUUIDPlugin } from '../scripts/patches.mjs';
 
-// Optional local DOM runner; provide DOM_MODULE without downloading dependencies.
-test.skipIf(!process.env.DOM_MODULE)('thinking toggle: live ON/OFF, original parity, and zero empty translation cells', async () => {
-  const { JSDOM } = await import(process.env.DOM_MODULE!);
+// Required DOM regression: use installed jsdom or point DOM_MODULE at a local installation.
+test('thinking toggle: live ON/OFF, original parity, and zero empty translation cells', async () => {
+  const { JSDOM } = await import(process.env.DOM_MODULE || 'jsdom').catch(() => {
+    throw new Error('DOM regression requires local jsdom. Run DOM_MODULE=/path/to/jsdom/lib/api.js bun run test; see README 검증.');
+  });
   const build = await Bun.build({ entrypoints: ['tests/fixtures/think-toggle.ts'], target: 'browser', plugins: [originalUUIDPlugin] });
   expect(build.success).toBe(true);
   const script = await build.outputs[0]!.text();
@@ -86,6 +88,29 @@ test.skipIf(!process.env.DOM_MODULE)('thinking toggle: live ON/OFF, original par
     expect(explicit.document.querySelector('[name="paraKeepTags"]').value).toBe('<think>');
     await toggle(explicit, false);
     expect((await translate(explicit, 'off')).translated.length).toBe(4);
+    // Real original form: OFF accepts 487 chars, ON repopulates only 475,
+    // then saving the untouched form must preserve all 487 stored characters.
+    const longTags = Array.from({ length: 61 }, (_, i) => `tag${String(i).padStart(4, '0')}`).join(' ');
+    expect(longTags.length).toBe(487);
+    const long = await setup(false, false, longTags);
+    expect(long.document.querySelector('[name="paraKeepTags"]').value).toBe(longTags);
+    await toggle(long, true);
+    expect(long.thinkTestKeepTags()).toBe(longTags);
+    expect(long.document.querySelector('[name="paraKeepTags"]').value.length).toBe(475);
+    await toggle(long, true);
+    expect(long.thinkTestKeepTags()).toBe(longTags);
+    expect(long.thinkTestKeepTags().length).toBe(487);
+    await toggle(long, false);
+    expect(long.thinkTestKeepTags()).toBe(longTags);
+    expect(long.document.querySelector('[name="paraKeepTags"]').value).toBe(longTags);
+    // The preservation guard must not undo deliberate shorter edits or clearing.
+    await toggle(long, true);
+    long.document.querySelector('[name="paraKeepTags"]').value = longTags.slice(0, 100);
+    await toggle(long, true);
+    expect(long.thinkTestKeepTags()).toBe(longTags.slice(0, 100));
+    long.document.querySelector('[name="paraKeepTags"]').value = '';
+    await toggle(long, true);
+    expect(long.thinkTestKeepTags()).toBe('');
     expect(errors).toEqual([]);
   } finally {
     for (const w of windows) w.close();

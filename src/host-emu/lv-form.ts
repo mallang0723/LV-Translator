@@ -117,7 +117,7 @@ function build(cls: Classes, hasChat: boolean): string {
       </section>
       <section class="tpg-group" data-lv-section="exclude">
         <h5 class="${cls.title}">번역하지 않을 부분</h5>
-        ${switchRow(cls, 'excludeThinking', '생각 블록 번역 제외', '기본 켜짐. think·thinking·reasoning 블록을 번역 요청에서 빼고 원문으로 둡니다. 끄면 원작처럼 별도로 제외하지 않습니다. 사용자별 모든 채팅에 적용되며 저장 즉시 반영됩니다.')}
+        ${switchRow(cls, 'excludeThinking', '생각 블록 번역 제외', '기본 켜짐. think·thinking·reasoning 블록을 번역 요청에서 빼고 원문으로 둡니다. Lumiverse의 생각 자동 분리(Auto-parse)가 켜져 있으면 화면에 보이는 메시지는 대개 이미 걷혀 있어 차이가 없습니다. 자동 분리를 끈 경우, 구분자와 다른 생각 태그, 화면 밖 번역, 가져오거나 고친 메시지에 적용됩니다. 끄면 원작처럼 별도로 제외하지 않습니다.')}
         ${switchRow(cls, 'protectHtml', 'HTML 태그·속성, <style>, <script> 는 그대로 두고 글자만 번역')}
         ${switchRow(cls, 'protectCode', '코드 블록(```) 은 번역하지 않음')}
         <p class="${cls.help}">태그 이름으로 빼는 것은 위 「문단 번역」의 「번역에서 제외할 태그」에 적으세요(원작 기능: 번역 요청에 보내지 않고 번역 화면에 원문 그대로 둡니다). 아래 제외 규칙은 글자 규칙만 받습니다. &lt;태그&gt; 줄을 적고 저장하면 그 태그는 「번역에서 제외할 태그」로 옮겨집니다. 생각 블록 번역 제외를 켜면 think·thinking·reasoning을 목록에 적지 않아도 됩니다. 끈 경우에도 목록에 직접 적은 태그는 원작처럼 제외됩니다.</p>

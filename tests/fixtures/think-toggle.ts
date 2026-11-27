@@ -10,6 +10,7 @@ Object.assign(window, {
   setupThinkTest(baseline: boolean, initial = true, keepTags = '', parsed = false) {
     let enabled = initial;
     let config: any = { paragraph: { keepTags }, defaults: {}, chats: {} };
+    (window as any).thinkTestKeepTags = () => config.paragraph.keepTags;
     const requests: string[] = [];
     (window as any).thinkTestRequests = requests;
     const tags = ['think', 'thinking', 'reasoning'];

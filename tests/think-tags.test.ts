@@ -99,3 +99,31 @@ describe('thinking exclusion setting', () => {
     expect(file.config.paragraph.keepTags).toBe(raw);
   });
 });
+
+
+describe('long keep-tags survive setting switches', () => {
+  test.each([476, 487, 500])('%i characters survive OFF → ON → form save → OFF', async (length) => {
+    const tags = Array.from({ length: 70 }, (_, i) => `tag${String(i).padStart(4, '0')}`).join(' ').slice(0, length);
+    let enabled = false;
+    let file: any = { config: { paragraph: { keepTags: tags } } };
+    const storage = thinkAwareStorage({
+      get: async () => ({ ...file, lvExcludeThinking: enabled }),
+      patch: async (p: Record<string, unknown>) => { file = { ...file, ...p }; return { ...file, lvExcludeThinking: enabled }; },
+    });
+    const off: any = await storage.get();
+    enabled = true;
+    const on: any = await storage.patch({ config: off.config });
+    expect(file.config.paragraph.keepTags).toBe(tags);
+    // normalizeParagraph cuts at 500, then the field hides the injected prefix.
+    const visible = on.config.paragraph.keepTags.slice(0, 500).slice('think thinking reasoning '.length);
+    expect(visible.length).toBe(475);
+    await storage.patch({ config: { paragraph: { keepTags: visible } } });
+    expect(file.config.paragraph.keepTags).toBe(tags);
+    enabled = false;
+    const restored: any = await storage.patch({ config: { paragraph: { keepTags: visible } } });
+    expect(restored.config.paragraph.keepTags).toBe(tags);
+    // An explicit edit while OFF must still use the original behavior.
+    await storage.patch({ config: { paragraph: { keepTags: 'tracker' } } });
+    expect(file.config.paragraph.keepTags).toBe('tracker');
+  });
+});

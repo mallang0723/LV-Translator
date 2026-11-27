@@ -59,8 +59,14 @@ export function thinkAwareStorage<S extends { get(): Promise<Result>; patch(p: R
   let supplied = '';
   // Strip only the prefix we supplied, preserving explicitly configured thinking tags.
   const unprefix = (text: string) => {
-    if (text !== supplied.slice(0, LIMIT)) return text;
-    return saved;
+    const clipped = supplied.slice(0, LIMIT);
+    if (text === clipped) return saved;
+    // normalizeParagraph cuts the injected list to 500; the form then hides its 25-character prefix.
+    // Restore the saved tail when that unchanged 475-character field comes back on a later save.
+    // Match only that exact clipped value so shorter edits and clearing the field still work.
+    const visible = clipped.slice(THINK_TAGS.join(' ').length + 1);
+    if (saved.length > USER_KEEP_TAGS_MAX && text === visible) return saved;
+    return text;
   };
   const seen = (r: Result): Result => {
     // Nothing saved yet (no file, or a file with no `config`) reads as the original's defaults plus the thinking tags.
